@@ -4,6 +4,7 @@
 // recomputed in the browser and the live edge-case suite.
 
 import { el, fmt, mark, plural, replace, codeLink, testBadge, present, MIN_SAMPLES_FOR_P95 } from './format.js';
+import { policyLabel, policyOf } from './settings.js';
 
 function line(ok, ...content) {
   return el('li', { class: 'ev' }, mark(ok, ''), el('span', {}, ...content));
@@ -144,13 +145,16 @@ function evidence(id, ctx) {
       if (!data) return need('Station data summary not available.');
       return [
         info(`${fmt.int(data.not_geocoded)} stations without reliable coordinates left out instead of guessed`),
-        info(`${fmt.int(data.stations_with_several_quotes)} stations listed several times: priced with the ${about.planner?.price_policy || 'policy'} quote`),
+        info(`${fmt.int(data.stations_with_several_quotes)} stations listed several times: priced with the ${policyLabel(body ? policyOf(body) : 'median', about).toLowerCase()} quote${body ? ' in this plan' : ' by default'}`),
+        body && present(body.pipeline?.corridor?.stations_with_several_prices)
+          ? info(`${plural(body.pipeline.corridor.stations_with_several_prices, 'station')} near this route ${body.pipeline.corridor.stations_with_several_prices === 1 ? 'has' : 'have'} quotes that disagree (of ${fmt.int(body.pipeline.corridor.candidates)}): only those change with the price policy`)
+          : null,
       ];
     }
     case 'production_ready': {
       const p = about.planner || {};
       return [
-        info(`plan cache ${present(p.plan_cache_seconds) ? fmt.duration(p.plan_cache_seconds) : '—'}, up to ${present(p.cache_max_entries) ? fmt.int(p.cache_max_entries) : '—'} entries; single flight per route`),
+        info(`plan cache ${present(p.plan_cache_seconds) ? fmt.duration(p.plan_cache_seconds) : '—'}, up to ${present(p.cache_max_entries) ? fmt.int(p.cache_max_entries) : '—'} entries; route cache apart, ${present(p.route_cache_seconds) ? fmt.duration(p.route_cache_seconds) : '—'}, up to ${present(p.route_cache_max_entries) ? plural(p.route_cache_max_entries, 'route') : '—'}; single flight per route`),
         info(`timeouts ${present(p.http_connect_timeout_seconds) ? `${fmt.num(p.http_connect_timeout_seconds)} s connect / ${fmt.num(p.http_read_timeout_seconds)} s read` : '—'}, ${present(p.http_retries) ? fmt.int(p.http_retries) : '—'} retry`),
         info(`rate limit ${present(p.rate_limit_per_minute) ? fmt.int(p.rate_limit_per_minute) : '—'} requests per minute per IP; Server-Timing on every answer`),
       ];

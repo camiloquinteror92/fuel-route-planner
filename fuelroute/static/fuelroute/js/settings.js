@@ -23,10 +23,25 @@ export const START_TANK_MODES = [
 ];
 
 export const PRICE_POLICIES = [
-  { value: 'median', label: 'Median', help: 'the middle quote (default): one odd quote does not move it' },
+  { value: 'median', label: 'Median', help: 'the middle quote, or the average of the two when there are two (default)' },
   { value: 'min', label: 'Lowest', help: 'the cheapest quote: the best case' },
   { value: 'max', label: 'Highest', help: 'the most expensive quote: the worst case' },
 ];
+
+// What a price_policy value means on THIS server, in a word. "median" plans with the
+// price stored by load_stations: the median of the quotes, unless it ran with
+// PRICE_POLICY=min (then the stored price is the lowest quote and is called so).
+export function policyLabel(value, about) {
+  const loaded = about?.planner?.price_policy;
+  const label = (v) => PRICE_POLICIES.find((p) => p.value === v)?.label || v;
+  if (value === 'median' && loaded && loaded !== 'median') return `Stored (${String(label(loaded)).toLowerCase()})`;
+  return label(value) || '';
+}
+
+// The price policy a plan was computed with (the answer says; else the server's default).
+export function policyOf(body) {
+  return body?.vehicle?.price_policy ?? body?.pipeline?.corridor?.price_policy ?? 'median';
+}
 
 const pick = (about, ...path) => path.reduce((value, key) => (value === null || value === undefined ? value : value[key]), about);
 

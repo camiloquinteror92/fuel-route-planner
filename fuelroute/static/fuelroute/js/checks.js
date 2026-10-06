@@ -24,20 +24,27 @@ function result(id, label, ok, expected, actual, detail = '') {
 // Fuel in the tank along the route, from the answer itself:
 // [{mile, fuel, kind: 'start' | 'arrive' | 'depart' | 'end', stop}], plus min,
 // max and the longest stretch between purchases.
-export function tankTrace({ distance, mpg, startFuel, stops }) {
+// `anchor`: each arrival is the API's own fuel_on_arrival_gallons (and the end its
+// end_fuel_gallons), so the rounding of the mile markers does not pile up over a long
+// trip (a 62.5-gal tank once showed 62.53). Without it everything is recomputed from
+// the start fuel, the legs and the purchases: the contract check compares the two.
+export function tankTrace({ distance, mpg, startFuel, stops, endFuel = null, anchor = false }) {
   const points = [{ mile: 0, fuel: startFuel, kind: 'start', stop: null }];
   let fuel = startFuel;
   let prev = 0;
   let longest = 0;
   for (const s of stops) {
     fuel -= (s.mile_marker - prev) / mpg;
-    points.push({ mile: s.mile_marker, fuel, kind: 'arrive', stop: s.stop ?? null, api: s.fuel_on_arrival_gallons });
+    const api = s.fuel_on_arrival_gallons;
+    if (anchor && Number.isFinite(api)) fuel = api;
+    points.push({ mile: s.mile_marker, fuel, kind: 'arrive', stop: s.stop ?? null, api });
     longest = Math.max(longest, s.mile_marker - prev);
     fuel += s.gallons;
     points.push({ mile: s.mile_marker, fuel, kind: 'depart', stop: s.stop ?? null });
     prev = s.mile_marker;
   }
   fuel -= (distance - prev) / mpg;
+  if (anchor && Number.isFinite(endFuel)) fuel = endFuel;
   longest = Math.max(longest, distance - prev);
   points.push({ mile: distance, fuel, kind: 'end', stop: null });
   const levels = points.map((p) => p.fuel);
@@ -56,12 +63,15 @@ export function fuelAt(trace, mile) {
   return pts.length ? pts[pts.length - 1].fuel : null;
 }
 
-export function planTrace(body) {
+// The plan's tank: the API's own levels by default (what the page draws and states).
+export function planTrace(body, { anchor = true } = {}) {
   return tankTrace({
     distance: body.route.distance_miles,
     mpg: body.vehicle.miles_per_gallon,
     startFuel: body.summary.start_fuel_gallons,
+    endFuel: body.summary.end_fuel_gallons,
     stops: body.fuel_stops,
+    anchor,
   });
 }
 
@@ -73,6 +83,7 @@ export function priceBlindTrace(body) {
     mpg: body.vehicle.miles_per_gallon,
     startFuel: body.summary.start_fuel_gallons,
     stops: blind.stops,
+    anchor: true,
   });
 }
 
@@ -126,22 +137,24 @@ export function runChecks(body, about = {}) {
     !empty ? 'Start tank full: the fuel in the tank at departure is not bought.'
       : unpriced ? 'Part of the fuel burned is not priced (see warnings).' : `${distance} mi ÷ ${mpg} mpg`));
 
-  // 6. Tank between empty and full; recomputed arrivals match the API.
+  // 6. Tank between empty and full (the API's levels: arrival, arrival + purchase, end);
+  // arrivals recomputed from the start fuel, the legs and the purchases match them.
   const trace = planTrace(body);
-  const slack = 0.05;
+  const recomputed = planTrace(body, { anchor: false });
+  const slack = 0.05; // the mile markers are rounded to a tenth of a mile
   const mismatches = [];
   let k = 0;
-  for (const p of trace.points) {
+  for (const p of recomputed.points) {
     if (p.kind !== 'arrive') continue;
     k += 1;
     const allowed = Math.max(slack, 0.01 + 0.005 * k);
     if (Math.abs(p.fuel - p.api) > allowed) mismatches.push(`stop ${p.stop}: ${p.fuel.toFixed(2)} vs ${p.api}`);
   }
-  const inRange = trace.min >= -slack && trace.max <= capacity + slack;
+  const inRange = cents(trace.min) >= 0 && cents(trace.max) <= cents(capacity);
   checks.push(result('tank_bounds', 'Tank stays between empty and full; arrivals match',
     inRange && mismatches.length === 0,
     `between 0 and ${capacity} gal`, `${trace.min.toFixed(2)} to ${trace.max.toFixed(2)} gal`,
-    mismatches.length ? `Arrival differs: ${mismatches.join('; ')}` : 'Fuel recomputed mile by mile from the stops.'));
+    mismatches.length ? `Arrival differs: ${mismatches.join('; ')}` : 'Levels of the answer; arrivals also recomputed mile by mile from the stops.'));
 
   // 7. Stops in route order and inside the corridor.
   const corridor = body.pipeline?.corridor?.corridor_miles ?? about?.planner?.corridor_miles;
@@ -176,6 +189,16 @@ export function runChecks(body, about = {}) {
     blind ? `≤ ${money(cents(blind.total_fuel_cost))}` : 'not applicable',
     before ? money(cents(before.total_fuel_cost)) : 'no comparison',
     !cmp ? 'No purchase on this trip, or the server does not send the comparison.' : !blind ? 'A price-blind driver cannot finish this route.' : 'Same stations, same start and end fuel, greedy optimum before consolidation.'));
+
+  // 10. The safety reserve (a what-if setting): never arrive anywhere with less.
+  const reserve = Number(vehicle.safety_reserve_gal) || 0;
+  const arrivals = [...stops.map((s) => s.fuel_on_arrival_gallons), summary.end_fuel_gallons].filter(Number.isFinite);
+  const lowest = arrivals.length ? Math.min(...arrivals) : null;
+  checks.push(result('safety_reserve', 'Never below the safety reserve',
+    reserve > 0 && lowest !== null ? cents(lowest) >= cents(reserve) : null,
+    reserve > 0 ? `at least ${gallons(cents(reserve))} on arrival anywhere` : 'not applicable',
+    lowest !== null ? `lowest arrival ${gallons(cents(lowest))}` : 'no arrival',
+    reserve > 0 ? 'Every stop and the destination, from the answer.' : 'No safety reserve in this plan (a what-if setting).'));
 
   return checks;
 }

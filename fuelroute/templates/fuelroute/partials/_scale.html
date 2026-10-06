@@ -24,14 +24,16 @@
         trip can call the routing server once per process, a what-if is only free on the process that has the route, and the
         rate limit counts per process.</p>
       <p><strong>Needed when:</strong> more than one process or machine serves the API.</p>
-      <p><strong>Here:</strong> one setting, <code>CACHES</code> to <code>RedisCache</code>; the plan cache, the route cache and
-        the rate limit then work across processes.</p>
+      <p><strong>Here:</strong> one setting, <code>CACHES</code> to <code>RedisCache</code>, plus <code>pip install redis</code>;
+        the plan cache, the route cache and the rate limit then work across processes. The single flight of the routing call,
+        the pacing of Nominatim, the counters of <code>/api/stats</code> and the test runner's lock stay per process: sharing
+        them needs a lock in the cache (<code>cache.add</code>).</p>
     </li>
     <li class="rung">
       <h4>Run our own OSRM</h4>
       <p><strong>Solves:</strong> the public demo server has no service guarantee, asks for about one request per second and only
-        knows cars. Every new trip waits for it: here a call takes <span data-scale="osrm">—</span>, while all our planning takes
-        <span data-scale="full">—</span>.</p>
+        knows cars. Every new trip waits for it: here a call takes <span data-scale="osrm">—</span>, while all our own code on a
+        new trip takes <span data-scale="ours">—</span>.</p>
       <p><strong>Needed when:</strong> new trips arrive faster than that, or the plan needs a truck profile (height, weight,
         hazardous loads) or a latency promise.</p>
       <p><strong>Here:</strong> the <code>OSRM_URL</code> environment variable; the code does not change.</p>
@@ -39,16 +41,17 @@
     <li class="rung">
       <h4>Stations in PostGIS</h4>
       <p><strong>Solves:</strong> numpy checks every station inside the route's box. That is fast for the
-        <span data-scale="stations">—</span> stations of the price file, but it grows with the number of stations.</p>
+        <span data-scale="stations">—</span> usable (geocoded) stations of the price file, but it grows with the number of stations.</p>
       <p><strong>Needed when:</strong> the station list grows a lot (a national feed) or prices change many times a day.</p>
       <p><strong>Here:</strong> stations in PostgreSQL with a spatial index; “stations near this line” becomes one indexed query and
         a price change is a row update.</p>
     </li>
     <li class="rung">
       <h4>Several instances behind a load balancer</h4>
-      <p><strong>Solves:</strong> one process answers a limited number of requests: about
+      <p><strong>Solves:</strong> one process answers a limited number of requests: at most about
         <span data-scale="cached_rps">—</span> plans from the cache per second, or <span data-scale="whatif_rps">—</span> what-if
-        replans per second, and holds <span data-scale="rss">—</span> of memory (measured above).</p>
+        replans per second (measured inside the process, without sockets: an upper bound), and holds
+        <span data-scale="rss">—</span> of memory (measured above).</p>
       <p><strong>Needed when:</strong> steady traffic gets close to that.</p>
       <p><strong>Here:</strong> the API keeps no state besides its caches (shared in Redis, first step) and the station data is
         read-only, so more instances give more throughput.</p>

@@ -222,7 +222,8 @@
   <ul class="prose-list">
     <li>Station coordinates are city-level: the farthest stop of this plan is <span data-live="derived.max_offroute" data-format="miles">—</span>
       from the route as computed, which is approximate.</li>
-    <li>The detour to each stop is not priced: about <span data-live="derived.detour_approx" data-format="miles">—</span> there and back on this plan (approx).</li>
+    <li>The detour to each stop is not priced: about <span data-live="derived.detour_approx" data-format="miles">—</span> there and back on this plan (approx.), roughly
+      <span data-live="derived.detour_cost" data-format="money">—</span> of fuel at the price it paid.</li>
     <li>No safety margin between stops by default: the plan uses the whole range, so
       <span data-live="derived.stops_arriving_empty" data-format="int">—</span> of its
       <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank. A safety

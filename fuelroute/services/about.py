@@ -265,8 +265,8 @@ REQUIREMENTS: list[dict] = [
         "brief": "Call the routing API as little as possible: one call is ideal, two or three acceptable.",
         "how": (
             "One OSRM call per new trip, {retry_rule}. A repeated trip, the other start_tank mode, every what-if "
-            "setting and the planner page reuse the cached plan or route (kept {ttl_text} in each server process) "
-            "with no call. "
+            "setting and the planner page reuse the cached plan (kept {ttl_text}) or route (kept {route_ttl_text}, "
+            "in a cache of its own so that what-ifs never push it out) in each server process, with no call. "
             "meta.external_api_calls counts the calls on every response, errors included, and /api/stats counts "
             "them per service since the server started."
         ),
@@ -277,6 +277,7 @@ REQUIREMENTS: list[dict] = [
             "test_api::test_identical_concurrent_requests_make_one_routing_call",
             "test_api::test_errors_report_the_external_calls_already_made",
             "test_what_if::test_settings_are_in_the_plan_cache_key_not_the_route_cache_key",
+            "test_what_if::test_a_flood_of_plans_does_not_evict_the_route",
         ],
     },
     {
@@ -343,9 +344,11 @@ REQUIREMENTS: list[dict] = [
         "kind": "implicit",
         "brief": "Behave like a service, not a script.",
         "how": (
-            "Station data lives in numpy arrays reloaded when the data version changes; plans and routes are "
-            "cached for {ttl} s; identical concurrent trips share one routing call; a pooled HTTPS client with "
-            "timeouts; a rate limit; key=value logs; Server-Timing, /api/stats and /api/about."
+            "Station data lives in numpy arrays reloaded when the data version changes; plans are cached for "
+            "{ttl} s and routes for {route_ttl} s, in separate caches; identical concurrent trips share one routing "
+            "call; a pooled HTTPS client with timeouts; a rate limit; key=value logs; Server-Timing, /api/stats and "
+            "/api/about; the page's test runner is off unless the server is the local development server or it is "
+            "turned on explicitly."
         ),
         "sources": ["osrm.get_route", "http.client", "middleware.rate_limit", "metrics.route_metrics"],
         "tests": [
@@ -363,12 +366,16 @@ REQUIREMENTS: list[dict] = [
             "routing service is faked): the greedy against an exact dynamic-programming solution, the corridor "
             "search against brute force, the price file loader, the API end to end and this page's contract. The "
             "page reads the report of the last local run and, when the server runs on your own machine, runs the "
-            "whole suite itself (POST /api/tests/run) and shows every test with what it checks."
+            "whole suite itself (POST /api/tests/run, only under the development server and only from the page "
+            "on that machine) and shows every test with what it checks. The page's own arithmetic (contract "
+            "checks, what-if answers) is tested in Node.js when it is installed."
         ),
         "sources": ["testrunner.run_tests", "testrunner.runner_status"],
         "tests": [
             "test_testrunner::test_run_answers_every_test_grouped_by_file",
             "test_testrunner::test_runner_answers_403_unless_the_request_is_local",
+            "test_testrunner::test_the_runner_is_opt_in",
+            "test_js_logic::test_contract_checks_see_the_safety_reserve_and_a_full_tank_without_slack",
         ],
     },
 ]
@@ -861,8 +868,8 @@ def _data_summary() -> dict:
     return summary
 
 
-def _plan_cache_seconds() -> int | None:
-    timeout = settings.CACHES.get("default", {}).get("TIMEOUT", 300)
+def _plan_cache_seconds(alias: str = "default") -> int | None:
+    timeout = settings.CACHES.get(alias, {}).get("TIMEOUT", 300)
     return None if timeout is None else int(timeout)
 
 
@@ -887,6 +894,9 @@ def _planner(config: dict) -> dict:
         "price_policy": config["PRICE_POLICY"],
         "plan_cache_seconds": _plan_cache_seconds(),
         "cache_max_entries": settings.CACHES.get("default", {}).get("OPTIONS", {}).get("MAX_ENTRIES"),
+        # Prepared routes live in their own cache, apart from the plans (see settings.CACHES).
+        "route_cache_seconds": _plan_cache_seconds("routes") if "routes" in settings.CACHES else None,
+        "route_cache_max_entries": settings.CACHES.get("routes", {}).get("OPTIONS", {}).get("MAX_ENTRIES"),
         "rate_limit_per_minute": config["RATE_LIMIT_PER_MINUTE"],
         "http_retries": config["HTTP_RETRIES"],
         "http_connect_timeout_seconds": config["HTTP_CONNECT_TIMEOUT_SECONDS"],
@@ -949,6 +959,8 @@ def _template_values(config: dict) -> dict:
         "rate": config["RATE_LIMIT_PER_MINUTE"],
         "ttl": _plan_cache_seconds(),
         "ttl_text": _duration_text(_plan_cache_seconds()),
+        "route_ttl": _plan_cache_seconds("routes"),
+        "route_ttl_text": _duration_text(_plan_cache_seconds("routes")),
         "django_latest": config["DJANGO_LATEST_STABLE"],
         "django_checked_on": config["DJANGO_LATEST_CHECKED_ON"],
     }

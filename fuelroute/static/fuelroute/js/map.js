@@ -6,15 +6,20 @@
 // Popups are built with DOM nodes, never HTML strings.
 //
 // Framing: the trip stays framed when the box changes size (window resize, phone
-// rotation, a link opened while the layout settles) until the user pans or zooms;
-// the padding leaves room for the controls. On a phone the price legend starts
-// folded, so it does not cover half of the map.
+// rotation, a link opened while the layout settles) until the user pans or zooms.
+// The padding keeps the trip clear of the layer switch and the price legend (right
+// side) where it costs it the least (to their left, or between them), and the fit uses
+// a fine zoom step, so a coast-to-coast trip fills the width instead of a band at the top. On a
+// phone the price legend starts folded, so it does not cover half of the map.
 
 import { el, fmt } from './format.js';
 
 const USA_CENTER = [39.5, -98.35];
 const USA_ZOOM = 4;
 const PHONE = '(max-width: 759.98px)';
+// Zoom step of the fit only (the +/- buttons keep the map's half steps).
+const FIT_SNAP = 0.1;
+const EDGE = 24;
 
 function token(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -82,18 +87,31 @@ export function createMap(container, { onStop, why } = {}) {
   let userMoved = false; // the user panned or zoomed: stop re-framing
   let framing = false; // our own fitBounds / setView is running
 
-  // Room for the controls: the layer switch (top right) and the legend (bottom right).
-  function padding() {
-    const legendBox = container.querySelector('.map-legend');
-    const legend = legendBox ? legendBox.getBoundingClientRect() : null;
-    const room = (size, limit) => Math.min(size, limit);
-    return {
-      paddingTopLeft: [24, 24],
-      paddingBottomRight: [
-        legend ? room(legend.width + 16, container.clientWidth * 0.35) : 24,
-        legend ? room(legend.height + 16, container.clientHeight * 0.35) : 24,
-      ],
+  // Room for the controls on the right: the layer switch (top) and the price legend
+  // (bottom). The trip keeps clear of each one either beside it or above / below it,
+  // whichever combination lets it be drawn larger (a wide trip goes between them, a
+  // tall one to their left).
+  function padding(bounds) {
+    const size = (selector) => {
+      const node = container.querySelector(selector);
+      const box = node ? node.getBoundingClientRect() : null;
+      return box && box.width && box.height
+        ? { w: Math.min(box.width + 16, container.clientWidth * 0.35), h: Math.min(box.height + 16, container.clientHeight * 0.35) }
+        : null;
     };
+    const layers = size('.leaflet-control-layers');
+    const legend = size('.map-legend');
+    const options = [];
+    for (const layersBeside of layers ? [false, true] : [false]) {
+      for (const legendBeside of legend ? [false, true] : [false]) {
+        const right = Math.max(EDGE, layersBeside ? layers.w : 0, legendBeside ? legend.w : 0);
+        const top = layers && !layersBeside ? Math.max(EDGE, layers.h) : EDGE;
+        const bottom = legend && !legendBeside ? Math.max(EDGE, legend.h) : EDGE;
+        options.push({ paddingTopLeft: [EDGE, top], paddingBottomRight: [right, bottom] });
+      }
+    }
+    const zoom = (o) => map.getBoundsZoom(bounds, false, L.point(o.paddingTopLeft).add(L.point(o.paddingBottomRight)));
+    return options.reduce((best, o) => (zoom(o) > zoom(best) ? o : best));
   }
 
   function frame() {
@@ -101,9 +119,12 @@ export function createMap(container, { onStop, why } = {}) {
     map.invalidateSize();
     if (!lastBounds || userMoved) return;
     framing = true;
+    const snap = map.options.zoomSnap;
+    map.options.zoomSnap = FIT_SNAP;
     try {
-      map.fitBounds(lastBounds, { ...padding(), animate: false });
+      map.fitBounds(lastBounds, { ...padding(lastBounds), animate: false });
     } finally {
+      map.options.zoomSnap = snap;
       framing = false;
     }
   }

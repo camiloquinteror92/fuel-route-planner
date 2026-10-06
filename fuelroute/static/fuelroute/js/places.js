@@ -2,8 +2,11 @@
 // GET /api/places, the server's offline index of US places (0 external calls).
 //
 // Typing waits a moment before asking; arrow keys move, Enter picks, Escape closes,
-// the mouse works too. The part already typed is shown in bold. Suggestions only
-// help: "lat,lon" and any free text are still accepted, and the API decides.
+// the mouse works too. The part already typed is shown in bold, read the way the
+// server reads it ("st lou" is "Saint Lou…"). A place with no fuel prices (Alaska,
+// Hawaii) is shown dimmed with "no price data": choosing it gets the API's 422.
+// Suggestions only help: "lat,lon" and any free text are still accepted, and the API
+// decides.
 
 import { el, fmt, replace } from './format.js';
 
@@ -17,18 +20,53 @@ function fold(text) {
   return String(text).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ');
 }
 
-// How many characters at the start of `label` spell what was typed (0 if they do not):
-// "chi, il" highlights "Chi" of "Chicago, IL".
-export function typedPrefixLength(label, typed) {
-  const want = fold(String(typed).split(',')[0]).trimStart();
-  if (!want) return 0;
+// The words typed, as the server compares names (services/text.py, normalize_place):
+// lower case, no accents or punctuation, a leading "The" dropped, a leading compass
+// letter spelled out and "St", "Ste", "Ft", "Mt", "Pt" expanded ("st lou" -> saint, lou).
+const TOKENS = { st: 'saint', ste: 'sainte', ft: 'fort', mt: 'mount', pt: 'point' };
+const DIRECTIONS = { n: 'north', s: 'south', e: 'east', w: 'west' };
+
+export function typedWords(typed) {
+  let words = fold(String(typed).split(',')[0]).replace(/'/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+  if (words.length > 1 && words[0] === 'the') words = words.slice(1);
+  if (words.length > 1 && DIRECTIONS[words[0]]) words = [DIRECTIONS[words[0]], ...words.slice(1)];
+  return words.map((word) => TOKENS[word] ?? word);
+}
+
+// How many characters at the start of `word` spell `want` (letters and digits, folded).
+function spelled(word, want) {
   let got = '';
-  for (let i = 0; i < label.length; i++) {
-    got += fold(label[i]);
+  for (let i = 0; i < word.length; i++) {
+    const c = fold(word[i]).replace(/[^a-z0-9]/g, '');
+    if (!c) continue;
+    got += c;
     if (got === want) return i + 1;
     if (!want.startsWith(got)) return 0;
   }
   return 0;
+}
+
+// The label cut into [text, bold] pieces: in each of its first words, the part that
+// spells the word typed at that place ("st lou" -> **Saint** **Lou**is, MO).
+export function highlight(label, typed) {
+  const want = typedWords(typed);
+  const comma = label.lastIndexOf(', ');
+  const name = comma >= 0 ? label.slice(0, comma) : label;
+  const pieces = [];
+  let w = 0;
+  for (const part of name.split(/([\s-]+)/)) {
+    if (!part) continue;
+    if (/^[\s-]+$/.test(part)) {
+      pieces.push([part, false]);
+      continue;
+    }
+    const cut = w < want.length ? spelled(part, want[w]) : 0;
+    if (cut) pieces.push([part.slice(0, cut), true], [part.slice(cut), false]);
+    else pieces.push([part, false]);
+    w = cut && cut === part.length ? w + 1 : want.length; // a word only partly typed ends the match
+  }
+  if (comma >= 0) pieces.push([label.slice(comma), false]);
+  return pieces.filter(([text]) => text);
 }
 
 function letters(text) {
@@ -83,14 +121,16 @@ export function createCombobox(input, listbox, { fetchPlaces, announce = () => {
   function render(typed) {
     shownFor = typed;
     replace(listbox, items.map((place, i) => {
-      const cut = typedPrefixLength(place.label, typed);
+      const priced = place.plannable !== false; // false in Alaska and Hawaii: no station of the file there
       return el('li', {
-        id: optionId(i), role: 'option', class: 'combo-option', 'aria-selected': 'false',
+        id: optionId(i), role: 'option', class: `combo-option${priced ? '' : ' is-unpriced'}`, 'aria-selected': 'false',
+        title: priced ? null : 'The price file has no station in this state: a trip to or from here cannot be priced.',
         onmousedown: (event) => event.preventDefault(), // keep the focus in the input
         onclick: () => choose(i),
         onmousemove: () => { if (active !== i) setActive(i); },
       },
-      el('span', { class: 'combo-label' }, cut ? [el('strong', {}, place.label.slice(0, cut)), place.label.slice(cut)] : place.label),
+      el('span', { class: 'combo-label' }, highlight(place.label, typed).map(([text, bold]) => (bold ? el('strong', {}, text) : text))),
+      priced ? null : el('span', { class: 'combo-tag' }, 'no price data'),
       place.population ? el('small', { class: 'combo-meta' }, `pop. ${fmt.int(place.population)}`) : null);
     }));
     if (!items.length) {

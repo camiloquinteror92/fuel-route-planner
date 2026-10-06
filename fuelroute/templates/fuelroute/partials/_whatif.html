@@ -41,7 +41,8 @@
       <input type="number" id="set-mpg" inputmode="decimal" aria-describedby="mpg-help mpg-error">
       <span class="unit">mpg</span>
     </div>
-    <p class="setting-help" id="mpg-help">Miles driven on one gallon. Fewer miles per gallon means more gallons for the same trip.</p>
+    <p class="setting-help" id="mpg-help">Miles driven on one gallon. Fewer miles per gallon means more gallons for the same trip.
+      The range stays as set, so the tank changes (range ÷ mpg); to keep the same tank, lower the range too.</p>
     <p class="field-error" id="mpg-error" hidden></p>
   </div>
 
@@ -96,12 +97,13 @@
   <fieldset class="setting" data-setting="price_policy" aria-describedby="price_policy-help">
     <legend>Price of a station quoted several times</legend>
     <div class="pills">
-      <label><input type="radio" name="price_policy" value="median" checked><span>Median</span></label>
+      <label><input type="radio" name="price_policy" value="median" checked><span data-policy-label="median">Median</span></label>
       <label><input type="radio" name="price_policy" value="min"><span>Lowest</span></label>
       <label><input type="radio" name="price_policy" value="max"><span>Highest</span></label>
     </div>
-    <p class="setting-help" id="price_policy-help">The price file lists some stations more than once, with different prices. Median
-      (default) ignores one odd quote; lowest and highest are the best and the worst case.</p>
+    <p class="setting-help" id="price_policy-help">The price file lists some stations more than once, with different prices.
+      Median (default): the middle quote, or the average of the two when there are two. Lowest and highest are the best and
+      the worst case. Only the stations whose quotes disagree change price.</p>
     <p class="field-error" id="price_policy-error" hidden></p>
   </fieldset>
 

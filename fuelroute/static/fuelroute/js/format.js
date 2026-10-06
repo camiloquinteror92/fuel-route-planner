@@ -269,6 +269,7 @@ export function serverTimingDur(headers, name) {
 
 const TANK_REASONS = {
   full_tank: 'leaves with a full tank it did not pay for, and buys only what it needs to arrive',
+  last_stretch: 'leaves with less than the reserve: the last station is so far from the destination that this is all it can still have on arrival, and it must arrive with what it left with',
   reserve: 'leaves with the reserve and must arrive with the same amount (borrowed and returned: not a safety margin)',
   first_station_beyond_reserve: 'leaves with enough fuel to reach the first station, and must arrive with the same amount',
   safety_reserve: 'leaves with enough fuel to reach the first station with the safety reserve still in the tank, and must arrive with the same amount',
@@ -278,6 +279,19 @@ const CAPPED = '; capped: the last stretch is too long to arrive with that much,
 
 function sameName(a, b) {
   return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+// The detour to the stations, which the plan does not price: each stop's distance from
+// the route there and back (city-level coordinates, so approximate), and that fuel at the
+// average price the plan paid.
+export function detourOf(body) {
+  const offsets = (body?.fuel_stops || []).map((s) => Number(s.distance_from_route_miles) || 0);
+  if (!offsets.length) return { miles: null, gallons: null, cost: null, max: null };
+  const miles = sum(offsets) * 2;
+  const mpg = body.vehicle?.miles_per_gallon;
+  const price = body.summary?.average_price_paid;
+  const gallons = mpg ? miles / mpg : null;
+  return { miles, gallons, cost: present(gallons) && present(price) ? gallons * price : null, max: Math.max(...offsets) };
 }
 
 export function derive(state, helpers) {
@@ -360,7 +374,9 @@ export function derive(state, helpers) {
   d.has_unpriced = d.is_empty && summary.unpriced_fuel_gallons > 0;
   // "Every mile paid" only when it is true: nothing burned without a station to buy from.
   d.pays_every_mile = d.is_empty && !d.has_unpriced;
-  d.full_tank_gallons = d.is_full ? summary.unpriced_fuel_gallons : null;
+  // The free tank of start_tank=full is the whole tank (the unpriced fuel is less when the
+  // plan keeps a safety reserve at the end).
+  d.full_tank_gallons = d.is_full ? summary.start_fuel_gallons : null;
   d.fuel_needed_gal = distance / vehicle.miles_per_gallon;
   d.cost_per_mile = distance ? summary.total_fuel_cost / distance : null;
   d.has_stops = summary.number_of_stops > 0;
@@ -396,6 +412,9 @@ export function derive(state, helpers) {
   d.extra_stops = savings?.extra_stops ?? null;
   d.extra_stops_positive = (savings?.extra_stops ?? 0) > 0;
   d.fewer_stops = (savings?.extra_stops ?? 0) < 0 ? -savings.extra_stops : null;
+  // The count and the word in agreement: "1 more stop", "2 more stops".
+  d.extra_stops_text = d.extra_stops_positive ? plural(savings.extra_stops, 'more stop') : null;
+  d.fewer_stops_text = d.fewer_stops ? plural(d.fewer_stops, 'fewer stop') : null;
   d.price_blind_cost = blind?.total_fuel_cost ?? null;
   d.price_blind_stops = blind?.number_of_stops ?? null;
   d.corridor_avg_price = cmp?.corridor_average?.price_per_gallon ?? null;
@@ -421,14 +440,16 @@ export function derive(state, helpers) {
   d.tank_min = trace.min;
   d.tank_max = trace.max;
   d.longest_stretch = trace.longest;
-  d.tank_ok = trace.min >= -0.05 && trace.max <= vehicle.tank_gallons + 0.05;
+  // The API's own levels, so no rounding slack is needed (same test as the contract check).
+  d.tank_ok = Math.round(trace.min * 100) >= 0 && Math.round(trace.max * 100) <= Math.round(vehicle.tank_gallons * 100);
   d.stretch_ok = trace.longest <= vehicle.max_range_miles + 0.05;
   const blindTrace = priceBlindTrace(body);
   d.price_blind_longest = blindTrace ? blindTrace.longest : null;
 
-  const offsets = body.fuel_stops.map((s) => s.distance_from_route_miles);
-  d.max_offroute = offsets.length ? Math.max(...offsets) : null;
-  d.detour_approx = offsets.length ? sum(offsets) * 2 : null;
+  const detour = detourOf(body);
+  d.max_offroute = detour.max;
+  d.detour_approx = detour.miles;
+  d.detour_cost = detour.cost;
   // The range is used literally: how many stops the plan reaches with the tank empty.
   const arrivals = body.fuel_stops.map((s) => s.fuel_on_arrival_gallons);
   d.stops_arriving_empty = arrivals.filter((g) => g === 0).length;

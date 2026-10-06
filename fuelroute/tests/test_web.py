@@ -347,15 +347,15 @@ def test_the_map_keeps_the_trip_framed_until_the_user_moves_it():
 
 
 def _questions() -> list[dict]:
-    """The interview questions of whatif.js: [{"id", "set": {param: value}}]."""
+    """The interview questions of whatif.js: [{"id", "set": {param: value}, "keep_tank"}]."""
     source = js_sources()["whatif.js"]
     block = source.split("export const QUESTIONS = [", 1)[1].split("\n];", 1)[0]
     found = []
-    for qid, settings in re.findall(r"id: '(\w+)', set: \{ ([^}]*) \}", block):
+    for qid, settings, keep in re.findall(r"id: '(\w+)', set: \{ ([^}]*) \}(, keepTank: true)?", block):
         values = {}
         for key, raw in re.findall(r"(\w+): ('[^']*'|true|false|[\d.]+)", settings):
             values[key] = raw.strip("'") if raw.startswith("'") else raw
-        found.append({"id": qid, "set": values})
+        found.append({"id": qid, "set": values, "keep_tank": bool(keep)})
     return found
 
 
@@ -424,23 +424,34 @@ def test_start_tank_labels_are_the_apis(client):
 
 @pytest.mark.django_db
 def test_every_interview_question_is_answered_without_an_external_call(client, upstream, stations):
-    """Each question changes one API setting; after the trip is routed once, each answer
-    is planned on the cached route: 0 external calls, and the API names what changed."""
+    """Each question changes one thing (a new mpg with the same tank also changes the range);
+    after the trip is routed once, each answer is planned on the cached route: 0 external
+    calls, and the API names what changed."""
+    from fuelroute.services.planner import SETTING_NAMES, PlanSettings
+
     questions = _questions()
     assert 6 <= len(questions) <= 8
     upstream.respond(OK_ROUTE)
     assert get(client).status_code == 200
+    defaults = PlanSettings.defaults()
     for question in questions:
         ((name, value),) = question["set"].items()
         assert name in (*web.WHAT_IF_PARAMS, "start_tank"), question
-        response = get(client, **{name: value})
+        params = {name: value}
+        if question["keep_tank"]:  # "8 mpg with the same tank": the range follows
+            params["max_range_miles"] = str(defaults.tank_gallons * float(value))
+        response = get(client, **params)
         body = response.json()
         assert body["meta"]["external_api_calls"] == 0, question
         if response.status_code == 200:
-            assert body["meta"]["settings_changed"] == [name], question
+            assert body["meta"]["settings_changed"] == [n for n in SETTING_NAMES if n in params], question
+            if question["keep_tank"]:
+                assert body["vehicle"]["tank_gallons"] == defaults.tank_gallons
         else:
             assert response.status_code == 422, (question, body)
     assert len(upstream.calls) == 1
+    # The "8 mpg" question keeps the tank: an interviewer means the same truck.
+    assert any(q["keep_tank"] and "mpg" in q["set"] for q in questions)
 
 
 # --- city suggestions, play trip, tests, scale ---------------------------------------------------

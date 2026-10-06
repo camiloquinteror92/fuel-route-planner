@@ -17,7 +17,9 @@ import * as apitab from './apitab.js';
 import * as scale from './scale.js';
 import { createCases } from './cases.js';
 import { SETTING_NAMES, onlyChanged, sameSettings, settingsFromQuery } from './settings.js';
-import { createWhatIf, answerText, changeSummary, isDefaultTrip, questionOf, renderSettingsLine, tripKey } from './whatif.js';
+import {
+  createWhatIf, answerText, changeSummary, isDefaultTrip, questionOf, questionSettings, renderSettingsLine, tripKey,
+} from './whatif.js';
 import { createPlayer } from './player.js';
 import { createCombobox } from './places.js';
 import { createTestRunner } from './testrunner.js';
@@ -135,7 +137,7 @@ function pageUrl(params) {
 
 // The header's link to "What if…" says what differs from the assignment defaults.
 function updateSettingsSummary() {
-  const text = changeSummary(whatif.read());
+  const text = changeSummary(whatif.read(), state.about);
   $('#settings-summary').textContent = text ? `What if: ${text}` : 'What if… (assignment defaults)';
   $('#settings-link').classList.toggle('is-changed', Boolean(text));
   whatifCard.classList.toggle('has-changes', Boolean(text));
@@ -291,7 +293,7 @@ function rememberWhatIf(params, body) {
   const key = tripKey(params);
   if (isDefaultTrip(params)) state.baselines.set(key, { status: 'ok', body });
   else ensureBaseline(params);
-  const question = questionOf(params);
+  const question = questionOf(params, whatif.defaults());
   if (question) state.answers.set(`${key}|${question.id}`, body);
 }
 
@@ -595,7 +597,7 @@ function ask(question) {
       toast(`Asked on ${trip.start} → ${trip.finish}`);
     }
   }
-  const { start_tank: tank = 'empty', ...rest } = question.set;
+  const { start_tank: tank = 'empty', ...rest } = questionSettings(question, whatif.defaults());
   planTrip({ ...trip, start_tank: tank, settings: onlyChanged(rest, whatif.defaults()) }, { history: 'push', origin: 'interview question' });
 }
 

@@ -4,6 +4,7 @@
 
 import { el, fmt, mark, plural, replace, slug } from './format.js';
 import { absolute, routeUrl } from './api.js';
+import { policyLabel, policyOf } from './settings.js';
 
 const MIN_STOP_DEFAULT_KEY = 'min_stop_gallons';
 
@@ -113,7 +114,8 @@ export function renderStops(container, body, about, { onStop } = {}) {
       body.summary.note ? el('p', { class: 'muted' }, body.summary.note) : null));
     return;
   }
-  const policy = about?.planner?.price_policy;
+  // The quote THIS plan used (median, lowest or highest: a what-if setting).
+  const policy = policyLabel(policyOf(body), about).toLowerCase();
   let prev = 0;
   const rows = stops.map((s) => {
     const leg = s.mile_marker - prev;
@@ -121,7 +123,7 @@ export function renderStops(container, body, about, { onStop } = {}) {
     const quotes = s.price_quotes;
     const priceTitle = quotes
       ? quotes.count > 1
-        ? `${quotes.count} quotes in the file: ${fmt.price_exact(quotes.min)}–${fmt.price_exact(quotes.max)}${policy ? `; using the ${policy}` : ''} (${fmt.price_exact(s.price_per_gallon)})`
+        ? `${quotes.count} quotes in the file: ${fmt.price_exact(quotes.min)}–${fmt.price_exact(quotes.max)}${policy ? `; this plan uses the ${policy} (${fmt.price_exact(s.price_per_gallon)})` : ''}`
         : `One quote in the file: ${fmt.price_exact(s.price_per_gallon)}`
       : null;
     const why = whyText(s, body, about);

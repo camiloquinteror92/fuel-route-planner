@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Spotter Fuel Route API",
-    "description": "Route + cheapest fuel stops inside the USA. Start the server with `python manage.py runserver` and run the requests in order. Run each request twice: the second run is served from the cache (see `meta.external_api_calls` and the `X-Response-Time-ms` header). Requests 1-4 make one call each to the public OSRM server the first time. Every /api/route response has a `Server-Timing` header with the time of each step (the Postman console of request 1 prints it), `summary.comparison` (the same trip for a price-blind driver) and `pipeline` (how the plan was computed). Requests 9 and 10 read the server's own counters and self-description.",
+    "description": "Route + cheapest fuel stops inside the USA. Start the server with `python manage.py runserver` and run the requests in order. Run each request twice: the second run is served from the cache (see `meta.external_api_calls` and the `X-Response-Time-ms` header). Requests 1-4 make one call each to the public OSRM server the first time. Every /api/route response has a `Server-Timing` header with the time of each step (the Postman console of request 1 prints it), `summary.comparison` (the same trip for a price-blind driver) and `pipeline` (how the plan was computed). Requests 9 and 10 read the server's own counters and self-description. Requests 12-18 are what-if questions on the trip of request 1: each changes one setting (mpg, range, corridor, price policy, consolidation, safety reserve), re-plans on the cached route with 0 external calls and lists the changed settings in `meta.settings_changed`. Requests 19-20 are the type-ahead of places (offline). Requests 21-22 list the tests and run the whole suite (only when the server runs on your own machine; anywhere else the run answers 403).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -481,6 +481,506 @@
               "pm.test('location_outside_usa', () => pm.expect(body.error).to.eql('location_outside_usa'));",
               "pm.test('says which field', () => pm.expect(body.field).to.eql('start'));",
               "pm.test('no external call (not even a geocoding one)', () => pm.expect(body.meta.external_api_calls).to.eql(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "12. What-if: a thirstier truck (mpg=6), same trip, 0 calls",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&mpg=6",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "mpg",
+              "value": "6",
+              "description": "Miles per gallon, 3 to 30 (default 10)."
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('re-planned on the cached route: no external call (after request 1)', () => {",
+              "  pm.expect(body.meta.external_api_calls).to.eql(0);",
+              "  pm.expect(body.meta.route_cache).to.eql('hit');",
+              "});",
+              "console.log('changed:', body.meta.settings_changed.join(', '), '| stops', body.summary.number_of_stops,",
+              "  '| cost $' + body.summary.total_fuel_cost, '| gallons', body.summary.total_gallons_purchased);",
+              "pm.test('mpg is the changed setting', () => pm.expect(body.meta.settings_changed).to.include('mpg'));",
+              "pm.test('every mile is paid at 6 mpg', () => {",
+              "  pm.expect(body.summary.total_gallons_purchased).to.be.closeTo(body.route.distance_miles / 6, 0.1);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "13. What-if: keep a 10-gallon safety reserve (POST JSON)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Los Angeles, CA\",\n  \"safety_reserve_gal\": 10\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/route",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('re-planned on the cached route: no external call (after request 1)', () => {",
+              "  pm.expect(body.meta.external_api_calls).to.eql(0);",
+              "  pm.expect(body.meta.route_cache).to.eql('hit');",
+              "});",
+              "console.log('changed:', body.meta.settings_changed.join(', '), '| stops', body.summary.number_of_stops,",
+              "  '| cost $' + body.summary.total_fuel_cost, '| gallons', body.summary.total_gallons_purchased);",
+              "pm.test('never arrives anywhere with less than 10 gal', () => {",
+              "  body.fuel_stops.forEach((s) => pm.expect(s.fuel_on_arrival_gallons).to.be.at.least(10));",
+              "  pm.expect(body.summary.end_fuel_gallons).to.be.at.least(10);",
+              "  pm.expect(body.pipeline.tank.lowest_fuel_gallons).to.be.at.least(10);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "14. What-if: worst-case prices (price_policy=max)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&price_policy=max",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "price_policy",
+              "value": "max",
+              "description": "median (default) | min (best case) | max (worst case)"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('re-planned on the cached route: no external call (after request 1)', () => {",
+              "  pm.expect(body.meta.external_api_calls).to.eql(0);",
+              "  pm.expect(body.meta.route_cache).to.eql('hit');",
+              "});",
+              "console.log('changed:', body.meta.settings_changed.join(', '), '| stops', body.summary.number_of_stops,",
+              "  '| cost $' + body.summary.total_fuel_cost, '| gallons', body.summary.total_gallons_purchased);",
+              "pm.test('each stop is priced at its dearest quote', () => {",
+              "  body.fuel_stops.forEach((s) => pm.expect(s.price_per_gallon).to.eql(s.price_quotes.max));",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "15. What-if: no consolidation (the pure cheapest plan)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&consolidate=false",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "consolidate",
+              "value": "false"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('re-planned on the cached route: no external call (after request 1)', () => {",
+              "  pm.expect(body.meta.external_api_calls).to.eql(0);",
+              "  pm.expect(body.meta.route_cache).to.eql('hit');",
+              "});",
+              "console.log('changed:', body.meta.settings_changed.join(', '), '| stops', body.summary.number_of_stops,",
+              "  '| cost $' + body.summary.total_fuel_cost, '| gallons', body.summary.total_gallons_purchased);",
+              "pm.test('no stop was consolidated', () => {",
+              "  body.fuel_stops.forEach((s) => pm.expect(s.decision.consolidated).to.eql(false));",
+              "});",
+              "pm.test('costs exactly the pure optimum', () => {",
+              "  const pure = body.summary.comparison.optimum_before_consolidation;",
+              "  pm.expect(body.summary.total_fuel_cost).to.eql(pure.total_fuel_cost);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "16. What-if: a smaller tank and a wider corridor (max_range_miles=300, corridor_miles=25)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&max_range_miles=300&corridor_miles=25",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "max_range_miles",
+              "value": "300"
+            },
+            {
+              "key": "corridor_miles",
+              "value": "25"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('re-planned on the cached route: no external call (after request 1)', () => {",
+              "  pm.expect(body.meta.external_api_calls).to.eql(0);",
+              "  pm.expect(body.meta.route_cache).to.eql('hit');",
+              "});",
+              "console.log('changed:', body.meta.settings_changed.join(', '), '| stops', body.summary.number_of_stops,",
+              "  '| cost $' + body.summary.total_fuel_cost, '| gallons', body.summary.total_gallons_purchased);",
+              "pm.test('the tank is 300 / 10 = 30 gal and never overfilled', () => {",
+              "  pm.expect(body.vehicle.tank_gallons).to.eql(30);",
+              "  body.fuel_stops.forEach((s) => pm.expect(s.fuel_on_arrival_gallons + s.gallons).to.be.at.most(30.01));",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "17. Invalid what-if: mpg=50 -> 400 with the allowed range",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&mpg=50",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "mpg",
+              "value": "50"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 invalid_request', () => pm.response.to.have.status(400));",
+              "const body = pm.response.json();",
+              "pm.test('says the range', () => pm.expect(body.detail.mpg[0]).to.eql('Must be between 3 and 30.'));",
+              "pm.test('no external call', () => pm.expect(body.meta.external_api_calls).to.eql(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "18. Impossible what-if: a 45-gallon reserve leaves 50 usable miles -> 422",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&safety_reserve_gal=45",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "safety_reserve_gal",
+              "value": "45"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('422 no_reachable_fuel_station', () => pm.response.to.have.status(422));",
+              "const body = pm.response.json();",
+              "pm.test('explains the usable range', () => pm.expect(body.detail).to.include('usable range'));",
+              "console.log(body.detail);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "19. Places type-ahead: q=chi (offline, most populated first)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/places?q=chi&limit=8",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "places"
+          ],
+          "query": [
+            {
+              "key": "q",
+              "value": "chi"
+            },
+            {
+              "key": "limit",
+              "value": "8"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Chicago first', () => pm.expect(body.results[0].label).to.eql('Chicago, IL'));",
+              "pm.test('no external call', () => pm.expect(body.meta.external_api_calls).to.eql(0));",
+              "console.log(body.results.map((r) => r.label).join(' | '), '|', body.meta.took_ms + ' ms');"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "20. Places type-ahead with a state: q=san jos, ca",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/places?q=san jos, ca",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "places"
+          ],
+          "query": [
+            {
+              "key": "q",
+              "value": "san jos, ca"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('only California', () => body.results.forEach((r) => pm.expect(r.state).to.eql('CA')));",
+              "pm.test('San Jose first', () => pm.expect(body.results[0].label).to.eql('San Jose, CA'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "21. GET /api/tests (inventory and last run)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/tests",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "tests"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "console.log(body.inventory.files + ' files, ' + body.inventory.tests + ' tests; runner available:',",
+              "  body.runner.available, '-', body.runner.detail);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "22. POST /api/tests/run (runs pytest; local server only, about 10 s)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{baseUrl}}/api/tests/run",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "tests",
+            "run"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "if (pm.response.code === 200) {",
+              "  pm.test('no failed test', () => pm.expect(body.failed + body.errors).to.eql(0));",
+              "  console.log(body.passed + ' passed, ' + body.failed + ' failed, ' + body.skipped + ' skipped in ' + body.duration_s + ' s');",
+              "} else {",
+              "  pm.test('403 away from your machine, 409 while a run is going', () => pm.expect([403, 409]).to.include(pm.response.code));",
+              "  console.log(body.error, body.detail);",
+              "}"
             ]
           }
         }

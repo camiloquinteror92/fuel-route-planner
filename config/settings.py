@@ -154,6 +154,13 @@ FUEL_PLANNER = {
     "FUEL_PRICES_FILE": BASE_DIR / "data" / "fuel-prices-for-be-assessment.csv",
 }
 
+# Test runner of the planner page (POST /api/tests/run runs pytest on this machine).
+# Even when on, it only answers requests from the loopback address (127.0.0.1 / ::1)
+# without proxy headers: a deployment never runs processes for its visitors. Set
+# DISABLE_TEST_RUNNER=1 to turn it off completely.
+TEST_RUNNER_ENABLED = os.environ.get("DISABLE_TEST_RUNNER", "").strip().lower() in ("", "0", "false", "no")
+TEST_RUNNER_TIMEOUT_SECONDS = float(_env("TEST_RUNNER_TIMEOUT_SECONDS", "180"))
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

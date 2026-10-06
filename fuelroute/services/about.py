@@ -98,6 +98,8 @@ CODE_LINKS: dict[str, tuple[str, str]] = {
     "planner.settings": ("fuelroute/services/planner.py", "PlanSettings"),
     "optimizer.plan_fuel_stops": ("fuelroute/services/optimizer.py", "plan_fuel_stops"),
     "places.search": ("fuelroute/services/places.py", "PlaceIndex.search"),
+    "testrunner.run_tests": ("fuelroute/services/testrunner.py", "run_tests"),
+    "testrunner.runner_status": ("fuelroute/services/testrunner.py", "runner_status"),
 }
 
 # The assessment, requirement by requirement. ``brief`` / ``how`` are templates
@@ -354,10 +356,14 @@ REQUIREMENTS: list[dict] = [
             "A pytest suite that cannot touch the network (an autouse fixture makes any real HTTP call fail; the "
             "routing service is faked): the greedy against an exact dynamic-programming solution, the corridor "
             "search against brute force, the price file loader, the API end to end and this page's contract. The "
-            "page reads the report of the last local run."
+            "page reads the report of the last local run and, when the server runs on your own machine, runs the "
+            "whole suite itself (POST /api/tests/run) and shows every test with what it checks."
         ),
-        "sources": [],
-        "tests": [],
+        "sources": ["testrunner.run_tests", "testrunner.runner_status"],
+        "tests": [
+            "test_testrunner::test_run_answers_every_test_grouped_by_file",
+            "test_testrunner::test_runner_answers_403_unless_the_request_is_local",
+        ],
     },
 ]
 
@@ -377,6 +383,8 @@ ENDPOINTS = [
     {"method": "GET", "path": "/api/places", "description": "Type-ahead of US places (offline index, no external call)."},
     {"method": "GET", "path": "/api/stats", "description": "Requests, external calls and latency since this server process started."},
     {"method": "GET", "path": "/api/about", "description": "Versions, configuration, loaded data, requirements, tests and errors."},
+    {"method": "GET", "path": "/api/tests", "description": "The test inventory and the last test run."},
+    {"method": "POST", "path": "/api/tests/run", "description": "Run the test suite (only when the server runs on your own machine)."},
     {"method": "GET", "path": "/", "description": "Browsers are sent to the planner page; API clients get a JSON index."},
 ]
 

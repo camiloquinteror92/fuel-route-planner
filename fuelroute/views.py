@@ -4,6 +4,8 @@
 * ``GET /api/places``     -> type-ahead of US places from the offline index (``PlacesView``)
 * ``GET /api/stats``      -> requests, external calls and latency since start (``StatsView``)
 * ``GET /api/about``      -> versions, config, data, requirements, tests, errors (``AboutView``)
+* ``GET /api/tests``      -> the test inventory and the last run (``SuiteView``)
+* ``POST /api/tests/run`` -> run pytest on this machine, local requests only (``SuiteRunView``)
 * ``GET /``               -> browsers: redirect to the planner page; API clients: a small JSON index
 * anything else under ``/api/`` -> JSON 404
 
@@ -27,6 +29,7 @@ from rest_framework.views import APIView
 from rest_framework.views import exception_handler as drf_exception_handler
 
 from .serializers import PlacesRequestSerializer, RouteRequestSerializer
+from .services import testrunner
 from .services.about import build_about
 from .services.errors import PlannerError
 from .services.http import ExternalApiClient
@@ -155,6 +158,12 @@ class StatsView(APIView):
         return Response(route_metrics.snapshot(), headers={"Cache-Control": "no-store"})
 
 
+def _error_response(exc: PlannerError) -> Response:
+    body = exc.as_dict()
+    body["meta"] = no_calls_meta()
+    return Response(body, status=exc.status_code, headers=exc.headers)
+
+
 class PlacesView(APIView):
     """GET /api/places?q=chi[, il]&limit=8: US places whose name starts with ``q``.
 
@@ -186,6 +195,42 @@ class PlacesView(APIView):
         )
 
 
+class SuiteView(APIView):
+    """GET /api/tests: the test inventory (files, functions, one-line descriptions), the
+    last run (of this process, else of the last local ``pytest``) and whether this
+    request may start a run (``runner``)."""
+
+    def get(self, request):
+        return Response(
+            {
+                "runner": {
+                    **testrunner.runner_status(request),
+                    "running": testrunner.is_running(),
+                    "command": testrunner.display_command(),
+                },
+                "last_run": testrunner.last_run(),
+                "inventory": testrunner.inventory(),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+class SuiteRunView(APIView):
+    """POST /api/tests/run: run the whole pytest suite now and answer its results.
+
+    Local requests only (403 otherwise), one run at a time (409), a fixed command:
+    nothing in the request is read.
+    """
+
+    def post(self, request):
+        try:
+            testrunner.check_allowed(request)
+            result = testrunner.run_tests()
+        except PlannerError as exc:
+            return _error_response(exc)
+        return Response(result, headers={"Cache-Control": "no-store"})
+
+
 class AboutView(APIView):
     """GET /api/about: versions, configuration, loaded data, requirements -> code and tests,
     the last pytest run and the error catalog (``services/about.py``). 0 external calls."""
@@ -211,6 +256,8 @@ def index(request):
                 "GET /api/places": "q (the start of a US place name, 'chi' or 'chi, il'), limit: type-ahead",
                 "GET /api/stats": "requests, external calls and latency since the server started",
                 "GET /api/about": "versions, configuration, loaded data, requirements, tests and error codes",
+                "GET /api/tests": "the test inventory and the last run",
+                "POST /api/tests/run": "runs the test suite (only when the server runs on your machine)",
             },
             "example": request.build_absolute_uri("/api/route?start=New+York,+NY&finish=Los+Angeles,+CA"),
         }
@@ -221,7 +268,9 @@ def api_not_found(request, *args, **kwargs):
     return JsonResponse(
         {
             "error": "not_found",
-            "detail": f"No endpoint at {request.path}. Use /api/route, /api/places, /api/stats or /api/about.",
+            "detail": (
+                f"No endpoint at {request.path}. Use /api/route, /api/places, /api/stats, /api/about or /api/tests."
+            ),
             "meta": no_calls_meta(),
         },
         status=404,

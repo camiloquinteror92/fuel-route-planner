@@ -20,10 +20,16 @@ Scenarios (sequential, one thread, in this process, no sockets):
   the corridor search + the tank rules + the optimizer.
 * ``route_preparation``: decoding OSRM's polyline and preparing it (resample, US
   mask, simplify): the part of a NEW trip that is ours, not OSRM's.
+* ``new_trip_our_code``: a NEW trip through the whole Django stack with everything but
+  the wait for OSRM: the route cache and the plan cache are emptied before each
+  request and OSRM's answer (the one on disk) is replayed at once instead of sent
+  over the network. It is what our code adds to the routing call on a new trip.
 
 Results: latency p50 / p95 / mean / max in ms and requests per second
-(iterations / total time), plus the machine, the process memory (RSS) and the
-number of stations. ``/api/stats`` publishes the file (``load_benchmark``).
+(iterations / total time, one thread, no sockets: an upper bound for a served
+process), plus the machine (logical processors and physical cores), the process
+memory (RSS) and the number of usable (geocoded) stations. ``/api/stats`` publishes
+the file (``load_benchmark``).
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from pathlib import Path
 import django
 import numpy as np
 from django.conf import settings
+from django.core.cache import caches
 
 from . import http
 from .geocoding import geocode
@@ -54,7 +61,7 @@ from .osrm import (
 from .stations import get_station_arrays, stations_along_route
 
 START, FINISH = "New York, NY", "Los Angeles, CA"
-SCENARIOS = ("plan_cache_hit", "what_if_replan", "planning_no_network", "route_preparation")
+SCENARIOS = ("plan_cache_hit", "what_if_replan", "planning_no_network", "route_preparation", "new_trip_our_code")
 DESCRIPTIONS = {
     "plan_cache_hit": "A trip that was already planned: GET /api/route through the whole Django stack.",
     "what_if_replan": (
@@ -63,6 +70,10 @@ DESCRIPTIONS = {
     ),
     "planning_no_network": "The planner's own work on this route: corridor search, tank rules and optimizer.",
     "route_preparation": "Decoding OSRM's polyline and preparing the route (resample, US outline, simplify).",
+    "new_trip_our_code": (
+        "A new trip with OSRM's saved answer replayed at once: parsing and preparing the route, the corridor, "
+        "the optimizer, the comparison and the response; everything but the wait for OSRM."
+    ),
 }
 _lock = threading.Lock()
 _cache: dict = {}
@@ -161,11 +172,45 @@ def process_memory() -> dict:
     return {"rss_mb": None, "kind": None}
 
 
+def _physical_cores() -> int | None:
+    """Physical CPU cores (os.cpu_count() counts logical processors: hyper-threads too)."""
+    try:
+        if sys.platform == "win32":
+            from ctypes import wintypes
+
+            class Info(ctypes.Structure):  # SYSTEM_LOGICAL_PROCESSOR_INFORMATION
+                _fields_ = [("mask", ctypes.c_size_t), ("relationship", ctypes.c_int),
+                            ("union", ctypes.c_ulonglong * 2)]
+
+            kernel32 = ctypes.WinDLL("kernel32")
+            size = wintypes.DWORD(0)
+            kernel32.GetLogicalProcessorInformation(None, ctypes.byref(size))
+            buffer = (Info * (size.value // ctypes.sizeof(Info)))()
+            if not kernel32.GetLogicalProcessorInformation(buffer, ctypes.byref(size)):
+                return None
+            return sum(1 for info in buffer if info.relationship == 0) or None  # RelationProcessorCore
+        if sys.platform == "darwin":
+            out = subprocess.run(["sysctl", "-n", "hw.physicalcpu"], capture_output=True, timeout=2, check=True)
+            return int(out.stdout.decode().strip())
+        cores, physical = set(), None
+        with open("/proc/cpuinfo", encoding="utf-8") as handle:
+            for line in handle:
+                key, _, value = line.partition(":")
+                if key.strip() == "physical id":
+                    physical = value.strip()
+                elif key.strip() == "core id":
+                    cores.add((physical, value.strip()))
+        return len(cores) or None
+    except Exception:  # noqa: BLE001 - best effort, any platform
+        return None
+
+
 def machine() -> dict:
     return {
         "os": platform.platform(),
         "cpu": _cpu_name(),
-        "cores": os.cpu_count(),
+        "logical_processors": os.cpu_count(),
+        "physical_cores": _physical_cores(),
         "python": platform.python_version(),
         "django": django.get_version(),
         "numpy": np.__version__,
@@ -280,13 +325,13 @@ def run_benchmark(iterations: int = 300, replans: int = 100, refresh_route: bool
         route_cache().set(route_cache_key(origin, destination), route)
         client = Client(HTTP_HOST="127.0.0.1", HTTP_ACCEPT_ENCODING="gzip")
         params = {"start": START, "finish": FINISH}
-        calls = {"total": 0}
+        calls = {"total": 0, "replayed": 0}
 
-        def get(extra: dict) -> dict:
+        def get(extra: dict, replayed: bool = False) -> dict:
             response = client.get("/api/route", {**params, **extra})
             if response.status_code != 200:
                 raise RuntimeError(f"/api/route answered {response.status_code}: {response.content[:300]!r}")
-            calls["total"] += int(response["Server-Timing"].count("osrm;"))
+            calls["replayed" if replayed else "total"] += int(response["Server-Timing"].count("osrm;"))
             return response
 
         first = get({})
@@ -328,6 +373,20 @@ def run_benchmark(iterations: int = 300, replans: int = 100, refresh_route: bool
             preparations,
             warmup=1,
         )
+
+        # A new trip: both caches emptied, OSRM's saved answer replayed at once (no socket).
+        saved_answer = json.dumps(record["osrm_answer"]).encode()
+        http.send = lambda url, params, timeout: (200, saved_answer, {})
+        plans, routes, route_key = caches["default"], route_cache(), route_cache_key(origin, destination)
+
+        def new_trip(_i):
+            plans.clear()
+            routes.delete(route_key)
+            get({}, replayed=True)
+
+        log(f"new_trip_our_code x{preparations} ...")
+        new_trip_ms = _measure(new_trip, preparations, warmup=1)
+        routes.set(route_key, route)
     finally:
         config["RATE_LIMIT_PER_MINUTE"] = saved_limit
         http.send = saved_send
@@ -338,6 +397,7 @@ def run_benchmark(iterations: int = 300, replans: int = 100, refresh_route: bool
         "what_if_replan": _stats(replan_ms),
         "planning_no_network": _stats(planning_ms),
         "route_preparation": _stats(prepare_ms),
+        "new_trip_our_code": _stats(new_trip_ms),
     }
     for key, block in results.items():
         block["description"] = DESCRIPTIONS[key]
@@ -348,7 +408,9 @@ def run_benchmark(iterations: int = 300, replans: int = 100, refresh_route: bool
         "method": (
             "Sequential requests in one process and one thread, through Django's test client (no sockets, "
             "so no network time) with gzip and without the per-request log lines; the route comes from "
-            "data/benchmark_route.json, so 0 external calls. requests_per_second = iterations / total time."
+            "data/benchmark_route.json, so 0 external calls (a new trip replays that answer instead of "
+            "calling OSRM). requests_per_second = iterations / total time: an upper bound for one served "
+            "process, which also parses HTTP and writes to a socket."
         ),
         "machine": machine(),
         "trip": {
@@ -365,6 +427,7 @@ def run_benchmark(iterations: int = 300, replans: int = 100, refresh_route: bool
         "stations": len(get_station_arrays()),
         "memory": process_memory(),
         "external_api_calls": calls["total"],
+        "osrm_answers_replayed": calls["replayed"],
         "results": results,
     }
 

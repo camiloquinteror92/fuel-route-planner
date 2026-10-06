@@ -17,7 +17,7 @@ from fuelroute.services import benchmark
 from .conftest import osrm_answer
 from .test_api import add_stations
 
-SCENARIOS = ["plan_cache_hit", "what_if_replan", "planning_no_network", "route_preparation"]
+SCENARIOS = ["plan_cache_hit", "what_if_replan", "planning_no_network", "route_preparation", "new_trip_our_code"]
 NEW_YORK, LOS_ANGELES = (40.7128, -74.006), (34.0522, -118.2437)
 
 
@@ -25,9 +25,13 @@ def _check_document(document: dict) -> None:
     assert datetime.fromisoformat(document["measured_at"]).tzinfo is not None
     assert document["command"] == "python manage.py benchmark"
     machine = document["machine"]
-    assert set(machine) == {"os", "cpu", "cores", "python", "django", "numpy"}
-    assert machine["cores"] >= 1 and machine["python"] and machine["django"]
+    assert set(machine) == {"os", "cpu", "logical_processors", "physical_cores", "python", "django", "numpy"}
+    assert machine["logical_processors"] >= 1 and machine["python"] and machine["django"]
+    # Physical cores are never more than logical processors (hyper-threads); None when unknown.
+    assert machine["physical_cores"] is None or 1 <= machine["physical_cores"] <= machine["logical_processors"]
     assert document["external_api_calls"] == 0
+    # A new trip replays OSRM's saved answer instead of calling it: once per measured request.
+    assert document["osrm_answers_replayed"] >= document["results"]["new_trip_our_code"]["iterations"]
     assert document["stations"] > 0
     assert document["memory"]["rss_mb"] is None or document["memory"]["rss_mb"] > 0
     trip = document["trip"]
@@ -49,6 +53,8 @@ def test_committed_benchmark_has_the_documented_shape():
     # A cached plan is much cheaper than re-planning, which is cheaper than nothing at all.
     results = document["results"]
     assert results["plan_cache_hit"]["p50_ms"] < results["what_if_replan"]["p50_ms"]
+    # A new trip is a what-if plus parsing and preparing OSRM's answer.
+    assert results["what_if_replan"]["p50_ms"] < results["new_trip_our_code"]["p50_ms"]
     route = json.loads((path.parent / "benchmark_route.json").read_text(encoding="utf-8"))
     assert route["osrm_answer"]["code"] == "Ok" and route["attribution"]
 
@@ -116,4 +122,7 @@ def test_stats_publishes_the_benchmark(benchmark_files):
 def test_process_memory_and_machine_are_read_from_the_system():
     memory = benchmark.process_memory()
     assert memory["kind"] in ("current", "peak") and memory["rss_mb"] > 10
-    assert benchmark.machine()["cpu"]
+    machine = benchmark.machine()
+    assert machine["cpu"] and machine["logical_processors"] >= 1
+    # Regression: "22 cores" were logical processors (os.cpu_count()); the cores are counted apart.
+    assert machine["physical_cores"] is None or machine["physical_cores"] <= machine["logical_processors"]

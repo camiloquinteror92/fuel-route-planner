@@ -38,7 +38,8 @@ class Command(BaseCommand):
         trip = document["trip"]
         self.stdout.write(
             f"\n{trip['start']} -> {trip['finish']}: {trip['distance_miles']} mi, {trip['corridor_candidates']} "
-            f"corridor stations of {document['stations']}, {document['external_api_calls']} external calls"
+            f"corridor stations of {document['stations']}, {document['external_api_calls']} external calls "
+            f"({document['osrm_answers_replayed']} saved OSRM answers replayed for the new trips)"
         )
         self.stdout.write(f"{'scenario':<22}{'p50 ms':>10}{'p95 ms':>10}{'req/s':>10}")
         for name in SCENARIOS:

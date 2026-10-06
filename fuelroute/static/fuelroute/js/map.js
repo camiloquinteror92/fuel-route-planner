@@ -4,11 +4,17 @@
 // coloured by price tercile of THIS trip), the price-blind driver's stops and,
 // for a 422 no_reachable_fuel_station, the stretch with no station.
 // Popups are built with DOM nodes, never HTML strings.
+//
+// Framing: the trip stays framed when the box changes size (window resize, phone
+// rotation, a link opened while the layout settles) until the user pans or zooms;
+// the padding leaves room for the controls. On a phone the price legend starts
+// folded, so it does not cover half of the map.
 
 import { el, fmt } from './format.js';
 
 const USA_CENTER = [39.5, -98.35];
 const USA_ZOOM = 4;
+const PHONE = '(max-width: 759.98px)';
 
 function token(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -59,7 +65,8 @@ function stopPopup(stop, whyText) {
 }
 
 export function createMap(container, { onStop, why } = {}) {
-  const map = L.map(container, { preferCanvas: true, scrollWheelZoom: false }).setView(USA_CENTER, USA_ZOOM);
+  // Half-step zoom: a coast-to-coast trip fills a phone-width map instead of a third of it.
+  const map = L.map(container, { preferCanvas: true, scrollWheelZoom: false, zoomSnap: 0.5 }).setView(USA_CENTER, USA_ZOOM);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 18,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · routing <a href="https://project-osrm.org/">OSRM</a>',
@@ -71,17 +78,41 @@ export function createMap(container, { onStop, why } = {}) {
   let layers = [];
   let controls = [];
   let stopMarkers = new Map();
-  let pendingBounds = null;
+  let lastBounds = null; // what the current trip should show
+  let userMoved = false; // the user panned or zoomed: stop re-framing
+  let framing = false; // our own fitBounds / setView is running
 
-  const fit = () => {
+  // Room for the controls: the layer switch (top right) and the legend (bottom right).
+  function padding() {
+    const legendBox = container.querySelector('.map-legend');
+    const legend = legendBox ? legendBox.getBoundingClientRect() : null;
+    const room = (size, limit) => Math.min(size, limit);
+    return {
+      paddingTopLeft: [24, 24],
+      paddingBottomRight: [
+        legend ? room(legend.width + 16, container.clientWidth * 0.35) : 24,
+        legend ? room(legend.height + 16, container.clientHeight * 0.35) : 24,
+      ],
+    };
+  }
+
+  function frame() {
     if (container.clientWidth === 0 || container.clientHeight === 0) return;
     map.invalidateSize();
-    if (pendingBounds) {
-      map.fitBounds(pendingBounds, { padding: [30, 30], animate: false });
-      pendingBounds = null;
+    if (!lastBounds || userMoved) return;
+    framing = true;
+    try {
+      map.fitBounds(lastBounds, { ...padding(), animate: false });
+    } finally {
+      framing = false;
     }
-  };
-  new ResizeObserver(fit).observe(container);
+  }
+  new ResizeObserver(frame).observe(container);
+  for (const event of ['dragstart', 'zoomstart']) {
+    map.on(event, () => {
+      if (!framing) userMoved = true;
+    });
+  }
 
   function reset() {
     layers.forEach((layer) => map.removeLayer(layer));
@@ -97,8 +128,9 @@ export function createMap(container, { onStop, why } = {}) {
   }
 
   function fitTo(bounds) {
-    pendingBounds = bounds;
-    fit();
+    lastBounds = bounds;
+    userMoved = false;
+    frame();
   }
 
   function legend(t, corridorMiles, count) {
@@ -106,8 +138,8 @@ export function createMap(container, { onStop, why } = {}) {
     control.onAdd = () => {
       const row = (kind, label, range) =>
         el('li', {}, el('span', { class: `swatch swatch-${kind}`, 'aria-hidden': 'true' }), el('span', {}, label), el('span', { class: 'legend-range' }, range));
-      return el('div', { class: 'map-legend' },
-        el('p', { class: 'legend-title' }, `Price at the ${fmt.int(count)} stations within ${fmt.miles(corridorMiles)}`),
+      const box = el('details', { class: 'map-legend', open: !window.matchMedia(PHONE).matches },
+        el('summary', { class: 'legend-title' }, `Price at the ${fmt.int(count)} stations within ${fmt.miles_round(corridorMiles)}`),
         el('ul', {},
           row('cheap', 'cheapest third', `${fmt.price(t.min)}–${fmt.price(t.t1)}`),
           row('mid', 'middle third', `${fmt.price(t.t1)}–${fmt.price(t.t2)}`),
@@ -116,6 +148,9 @@ export function createMap(container, { onStop, why } = {}) {
           el('li', {}, el('span', { class: 'swatch swatch-blind', 'aria-hidden': 'true' }), el('span', {}, 'price-blind stop')),
         ),
       );
+      L.DomEvent.disableClickPropagation(box);
+      box.addEventListener('toggle', frame);
+      return box;
     };
     controls.push(control);
     control.addTo(map);
@@ -181,7 +216,7 @@ export function createMap(container, { onStop, why } = {}) {
         marker.addTo(layer);
       }
       layer.addTo(map);
-      overlays[`Stations within ${fmt.miles(corridorMiles)} (${fmt.int(candidates.length)})`] = layer;
+      overlays[`Stations within ${fmt.miles_round(corridorMiles)} (${fmt.int(candidates.length)})`] = layer;
       if (t) legend(t, corridorMiles, candidates.length);
     }
 
@@ -221,9 +256,18 @@ export function createMap(container, { onStop, why } = {}) {
     stopsLayer.addTo(map);
     overlays['Plan fuel stops'] = stopsLayer;
 
-    const control = L.control.layers(null, overlays, { collapsed: window.matchMedia('(max-width: 760px)').matches, position: 'topright' });
+    const control = L.control.layers(null, overlays, { collapsed: window.matchMedia(PHONE).matches, position: 'topright' });
     controls.push(control);
     control.addTo(map);
+    const whole = L.control({ position: 'topleft' });
+    whole.onAdd = () => {
+      const button = el('button', { type: 'button', class: 'map-reframe', title: 'Show the whole trip', 'aria-label': 'Show the whole trip' }, 'Whole trip');
+      L.DomEvent.disableClickPropagation(button);
+      button.addEventListener('click', reframe);
+      return button;
+    };
+    controls.push(whole);
+    whole.addTo(map);
 
     if (line) fitTo(routeLayer.getBounds());
   }
@@ -244,7 +288,7 @@ export function createMap(container, { onStop, why } = {}) {
     }
     L.tooltip({ permanent: true, direction: 'center', className: 'gap-label' })
       .setLatLng([(a.lat + b.lat) / 2, (a.lon + b.lon) / 2])
-      .setContent(el('span', {}, `No station for ${fmt.miles(body.gap_miles)}${maxRange ? ` (range ${fmt.miles(maxRange)})` : ''}`))
+      .setContent(el('span', {}, `No station for ${fmt.miles(body.gap_miles)}${maxRange ? ` (range ${fmt.miles_round(maxRange)})` : ''}`))
       .addTo(layer);
     layer.addTo(map);
     fitTo(L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon]]));
@@ -252,7 +296,13 @@ export function createMap(container, { onStop, why } = {}) {
 
   function showUsa() {
     reset();
-    map.setView(USA_CENTER, USA_ZOOM);
+    lastBounds = null;
+    framing = true;
+    try {
+      map.setView(USA_CENTER, USA_ZOOM);
+    } finally {
+      framing = false;
+    }
   }
 
   function highlightStop(n) {
@@ -263,9 +313,16 @@ export function createMap(container, { onStop, why } = {}) {
     if (rect.bottom < 0 || rect.top > window.innerHeight) {
       container.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
     }
+    userMoved = true; // the user asked for this stop: a resize must not undo it
     map.flyTo(marker.getLatLng(), Math.max(map.getZoom(), 9), { animate: !reduce, duration: reduce ? 0 : 0.6 });
     marker.openPopup();
   }
 
-  return { map, render, renderGap, showUsa, highlightStop, invalidate: fit };
+  // "Show the whole trip" again (after a pan, a zoom or a stop).
+  function reframe() {
+    userMoved = false;
+    frame();
+  }
+
+  return { map, render, renderGap, showUsa, highlightStop, reframe, invalidate: frame };
 }

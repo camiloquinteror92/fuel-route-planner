@@ -2,7 +2,7 @@
 // raw answer (status, headers, collapsible JSON), the reference published by
 // /api/about (parameters, endpoints) and the error catalog with live "Try it".
 
-import { el, fmt, replace, present } from './format.js';
+import { el, fmt, plural, replace, present } from './format.js';
 import { absolute, routeUrl } from './api.js';
 import { CASE_FOR_ERROR } from './cases.js';
 
@@ -39,7 +39,7 @@ function tree(value, key, depth, path) {
   const entries = isArray ? value.map((v, i) => [i, v]) : Object.entries(value);
   const open = isArray ? '[' : '{';
   const close = isArray ? ']' : '}';
-  const size = isArray ? `${entries.length} items` : `${entries.length} keys`;
+  const size = isArray ? plural(entries.length, 'item') : plural(entries.length, 'key');
   const big = isArray && (entries.length > COLLAPSE_OVER || path.endsWith('candidates.rows'));
   const details = el('details', { class: 'j-node' });
   if (depth < 2 && !big) details.open = true;
@@ -68,7 +68,7 @@ export function renderRequest(container, state, { routeBase, toast, onPost }) {
   const post = JSON.stringify({ start: state.params.start, finish: state.params.finish, start_tank: state.params.start_tank === 'full' ? 'full' : 'empty' }, null, 2);
   const about = state.about || {};
   const build = about.build || {};
-  const ref = build.pushed && build.commit ? build.commit : 'main';
+  const ref = build.linked_commit || (build.commit ? null : 'main');
   replace(container,
     el('div', { class: 'req-block' }, el('h4', {}, 'GET'), el('pre', { class: 'code' }, getUrl), copyButton(getUrl, toast, 'Copy URL'),
       el('a', { class: 'btn btn-small btn-ghost', href: getUrl, target: '_blank', rel: 'noopener' }, 'Open')),
@@ -77,7 +77,7 @@ export function renderRequest(container, state, { routeBase, toast, onPost }) {
       el('button', { type: 'button', class: 'btn btn-small', onclick: onPost }, 'Send as POST')),
     el('p', { class: 'muted small' }, 'The page itself adds ', el('code', {}, 'include=candidates'),
       ' to draw the stations near the route; it shares the plan cache, so it never costs another routing call. ',
-      build.repo_url ? el('a', { href: `${build.repo_url}/blob/${ref}/postman/collection.json`, target: '_blank', rel: 'noopener' }, 'Postman collection') : null));
+      build.repo_url && ref ? el('a', { href: `${build.repo_url}/blob/${ref}/postman/collection.json`, target: '_blank', rel: 'noopener' }, 'Postman collection') : null));
 }
 
 export function renderResponse(container, state) {
@@ -141,7 +141,7 @@ export function renderErrors(container, about, { onTry, results }) {
         el('td', { 'data-label': 'When' }, e.description),
         el('td', { 'data-label': 'Live' }, caseId
           ? [el('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: () => onTry(caseId) }, 'Try it'),
-            res?.r ? el('small', { class: res.ok ? 'good' : 'bad' }, ` HTTP ${res.r.status}${present(calls) ? `, ${calls} external call(s)` : ''}`) : null]
+            res?.r ? el('small', { class: res.ok ? 'good' : 'bad' }, ` HTTP ${res.r.status}${present(calls) ? `, ${plural(calls, 'external call')}` : ''}`) : null]
           : el('span', { class: 'muted' }, '—')));
     })))));
 }

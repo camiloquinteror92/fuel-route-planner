@@ -25,9 +25,14 @@ export const fmt = {
   text: (v) => String(v),
   money: (v) => `${v < 0 ? MINUS : ''}$${nf(2, 2).format(Math.abs(v))}`,
   money_signed: (v) => `${v > 0 ? '+' : v < 0 ? MINUS : ''}$${nf(2, 2).format(Math.abs(v))}`,
-  price: (v) => `$${nf(3, 4).format(v)}`,
+  // Prices: always three decimals on screen (the exact value goes in a title).
+  price: (v) => `$${nf(3, 3).format(v)}`,
+  price_exact: (v) => `$${nf(3, 4).format(v)}`,
   gal: (v) => `${nf(2, 2).format(v)} gal`,
-  miles: (v) => `${nf(0, 1).format(v)} mi`,
+  // Distances: always one decimal, so short and long ones line up in a column.
+  miles: (v) => `${nf(1, 1).format(v)} mi`,
+  // Configured distances (the range, the corridor) are whole numbers: no decimal.
+  miles_round: (v) => `${nf(0, 0).format(v)} mi`,
   ms: (v) => `${nf(v >= 100 ? 0 : 1, v >= 100 ? 0 : 1).format(v)} ms`,
   bytes: (v) => {
     if (v < KILO) return `${nf(0, 0).format(v)} B`;
@@ -47,7 +52,7 @@ export const fmt = {
     const s = Math.max(0, Math.round(seconds));
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
-    if (h) return `${h} h ${m} min`;
+    if (h) return m ? `${h} h ${m} min` : `${h} h`;
     if (m) return `${m} min ${s % 60} s`;
     return `${s} s`;
   },
@@ -61,6 +66,14 @@ export const fmt = {
   },
   yesno: (v) => (v ? 'yes' : 'no'),
 };
+
+// The count and the word in agreement: one call, two calls, no calls.
+export function plural(count, word, many = `${word}s`) {
+  return `${nf(0, 0).format(count)} ${Number(count) === 1 ? word : many}`;
+}
+
+// Percentiles from few samples say little (p95 of five values is the maximum).
+export const MIN_SAMPLES_FOR_P95 = 20;
 
 export function present(value) {
   return value !== null && value !== undefined && value !== '' && !(typeof value === 'number' && !Number.isFinite(value));
@@ -230,6 +243,7 @@ export function testBadge(about, key, { short = false } = {}) {
   const label = short ? func : key;
   if (!entry) return el('span', { class: 'badge badge-bad', title: `${label}: not found in the test index` }, 'missing');
   const report = about?.tests?.report;
+  const notOnGitHub = entry.url ? null : el('span', { class: 'tag tag-local', title: 'This test is not on GitHub yet: push to link it.' }, 'not on GitHub yet');
   let badge;
   if (entry.failed) badge = el('span', { class: 'badge badge-bad' }, el('span', { class: 'mark-icon mark-bad-icon', 'aria-hidden': 'true' }), 'failing');
   else if (entry.cases) badge = el('span', { class: 'badge badge-ok' }, `${entry.passed ?? 0}/${entry.cases} passed`);
@@ -238,8 +252,8 @@ export function testBadge(about, key, { short = false } = {}) {
   const text = short ? func.replace(/^test_/, '').replace(/_/g, ' ') : entry.key;
   const link = entry.url
     ? el('a', { href: entry.url, target: '_blank', rel: 'noopener', class: 'test-link', title: entry.key }, text)
-    : el('code', { title: entry.key }, text);
-  return el('span', { class: 'test-ref' }, link, ' ', badge);
+    : el('code', { title: `${entry.key} (line ${entry.line})` }, text);
+  return el('span', { class: 'test-ref' }, link, ' ', badge, notOnGitHub ? [' ', notOnGitHub] : null);
 }
 
 export function serverTimingDur(headers, name) {
@@ -254,11 +268,16 @@ export function serverTimingDur(headers, name) {
 // /api/stats, /api/about or browser measurements.
 
 const TANK_REASONS = {
-  full_tank: 'leaves with a full tank; no fuel is required at arrival',
-  reserve: 'leaves with the reserve and must arrive with the same amount',
+  full_tank: 'leaves with a full tank it did not pay for, and buys only what it needs to arrive',
+  reserve: 'leaves with the reserve and must arrive with the same amount (borrowed and returned: not a safety margin)',
   first_station_beyond_reserve: 'leaves with enough fuel to reach the first station, and must arrive with the same amount',
   no_station_on_route: 'no station on this route: only a trip the reserve covers works',
 };
+const CAPPED = '; capped: the last stretch is too long to arrive with that much, and the difference is unpriced';
+
+function sameName(a, b) {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
 
 export function derive(state, helpers) {
   const { planTrace, priceBlindTrace, summarize } = helpers;
@@ -276,26 +295,44 @@ export function derive(state, helpers) {
   }
   d.render_ms = serverTimingDur(result?.headers, 'render');
 
-  // Commit, repo, tests.
+  // Commit, repo, tests. Links go to the newest commit GitHub has (build.linked_commit).
   const build = about.build || {};
   if (build.repo_url) {
-    const ref = build.pushed && build.commit ? build.commit : 'main';
+    const ref = build.linked_commit || (build.commit ? null : 'main');
     d.commit_url = build.commit && build.pushed ? `${build.repo_url}/commit/${build.commit}` : build.repo_url;
-    d.postman_url = `${build.repo_url}/blob/${ref}/postman/collection.json`;
-    d.readme_url = `${build.repo_url}/blob/${ref}/README.md`;
+    d.postman_url = ref ? `${build.repo_url}/blob/${ref}/${about.deliverables?.postman_collection || 'postman/collection.json'}` : null;
+    d.readme_url = ref ? `${build.repo_url}/blob/${ref}/README.md` : null;
   }
   d.not_pushed = build.pushed === false;
   d.dirty = build.dirty === true;
+  d.commits_not_on_github = build.commits_not_on_github || null;
+  d.links_on_older_commit = Boolean(build.linked_commit && build.linked_commit !== build.commit);
+  d.linked_commit_short = build.linked_commit_short || null;
+  d.loom_url = about.deliverables?.loom_url || null;
+  d.no_loom = !d.loom_url;
   d.tests_missing = about.tests?.report === 'missing';
   d.tests_stale = about.tests?.stale === true;
   if (about.data?.stations) d.data_geocoded_pct = (about.data.geocoded / about.data.stations) * 100;
   const missingStates = about.data?.states_without_stations;
+  const thinnest = about.data?.thinnest_states;
   d.states_without_count = Array.isArray(missingStates) ? missingStates.length : null;
   d.states_without_text = Array.isArray(missingStates) ? missingStates.join(', ') || 'none' : null;
+  d.all_states_have_stations = Array.isArray(missingStates) && missingStates.length === 0;
+  d.some_states_without = Array.isArray(missingStates) && missingStates.length > 0;
+  d.thinnest_text = Array.isArray(thinnest) && thinnest.length
+    ? thinnest.map((t) => `${t.state} (${nf(0, 0).format(t.geocoded)})`).join(', ')
+    : null;
+  const osrmLatency = state.stats?.external_latency_ms?.osrm;
+  d.osrm_p95 = osrmLatency && osrmLatency.count >= MIN_SAMPLES_FOR_P95 ? osrmLatency.p95 : null;
+  d.osrm_max = osrmLatency ? osrmLatency.max : null;
+  d.osrm_samples = osrmLatency ? osrmLatency.count : null;
+  d.osrm_few_samples = Boolean(osrmLatency) && osrmLatency.count < MIN_SAMPLES_FOR_P95;
 
   // Session (this page's own network log).
   const routeLog = (state.session || []).filter((r) => r.kind === 'route');
   d.session_requests = (state.session || []).length;
+  const rejected = state.stats?.route_requests?.errors_without_external_calls;
+  d.rejected_without_calls_text = present(rejected) ? plural(rejected, 'rejected request') : null;
   d.session_osrm_calls = routeLog.reduce((t, r) => t + (r.osrmCalls || 0), 0);
   d.session_new_trips = routeLog.filter((r) => r.osrmCalls > 0 || r.routeCache === 'miss').length;
   d.session_calls_per_trip = d.session_new_trips ? d.session_osrm_calls / d.session_new_trips : null;
@@ -320,12 +357,22 @@ export function derive(state, helpers) {
   d.is_empty = vehicle.start_tank !== 'full';
   d.is_full = vehicle.start_tank === 'full';
   d.has_unpriced = d.is_empty && summary.unpriced_fuel_gallons > 0;
+  // "Every mile paid" only when it is true: nothing burned without a station to buy from.
+  d.pays_every_mile = d.is_empty && !d.has_unpriced;
   d.full_tank_gallons = d.is_full ? summary.unpriced_fuel_gallons : null;
   d.fuel_needed_gal = distance / vehicle.miles_per_gallon;
   d.cost_per_mile = distance ? summary.total_fuel_cost / distance : null;
   d.has_stops = summary.number_of_stops > 0;
   d.no_stops = summary.number_of_stops === 0;
-  d.services_text = (meta.external_api_services || []).length ? [...new Set(meta.external_api_services)].join(', ') : 'none';
+  d.has_candidates = summary.candidate_stations_on_route > 0;
+  d.no_candidates = summary.candidate_stations_on_route === 0;
+  const services = [...new Set(meta.external_api_services || [])];
+  d.services_text = services.length ? services.join(', ') : 'none';
+  d.calls_text = present(meta.external_api_calls)
+    ? `${plural(meta.external_api_calls, 'external call')}${services.length ? ` (${services.join(', ')})` : ''}`
+    : null;
+  d.start_label_differs = !sameName(body.start.label, body.start.query);
+  d.finish_label_differs = !sameName(body.finish.label, body.finish.query);
   d.is_plan_hit = meta.plan_cache === 'hit';
   d.is_plan_miss = meta.plan_cache !== 'hit';
   d.has_warnings = (body.warnings || []).length > 0;
@@ -333,9 +380,15 @@ export function derive(state, helpers) {
   // Comparison.
   d.has_comparison = Boolean(cmp);
   d.no_purchase = !cmp && summary.number_of_stops === 0;
+  // Why nothing was bought: a full tank covers the trip, or there was nothing to buy from.
+  d.no_purchase_full = d.no_purchase && d.is_full && !d.has_unpriced;
+  d.no_purchase_no_station = d.no_purchase && d.no_candidates && !d.no_purchase_full;
   const blind = cmp?.price_blind || null;
   const savings = cmp?.savings_vs_price_blind || null;
   d.has_savings = Boolean(savings);
+  d.savings_negative = Boolean(savings) && savings.amount < 0;
+  d.savings_not_negative = Boolean(savings) && savings.amount >= 0;
+  d.costs_more_amount = d.savings_negative ? -savings.amount : null;
   d.price_blind_infeasible = Boolean(cmp) && !blind;
   d.savings_amount = savings?.amount ?? null;
   d.savings_pct = savings?.percent ?? null;
@@ -355,6 +408,7 @@ export function derive(state, helpers) {
     const list = body.candidates.rows.map((r) => r[i]);
     prices = { min: Math.min(...list), median: median(list), max: Math.max(...list) };
   }
+  if (!d.has_candidates) prices = null;
   d.route_price_min = prices?.min ?? null;
   d.route_price_median = prices?.median ?? null;
   d.route_price_max = prices?.max ?? null;
@@ -374,6 +428,11 @@ export function derive(state, helpers) {
   const offsets = body.fuel_stops.map((s) => s.distance_from_route_miles);
   d.max_offroute = offsets.length ? Math.max(...offsets) : null;
   d.detour_approx = offsets.length ? sum(offsets) * 2 : null;
+  // The range is used literally: how many stops the plan reaches with the tank empty.
+  const arrivals = body.fuel_stops.map((s) => s.fuel_on_arrival_gallons);
+  d.stops_arriving_empty = arrivals.filter((g) => g === 0).length;
+  d.lowest_arrival = arrivals.length ? Math.min(...arrivals) : null;
+  d.some_arrive_empty = d.stops_arriving_empty > 0;
 
   // Map / geometry.
   const features = body.map?.geojson?.features || [];
@@ -390,10 +449,12 @@ export function derive(state, helpers) {
     d.pipeline_route_prep_ms = present(timings.routing_ms) ? Math.max(0, timings.routing_ms - (pipeline.external_api_ms || 0)) : null;
     d.pipeline_our_code_ms = Math.max(0, d.pipeline_total_ms - (pipeline.external_api_ms || 0));
     d.routing_from_cache_text = pipeline.routing
-      ? pipeline.routing.from_route_cache ? 'yes: no call, the route was already cached' : 'no: fetched from OSRM'
+      ? pipeline.routing.from_route_cache ? 'reused from the route cache (no call)' : 'fetched from OSRM (one call)'
       : null;
-    d.tank_reason_text = TANK_REASONS[pipeline.tank?.reason] || pipeline.tank?.reason || null;
     d.arrival_capped = pipeline.tank?.arrival_capped === true;
+    const reason = TANK_REASONS[pipeline.tank?.reason] || pipeline.tank?.reason || null;
+    d.tank_reason_text = reason && d.arrival_capped ? `${reason}${CAPPED}` : reason;
+    d.pipeline_calls_text = present(pipeline.external_api_calls) ? plural(pipeline.external_api_calls, 'call') : null;
     const opt = pipeline.optimizer || {};
     d.consolidation_fewer_stops = present(opt.stops_before_consolidation) ? opt.stops_before_consolidation - opt.stops : null;
     d.consolidation_extra_cost = opt.consolidation_extra_cost ?? null;

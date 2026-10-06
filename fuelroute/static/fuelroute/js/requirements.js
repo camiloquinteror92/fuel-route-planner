@@ -3,7 +3,7 @@
 // code that does it and the tests that check it; then the contract checks
 // recomputed in the browser and the live edge-case suite.
 
-import { el, fmt, mark, replace, codeLink, testBadge, present } from './format.js';
+import { el, fmt, mark, plural, replace, codeLink, testBadge, present, MIN_SAMPLES_FOR_P95 } from './format.js';
 
 function line(ok, ...content) {
   return el('li', { class: 'ev' }, mark(ok, ''), el('span', {}, ...content));
@@ -14,7 +14,13 @@ function info(...content) {
 }
 
 function pct(stat) {
-  return stat ? `p50 ${fmt.ms(stat.p50)} · p95 ${fmt.ms(stat.p95)} (${fmt.int(stat.count)})` : 'no request yet';
+  if (!stat) return 'no request yet';
+  const p95 = stat.count >= MIN_SAMPLES_FOR_P95 ? ` · p95 ${fmt.ms(stat.p95)}` : ` · max ${fmt.ms(stat.max)}`;
+  return `p50 ${fmt.ms(stat.p50)}${p95} (${plural(stat.count, 'request')})`;
+}
+
+function osrmCalls(meta) {
+  return (meta.external_api_services || []).filter((s) => s === 'osrm').length;
 }
 
 function callsLabel(n) {
@@ -34,8 +40,11 @@ function evidence(id, ctx) {
     case 'usa_inputs':
       return [
         ...(body ? [info(`start resolved by `, el('code', {}, body.start.geocoder), `, finish by `, el('code', {}, body.finish.geocoder))] : []),
-        stats ? info(`${fmt.int(stats.route_requests?.errors_without_external_calls ?? 0)} rejected requests cost no external call (since server start)`) : null,
-        el('li', { class: 'ev ev-action' }, el('button', { type: 'button', class: 'btn btn-small', onclick: () => onTry('paris') }, 'Try it: Paris → Austin')),
+        stats ? info(`${plural(stats.route_requests?.errors_without_external_calls ?? 0, 'rejected request')} cost no external call (since server start)`) : null,
+        el('li', { class: 'ev ev-action' },
+          el('button', { type: 'button', class: 'btn btn-small', onclick: () => onTry('paris') }, 'Try: Paris coordinates (invalid_request)'),
+          ' ',
+          el('button', { type: 'button', class: 'btn btn-small', onclick: () => onTry('toronto') }, 'Try: Toronto, ON (location_outside_usa)')),
       ].filter(Boolean);
     case 'route_map':
       return plan(() => [
@@ -45,12 +54,13 @@ function evidence(id, ctx) {
     case 'cost_effective_stops':
       return plan(() => [
         byId.optimum_vs_blind ? line(byId.optimum_vs_blind.ok, `optimum ${byId.optimum_vs_blind.actual} vs price-blind ${byId.optimum_vs_blind.expected}`) : null,
-        derived.has_savings ? info(`this plan saves ${fmt.money_signed(derived.savings_amount)} (${fmt.pct(derived.savings_pct)}) vs a price-blind driver`) : null,
-        present(derived.consolidation_extra_cost) ? info(`consolidation: ${fmt.money_signed(derived.consolidation_extra_cost)} for ${fmt.int(derived.consolidation_fewer_stops)} fewer stops`) : null,
+        derived.savings_not_negative ? info(`this plan saves ${fmt.money(derived.savings_amount)} (${fmt.pct(derived.savings_pct)}) vs a price-blind driver`) : null,
+        derived.savings_negative ? info(`this plan costs ${fmt.money(derived.costs_more_amount)} more than a price-blind driver, for fewer stops`) : null,
+        present(derived.consolidation_extra_cost) ? info(`consolidation: ${fmt.money_signed(derived.consolidation_extra_cost)} for ${plural(derived.consolidation_fewer_stops, 'fewer stop', 'fewer stops')}`) : null,
       ].filter(Boolean));
     case 'range_multiple_stops':
       return plan(() => [
-        line(derived.stretch_ok, `longest stretch between purchases ${fmt.miles(derived.longest_stretch)} (range ${fmt.miles(body.vehicle.max_range_miles)})`),
+        line(derived.stretch_ok, `longest stretch between purchases ${fmt.miles(derived.longest_stretch)} (range ${fmt.miles_round(body.vehicle.max_range_miles)})`),
         line(derived.tank_ok, `tank between ${fmt.gal(derived.tank_min)} and ${fmt.gal(derived.tank_max)} (capacity ${fmt.gal(body.vehicle.tank_gallons)})`),
         info(`${fmt.int(body.summary.number_of_stops)} stops over ${fmt.miles(body.route.distance_miles)}`),
       ]);
@@ -77,7 +87,12 @@ function evidence(id, ctx) {
     case 'django_version': {
       const running = about.versions?.django;
       const pinned = about.pinned?.Django;
-      return [line(running && pinned ? running === pinned : null, `running ${running || '—'}, pinned ${pinned || '—'}`)];
+      const check = about.deliverables?.release_check;
+      return [
+        line(running && pinned ? running === pinned : null, `running ${running || '—'} = pinned ${pinned || '—'}`),
+        check ? line(pinned ? pinned === check.django_latest_stable : null,
+          `latest stable on PyPI when checked (${fmt.date(`${check.checked_on}T12:00:00`)}): ${check.django_latest_stable}`) : null,
+      ].filter(Boolean);
     }
     case 'fast': {
       const meta = result?.body?.meta;
@@ -86,23 +101,32 @@ function evidence(id, ctx) {
           ? info(`this answer: server ${fmt.ms(result.headers.responseTimeMs)}, external ${meta ? fmt.ms(meta.external_api_ms ?? 0) : '—'}, our code ${fmt.ms(derived.our_code_ms)}`)
           : null,
         stats ? info(`since start: cold ${pct(stats.latency_ms?.cold)}; plan cache ${pct(stats.latency_ms?.plan_cache_hit)}`) : null,
+        result?.client?.encodedBytes && result?.client?.decodedBytes
+          ? info(`on the wire: ${fmt.bytes(result.client.encodedBytes)} for ${fmt.bytes(result.client.decodedBytes)} of JSON (${result.headers.contentEncoding || 'not compressed'})`)
+          : null,
       ].filter(Boolean).concat(body || stats ? [] : need('Plan a trip to measure.'));
     }
     case 'few_routing_calls': {
       const meta = result?.body?.meta;
       const ext = stats?.external_api;
       return [
-        meta ? line(meta.external_api_calls <= 3, `this answer: ${fmt.int(meta.external_api_calls)} external call(s): ${callsLabel(meta.external_api_calls)}`) : null,
-        derived.session_new_trips ? info(`this page: ${fmt.int(derived.session_osrm_calls)} OSRM calls for ${fmt.int(derived.session_new_trips)} new trips`) : null,
-        ext ? info(`since start: ${present(ext.osrm_calls_per_routing_request) ? fmt.num(ext.osrm_calls_per_routing_request) : '—'} OSRM calls per routing request, at most ${fmt.int(ext.max_calls_in_one_request)} in one request`) : null,
+        meta ? line(osrmCalls(meta) <= 3, `this answer: ${plural(osrmCalls(meta), 'OSRM call')}: ${callsLabel(osrmCalls(meta))}${meta.external_api_calls > osrmCalls(meta) ? ` (+ ${plural(meta.external_api_calls - osrmCalls(meta), 'geocoding call')})` : ''}`) : null,
+        derived.session_new_trips ? info(`this page: ${plural(derived.session_osrm_calls, 'OSRM call')} for ${plural(derived.session_new_trips, 'new trip')}`) : null,
+        ext ? info(`since start: ${present(ext.osrm_calls_per_routing_request) ? fmt.num(ext.osrm_calls_per_routing_request) : '—'} OSRM calls per routing request, at most ${plural(ext.max_osrm_calls_in_one_request ?? ext.max_calls_in_one_request ?? 0, 'OSRM call')} in one request`) : null,
       ].filter(Boolean).concat(meta || ext ? [] : need('Plan a trip to count.'));
     }
     case 'deliverables': {
       const build = about.build || {};
       return [
-        build.repo_url ? info(el('a', { href: build.repo_url, target: '_blank', rel: 'noopener' }, 'GitHub repository'),
-          build.commit_short ? ` @ ${build.commit_short}` : '', build.pushed === false ? ' (not pushed yet)' : '', build.dirty ? ' + local changes' : '') : null,
+        build.repo_url ? line(build.pushed === true && build.dirty === false,
+          el('a', { href: build.repo_url, target: '_blank', rel: 'noopener' }, 'GitHub repository'),
+          build.commit_short ? ` @ ${build.commit_short}` : '',
+          build.pushed === false ? ` (not pushed yet: ${plural(build.commits_not_on_github || 0, 'commit')} only on this machine)` : '',
+          build.dirty ? ' + local changes' : '') : null,
         derived.postman_url ? info(el('a', { href: derived.postman_url, target: '_blank', rel: 'noopener' }, 'postman/collection.json')) : null,
+        derived.loom_url
+          ? line(true, el('a', { href: derived.loom_url, target: '_blank', rel: 'noopener' }, 'Loom video'))
+          : line(null, 'Loom video: not linked yet (set LOOM_URL)'),
       ].filter(Boolean);
     }
     case 'exact_money':

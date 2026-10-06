@@ -300,3 +300,33 @@ def test_page_code_links_and_requirements_exist_on_the_server():
     # The Requirements tab shows live evidence for every requirement the API lists.
     handled = set(re.findall(r"case '(\w+)':", js_sources()["requirements.js"]))
     assert {r["id"] for r in about["requirements"]} <= handled
+
+
+# --- regressions found by reviewing the page -----------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_profile_is_drawn_in_real_pixels(client):
+    # Regression: viewBox 1000x320 with preserveAspectRatio="none" squeezed the labels to a
+    # few pixels on a phone and turned the stop circles into ovals.
+    svg = Page(client.get(PAGE).content.decode()).find(id="profile")[0]
+    assert "preserveaspectratio" not in svg and "viewbox" not in svg
+    profile = js_sources()["profile.js"]
+    assert "setAttribute('viewBox', `0 0 ${width} ${height}`)" in profile
+    assert "new ResizeObserver" in profile  # redrawn when the box changes size
+
+
+def test_swap_does_not_plan_a_new_trip():
+    # Regression: Swap planned the reversed trip at once, spending a routing call the user
+    # had not asked for. It now swaps the fields and marks the results as stale.
+    main = js_sources()["main.js"]
+    handler = main.split("$('#swap').addEventListener('click', () => {", 1)[1].split("\n});", 1)[0]
+    assert "planTrip" not in handler and "markStale()" in handler
+
+
+def test_the_map_keeps_the_trip_framed_until_the_user_moves_it():
+    # Regression: the trip was framed once; after a resize (desktop -> phone) stops fell
+    # outside the map.
+    map_js = js_sources()["map.js"]
+    assert "new ResizeObserver(frame)" in map_js
+    assert "if (!lastBounds || userMoved) return;" in map_js

@@ -4,7 +4,7 @@
 // the page from the answer, /api/about, /api/stats and the browser's timings.
 
 import { createClient, onLog, session, clearSession, routeUrl } from './api.js';
-import { bind, derive, el, fmt, flattenErrors, replace, present } from './format.js';
+import { bind, derive, el, fmt, flattenErrors, plural, replace, present } from './format.js';
 import { runChecks, planTrace, priceBlindTrace, summarize } from './checks.js';
 import { createMap } from './map.js';
 import { createProfile } from './profile.js';
@@ -43,6 +43,7 @@ const planTimer = planButton.querySelector('[data-timer]');
 const planLabel = planButton.querySelector('.btn-label');
 const live = $('#live');
 const errorBox = $('#error');
+const staleNote = $('#stale');
 const hero = $('#empty');
 const results = $('#results');
 const profileCard = $('#profile-card');
@@ -63,6 +64,7 @@ const boxes = {
   funnel: $('#funnel'),
   states: $('#state-bars'),
   timeline: $('#timeline'),
+  historySummary: $('#history-summary'),
   inventory: $('#test-inventory'),
   apiRequest: $('#api-request'),
   apiResponse: $('#api-response'),
@@ -114,23 +116,40 @@ function pageUrl(params) {
 }
 
 const COORDS = /^\s*-?\d+(\.\d+)?\s*[, ]\s*-?\d+(\.\d+)?\s*$/;
+const STATE_AFTER_COMMA = /,\s*([A-Za-z]{2})\s*$/;
 
+// A hint while typing; the API decides (the same rules, server side).
 function courtesyHint(value) {
   if (!value) return '';
   if (COORDS.test(value)) return '';
   if (value.length < 3 || !/[a-z]/i.test(value)) return 'Use “City, ST” or “lat,lon”.';
+  const codes = state.about?.api?.state_codes;
+  const tail = value.match(STATE_AFTER_COMMA);
+  if (tail && Array.isArray(codes) && !codes.includes(tail[1].toUpperCase())) {
+    return `“${tail[1].toUpperCase()}” is not a US state: trips start and end in the USA.`;
+  }
   return '';
 }
 
+// The button stays enabled (a disabled button does not say why); a submit with a
+// missing field shows "Required." under it instead.
 function updateButton() {
-  const filled = inputs.start.value.trim() && inputs.finish.value.trim();
-  planButton.disabled = !filled || document.body.classList.contains('is-loading');
+  planButton.setAttribute('aria-busy', String(document.body.classList.contains('is-loading')));
   for (const name of ['start', 'finish']) {
     const hint = $(`#${name}-hint`);
     const text = courtesyHint(inputs[name].value.trim());
     hint.textContent = text;
     hint.hidden = !text;
   }
+}
+
+// Results that no longer match the form (edited, swapped, other tank) are marked,
+// not replanned: a new trip costs a routing call, so only "Plan route" sends one.
+function markStale() {
+  const stale = Boolean(state.params) && !sameParams(readForm(), state.params);
+  staleNote.hidden = !stale;
+  results.classList.toggle('is-stale', stale);
+  profileCard.classList.toggle('is-stale', stale);
 }
 
 function clearFieldErrors() {
@@ -149,6 +168,8 @@ function showFieldError(name, message) {
   if (!node) return false;
   node.textContent = message;
   node.hidden = false;
+  const hint = $(`#${name}-hint`);
+  if (hint) hint.hidden = true; // the server's message says it better
   if (inputs[name]) inputs[name].setAttribute('aria-invalid', 'true');
   if (name === 'start_tank') form.querySelector('.segmented')?.classList.add('is-invalid');
   return true;
@@ -211,18 +232,24 @@ async function planTrip(params, { history = 'push', origin = 'user', method = 'G
   controller = null;
   state.route = result;
   state.params = params;
-  document.title = `${params.start} → ${params.finish} · Fuel Route Planner`;
+  markStale();
   if (result.ok && result.body) {
     state.checks = runChecks(result.body, state.about);
     renderPlan();
     const s = result.body.summary;
-    live.textContent = `Planned ${result.body.start.label} → ${result.body.finish.label}: ${s.number_of_stops} stops, ${fmt.money(s.total_fuel_cost)}.`;
+    document.title = `${result.body.start.label} → ${result.body.finish.label} · Fuel Route Planner`;
+    live.textContent = `Planned ${result.body.start.label} → ${result.body.finish.label}: ${plural(s.number_of_stops, 'stop')}, ${fmt.money(s.total_fuel_cost)}.`;
   } else {
     state.checks = [];
+    document.title = `${params.start} → ${params.finish} · Fuel Route Planner`;
     renderError(result);
   }
   renderAll({ api: true });
   refreshStats();
+  // On a phone the form fills the screen: bring what was asked for into view.
+  if ((origin === 'user' || origin === 'retry') && window.matchMedia('(max-width: 759.98px)').matches) {
+    (result.ok ? results : errorBox).scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
+  }
 }
 
 async function refreshStats() {
@@ -256,6 +283,7 @@ function context() {
         round_trip_ms: r.client.roundTripMs,
         ttfb_ms: r.client.ttfbMs,
         transfer_bytes: r.client.transferBytes,
+        encoded_bytes: r.client.encodedBytes,
         decoded_bytes: r.client.decodedBytes,
         parse_ms: r.client.parseMs,
       }
@@ -364,22 +392,24 @@ function renderError(result) {
 
   if (code === 'no_reachable_fuel_station' && body.gap_end) {
     mapCtl.renderGap(body, { maxRange });
-    extra.push(el('p', {}, `No station between mile ${fmt.dec1(body.from_mile)} and mile ${fmt.dec1(body.gap_end.mile)} (${fmt.miles(body.gap_miles)}), more than the ${fmt.miles(maxRange)} range. The map shows the stretch.`));
+    extra.push(el('p', {}, `No station between mile ${fmt.dec1(body.from_mile)} and mile ${fmt.dec1(body.gap_end.mile)} (${fmt.miles(body.gap_miles)}), more than the ${fmt.miles_round(maxRange)} range. The map shows the stretch.`));
   } else {
     mapCtl.showUsa();
   }
   if (code === 'no_fuel_data_on_route' && present(body.route_distance_miles) && present(maxRange)
     && body.route_distance_miles <= maxRange && state.params?.start_tank !== 'full') {
-    extra.push(el('p', {}, `This trip is ${fmt.miles(body.route_distance_miles)}, within the ${fmt.miles(maxRange)} range: a full tank needs no stop. `,
+    extra.push(el('p', {}, `This trip is ${fmt.miles(body.route_distance_miles)}, within the ${fmt.miles_round(maxRange)} range: a full tank needs no stop. `,
       el('button', { type: 'button', class: 'btn', onclick: () => planTrip({ ...state.params, start_tank: 'full' }) }, 'Try with a full tank')));
   }
   const retryAfter = Number(result.headers.retryAfter);
   if ([429, 503].includes(result.status) && result.headers.retryAfter) extra.push(retryControls(Number.isFinite(retryAfter) ? retryAfter : 0));
   else if (result.status === 502 || result.failure) extra.push(retryControls(0));
 
+  const title = ERROR_TITLES[code] || 'Could not plan this route';
+  live.textContent = `Could not plan: ${title}.`;
   replace(errorBox,
     el('div', { class: 'error-card', role: 'alert' },
-      el('h2', {}, ERROR_TITLES[code] || 'Could not plan this route'),
+      el('h2', {}, title),
       el('p', { class: 'error-code' }, result.status ? `HTTP ${result.status} · ` : '', el('code', {}, code)),
       lines.length ? el('ul', {}, lines.map((l) => el('li', {}, l))) : null,
       ...extra,
@@ -415,7 +445,7 @@ function renderAll({ api = false } = {}) {
   perf.renderStats(boxes.stats, state.stats, { onRefresh: refreshStats });
   how.renderFunnel(boxes.funnel, ctx.route);
   how.renderStates(boxes.states, state.about);
-  how.renderTimeline(boxes.timeline, state.about);
+  how.renderTimeline(boxes.timeline, state.about, boxes.historySummary);
   how.renderTestInventory(boxes.inventory, state.about);
   const checksBadge = $('[data-checks-badge]');
   checksBadge.classList.toggle('is-bad', (ctx.derived.checks_failed || 0) > 0);
@@ -440,7 +470,7 @@ async function tryCase(id) {
   if (!r) return;
   const body = r.body && typeof r.body === 'object' ? r.body : {};
   const calls = body.meta?.external_api_calls;
-  toast(`HTTP ${r.status}${body.error ? ` ${body.error}` : ''}${present(calls) ? ` · ${calls} external call(s)` : ''}`, r.ok || r.status < 500 ? 'ok' : 'bad');
+  toast(`HTTP ${r.status}${body.error ? ` ${body.error}` : ''}${present(calls) ? ` · ${plural(calls, 'external call')}` : ''}`, r.ok || r.status < 500 ? 'ok' : 'bad');
 }
 
 // --- tabs ------------------------------------------------------------------------------------
@@ -462,6 +492,17 @@ function selectTab(name, { focus = false, scroll = false, updateHash = true } = 
   if (scroll) tablist.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
   if (name === 'performance' && previous !== 'performance') refreshStats();
   if (name !== 'plan') mapCtl.invalidate();
+}
+
+// On a narrow screen the tabs scroll sideways: a fade at the edge says there is more.
+function setupTabsOverflow() {
+  const update = () => {
+    const more = tablist.scrollWidth - tablist.clientWidth - tablist.scrollLeft > 1;
+    tablist.classList.toggle('has-more', more);
+  };
+  tablist.addEventListener('scroll', update, { passive: true });
+  new ResizeObserver(update).observe(tablist);
+  update();
 }
 
 tablist.addEventListener('click', (event) => {
@@ -500,14 +541,18 @@ for (const input of Object.values(inputs)) {
     const node = $(`#${input.id}-error`);
     if (node) node.hidden = true;
     updateButton();
+    markStale();
   });
 }
+for (const radio of form.querySelectorAll('input[name="start_tank"]')) radio.addEventListener('change', markStale);
+// Swap only swaps: the reversed trip is a new trip (a routing call), sent by "Plan route".
 $('#swap').addEventListener('click', () => {
   const start = inputs.start.value;
   inputs.start.value = inputs.finish.value;
   inputs.finish.value = start;
   updateButton();
-  if (state.params && inputs.start.value.trim() && inputs.finish.value.trim()) planTrip(readForm(), { history: 'push' });
+  markStale();
+  if (state.params) live.textContent = 'Start and finish swapped. Press Plan route to plan the reversed trip.';
 });
 for (const chip of document.querySelectorAll('.chip[data-start]')) {
   chip.addEventListener('click', () => {
@@ -539,11 +584,15 @@ window.addEventListener('popstate', () => {
 
 // --- start ---------------------------------------------------------------------------------------
 
-const mapCtl = createMap($('#map'), {
-  onStop: selectStop,
-  why: (stop, body) => plan.whyText(stop, body, state.about),
-});
-const profile = createProfile($('#profile'), $('#profile-tip'), { onStop: selectStop });
+// The map library comes from a CDN: if it did not load, the page still works as tables.
+function noMap(container) {
+  replace(container, el('p', { class: 'map-missing' }, 'The map library could not be loaded (no network to its CDN?). The plan, the profile and every table below still work.'));
+  const nothing = () => {};
+  return { render: nothing, renderGap: nothing, showUsa: nothing, highlightStop: nothing, reframe: nothing, invalidate: nothing };
+}
+const why = (stop, body) => plan.whyText(stop, body, state.about);
+const mapCtl = window.L ? createMap($('#map'), { onStop: selectStop, why }) : noMap($('#map'));
+const profile = createProfile($('#profile'), $('#profile-tip'), { onStop: selectStop, why });
 let casesWereRunning = false;
 const cases = createCases({
   routeBase,
@@ -571,6 +620,7 @@ onLog(scheduleRender);
 const hashTab = window.location.hash.slice(1);
 selectTab(TABS.includes(hashTab) ? hashTab : 'plan', { updateHash: false });
 setForm(config.initial || {});
+setupTabsOverflow();
 const initial = paramsFromUrl();
 renderEmpty();
 renderAll({ api: true });

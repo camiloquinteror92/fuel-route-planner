@@ -1,4 +1,4 @@
-{% comment %}Footer: provenance (versions, commit, data) and attributions, all from /api/about.{% endcomment %}
+{% comment %}Footer: provenance (versions, commit, data, deliverables) and attributions, all from /api/about.{% endcomment %}
 <footer class="foot">
   <div class="wrap">
     <p>
@@ -9,10 +9,19 @@
     </p>
     <p>
       commit <a data-href="derived.commit_url" target="_blank" rel="noopener"><code data-live="about.build.commit_short">—</code></a>
-      <span class="tag tag-warn" data-live-if="derived.not_pushed">not pushed yet</span>
+      <span class="tag tag-warn" data-live-if="derived.not_pushed">not pushed yet: <span data-live="derived.commits_not_on_github" data-format="int">—</span> commits not on GitHub</span>
       <span class="tag tag-warn" data-live-if="derived.dirty">+ local changes</span>
       · station data <code data-live="about.data.version">—</code>
       · <a data-href="about.build.repo_url" target="_blank" rel="noopener">source on GitHub</a>
+    </p>
+    <p class="muted" data-live-if="derived.links_on_older_commit">Code and test links open commit
+      <code data-live="derived.linked_commit_short">—</code>, the newest one GitHub has, at its own line numbers; what is newer
+      shows “not on GitHub yet”.</p>
+    <p>
+      Deliverables: <a data-href="about.build.repo_url" target="_blank" rel="noopener">code</a> ·
+      <a data-href="derived.postman_url" target="_blank" rel="noopener">Postman collection</a> ·
+      <a data-href="derived.loom_url" data-live-if="derived.loom_url" target="_blank" rel="noopener">Loom video</a>
+      <span class="muted" data-live-if="derived.no_loom">Loom video: not linked yet (<code>LOOM_URL</code>)</span>
     </p>
     <p class="attrib">
       Fuel prices provided with the assessment · US Census Bureau · GeoNames (<span data-literal>CC BY 4.0</span>) ·

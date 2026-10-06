@@ -2,7 +2,7 @@
 // each purchase and totals checked to the cent), the strategy comparison and the
 // export actions (link, curl, JSON, GeoJSON, CSV, driver instructions, print).
 
-import { el, fmt, mark, replace, slug } from './format.js';
+import { el, fmt, mark, plural, replace, slug } from './format.js';
 import { absolute, routeUrl } from './api.js';
 
 const MIN_STOP_DEFAULT_KEY = 'min_stop_gallons';
@@ -15,23 +15,85 @@ function consolidationLimits(body, about) {
   };
 }
 
+// "and": "a", "a and b", "a, b and c".
+function joinAnd(items) {
+  if (items.length < 2) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+function reachText(reaches) {
+  if (!reaches) return null;
+  if (reaches.stop === null || reaches.stop === undefined) return 'enough to finish';
+  return `enough to reach stop ${reaches.stop} (mile ${fmt.dec1(reaches.mile)})`;
+}
+
+// What the greedy did at this station, before consolidation.
+function greedyText(decision, body) {
+  const amount = fmt.gal(decision.greedy_gallons);
+  if (decision.rule === 'reach_cheaper') {
+    return `The greedy bought ${amount} here, just enough to reach a cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)}.`;
+  }
+  if (decision.rule === 'fill_up') {
+    return `The greedy filled the tank here (${amount}): no cheaper station within ${fmt.miles_round(body.vehicle.max_range_miles)}.`;
+  }
+  if (decision.rule === 'finish') return `The greedy bought ${amount} here to finish: the cheapest price left.`;
+  return `The greedy bought ${amount} here (${decision.rule}).`;
+}
+
+// The reason of a stop of the FINAL plan, from the API's decision block: the greedy
+// rule that created the stop, what consolidation moved in or out (and what that
+// cost), and where the fuel bought here takes the truck in this plan.
 export function whyText(stop, body, about) {
   const decision = stop.decision;
   if (!decision) return null;
+  if (!decision.reaches) return legacyWhy(decision, body, about);
+  const reach = reachText(decision.reaches);
+  if (!decision.consolidated) {
+    if (decision.rule === 'reach_cheaper') {
+      const next = decision.reaches.stop !== null && Math.abs(decision.reaches.mile - decision.cheaper_station_mile) < 0.05;
+      return next
+        ? `Cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)} (stop ${decision.reaches.stop}): bought just enough to reach it.`
+        : `Cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)}: bought just enough to reach it; in this plan that is ${reach}.`;
+    }
+    if (decision.rule === 'fill_up') {
+      return `No cheaper station within ${fmt.miles_round(body.vehicle.max_range_miles)}: filled the tank, ${reach}.`;
+    }
+    if (decision.rule === 'finish') return 'Cheapest price left before the destination: bought just enough to finish.';
+    return decision.rule;
+  }
+  const { minStop } = consolidationLimits(body, about);
+  const minimum = minStop !== null ? fmt.gal(minStop) : 'the minimum';
+  const moves = [];
+  const gone = (decision.moved_in || []).filter((m) => m.from_stop === null || m.from_stop === undefined);
+  const kept = (decision.moved_in || []).filter((m) => m.from_stop !== null && m.from_stop !== undefined);
+  if (gone.length) {
+    moves.push(`moved ${joinAnd(gone.map((m) => `the ${fmt.gal(m.gallons)} planned at mile ${fmt.dec1(m.mile)}`))} here (${gone.length > 1 ? 'those stops are' : 'that stop is'} gone)`);
+  }
+  for (const m of kept) moves.push(`moved ${fmt.gal(m.gallons)} planned at stop ${m.from_stop} (mile ${fmt.dec1(m.mile)}) here`);
+  for (const m of decision.moved_out || []) moves.push(`moved ${fmt.gal(m.gallons)} of it to stop ${m.to_stop} (mile ${fmt.dec1(m.mile)})`);
+  const extra = decision.consolidation_extra_cost;
+  const cost = extra && Math.abs(extra) >= 0.005 ? `, for ${fmt.money_signed(extra)}` : '';
+  const why = moves.length
+    ? `To avoid a stop under ${minimum}, consolidation ${joinAnd(moves)}${cost}.`
+    : `Consolidation adjusted it to avoid a stop under ${minimum}${cost}.`;
+  return `${greedyText(decision, body)} ${why} It buys ${fmt.gal(stop.gallons)}: ${decision.fills_tank ? 'a full tank, ' : ''}${reach}.`;
+}
+
+// Answers of a server older than the decision's "reaches" block.
+function legacyWhy(decision, body, about) {
   let text;
   if (decision.rule === 'reach_cheaper') {
     text = `Cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)}: bought just enough to reach it`;
   } else if (decision.rule === 'fill_up') {
-    text = `No cheaper station within ${fmt.miles(body.vehicle.max_range_miles)}: filled the tank`;
+    text = `No cheaper station within ${fmt.miles_round(body.vehicle.max_range_miles)}: filled the tank`;
   } else if (decision.rule === 'finish') {
     text = 'Cheapest price left before the destination: bought just enough to finish';
   } else {
     text = decision.rule;
   }
   if (decision.consolidated) {
-    const { minStop, maxCost } = consolidationLimits(body, about);
+    const { minStop } = consolidationLimits(body, about);
     text += `. Adjusted to avoid a stop under ${minStop !== null ? fmt.gal(minStop) : 'the minimum'}`;
-    if (maxCost !== null) text += ` (each fix ≤ ${fmt.money(maxCost)})`;
   }
   return text;
 }
@@ -59,8 +121,8 @@ export function renderStops(container, body, about, { onStop } = {}) {
     const quotes = s.price_quotes;
     const priceTitle = quotes
       ? quotes.count > 1
-        ? `${quotes.count} quotes in the file: ${fmt.price(quotes.min)}–${fmt.price(quotes.max)}${policy ? `; using the ${policy}` : ''}`
-        : 'One quote in the file'
+        ? `${quotes.count} quotes in the file: ${fmt.price_exact(quotes.min)}–${fmt.price_exact(quotes.max)}${policy ? `; using the ${policy}` : ''} (${fmt.price_exact(s.price_per_gallon)})`
+        : `One quote in the file: ${fmt.price_exact(s.price_per_gallon)}`
       : null;
     const why = whyText(s, body, about);
     const tr = el('tr', { tabindex: 0, dataset: { stop: s.stop }, title: `Stop ${s.stop}: show it on the map and the profile` },
@@ -72,9 +134,9 @@ export function renderStops(container, body, about, { onStop } = {}) {
       el('td', { 'data-label': 'Leg', class: 'num' }, fmt.miles(leg)),
       el('td', { 'data-label': 'Off route', class: 'num' }, fmt.miles(s.distance_from_route_miles)),
       el('td', { 'data-label': '$/gal', class: 'num' },
-        el('span', { title: priceTitle, class: quotes && quotes.count > 1 ? 'has-tip' : null }, fmt.price(s.price_per_gallon)),
+        el('span', { title: priceTitle, class: 'has-tip' }, fmt.price(s.price_per_gallon)),
         quotes && quotes.count > 1 ? el('small', { class: 'quotes' }, `${quotes.count} quotes`) : null),
-      el('td', { 'data-label': 'Arrive with', class: 'num' }, fmt.gal(s.fuel_on_arrival_gallons)),
+      el('td', { 'data-label': 'Arrive with', class: `num${s.fuel_on_arrival_gallons === 0 ? ' arrive-empty' : ''}`, title: s.fuel_on_arrival_gallons === 0 ? 'Arrives with an empty tank: the range is used literally, with no safety margin' : null }, fmt.gal(s.fuel_on_arrival_gallons)),
       el('td', { 'data-label': 'Buy', class: 'num' }, fmt.gal(s.gallons)),
       el('td', { 'data-label': 'Cost', class: 'num strong' }, fmt.money(s.cost)),
       el('td', { 'data-label': 'Why', class: 'why' }, why || '—'),
@@ -153,7 +215,7 @@ export function renderComparison(container, body) {
   if (before && cmp.optimized) {
     const extra = opt?.consolidation_extra_cost ?? cmp.optimized.total_fuel_cost - before.total_fuel_cost;
     const fewer = before.number_of_stops - cmp.optimized.number_of_stops;
-    consolidationNote = fewer > 0 ? `Consolidation: ${fmt.money_signed(extra)} for ${fewer} fewer stop${fewer > 1 ? 's' : ''}` : 'Consolidation changed nothing on this trip';
+    consolidationNote = fewer > 0 ? `Consolidation: ${fmt.money_signed(extra)} for ${plural(fewer, 'fewer stop', 'fewer stops')}` : 'Consolidation changed nothing on this trip';
   }
   const avg = cmp.corridor_average;
   const rows = [

@@ -7,7 +7,7 @@
 //   this session  - every request this page made;
 //   since start   - /api/stats, the server's own per-process counters.
 
-import { el, fmt, mark, replace, present, sum, percentile, codeLink, svg, serverTimingDur } from './format.js';
+import { el, fmt, mark, plural, replace, present, sum, percentile, codeLink, svg, serverTimingDur, MIN_SAMPLES_FOR_P95 } from './format.js';
 
 const GROUP_LABEL = { ext: 'external service', cache: 'cache', ours: 'our code', skipped: 'other' };
 let zoomOurs = false;
@@ -89,13 +89,17 @@ export function renderRequest(container, state) {
   const cards = el('div', { class: 'kpis kpis-perf' },
     card('Server', present(server) ? fmt.ms(server) : '—', 'X-Response-Time-ms header'),
     card('External API', present(ext) ? fmt.ms(ext) : '—',
-      present(calls) ? `${fmt.int(calls)} call(s)${(meta.external_api_services || []).length ? ` to ${[...new Set(meta.external_api_services)].join(', ')}` : ''}` : 'no meta in this answer',
+      present(calls) ? `${plural(calls, 'call')}${(meta.external_api_services || []).length ? ` to ${[...new Set(meta.external_api_services)].join(', ')}` : ''}` : 'no meta in this answer',
       calls === 0 ? 'is-ok' : calls > 1 ? 'is-warn' : ''),
     card('Our code', present(server) ? fmt.ms(Math.max(0, server - (ext || 0))) : '—', 'server − external'),
     card('Browser round trip', fmt.ms(c.roundTripMs), c.source === 'resource-timing' ? 'Resource Timing' : 'performance.now()'),
     card('Network + framework', present(network) ? fmt.ms(network) : '—', 'approx: round trip − server'),
-    card('Response size', present(c.transferBytes) ? fmt.bytes(c.transferBytes) : present(c.decodedBytes) ? fmt.bytes(c.decodedBytes) : '—',
-      present(c.decodedBytes) ? `${fmt.bytes(c.decodedBytes)} decoded · JSON.parse ${fmt.ms(c.parseMs)}` : null),
+    card('Transfer (incl. headers)', present(c.transferBytes) ? fmt.bytes(c.transferBytes) : '—',
+      [
+        present(c.encodedBytes) ? `body ${fmt.bytes(c.encodedBytes)} as sent (${result.headers.contentEncoding || 'not compressed'})` : null,
+        present(c.decodedBytes) ? `${fmt.bytes(c.decodedBytes)} decoded` : null,
+        present(c.parseMs) ? `JSON.parse ${fmt.ms(c.parseMs)}` : null,
+      ].filter(Boolean).join(' · ') || null),
     card('TTFB', present(c.ttfbMs) ? fmt.ms(c.ttfbMs) : '—', 'request start → first byte'),
   );
 
@@ -119,7 +123,7 @@ export function renderRequest(container, state) {
     const ratio = present(server) && server > 0 ? computedMs / server : null;
     children.push(el('div', { class: 'cached-card' },
       el('h4', {}, 'Served from the plan cache'),
-      el('p', {}, `Computed at ${fmt.time(pipeline.computed_at)} in ${fmt.ms(computedMs)} with ${fmt.int(pipeline.external_api_calls)} external call(s) → now ${fmt.ms(server)} with ${fmt.int(meta.external_api_calls)}`,
+      el('p', {}, `Computed at ${fmt.time(pipeline.computed_at)} in ${fmt.ms(computedMs)} with ${plural(pipeline.external_api_calls, 'external call')} → now ${fmt.ms(server)} with ${fmt.int(meta.external_api_calls)}`,
         ratio ? el('strong', {}, ` (${fmt.ratio(ratio)} faster)`) : null, '.'),
       bar(segmentsOf({ ...pipeline, timings_ms: pipeline.timings_ms }, null, null, { pipelineMode: true }), about, { gray: true, label: 'How long the cached plan took to compute' })));
   }
@@ -144,9 +148,19 @@ function sparkline(series) {
     })));
 }
 
+// p95 only with enough samples: with fewer it is just the maximum again.
+function p95Cell(value, count) {
+  return count >= MIN_SAMPLES_FOR_P95
+    ? el('td', { class: 'num' }, fmt.ms(value))
+    : el('td', { class: 'num muted', title: `A percentile needs at least ${MIN_SAMPLES_FOR_P95} requests; this has ${count}.` }, '—');
+}
+
 function statRow(label, values) {
   return el('tr', {}, el('th', { scope: 'row' }, label),
-    ...[Math.min(...values), percentile(values, 50), percentile(values, 95), Math.max(...values)].map((v) => el('td', { class: 'num' }, fmt.ms(v))));
+    el('td', { class: 'num' }, fmt.ms(Math.min(...values))),
+    el('td', { class: 'num' }, fmt.ms(percentile(values, 50))),
+    p95Cell(percentile(values, 95), values.length),
+    el('td', { class: 'num' }, fmt.ms(Math.max(...values))));
 }
 
 export function createBenchmark(container, { getState, client, routeUrlFor, onDone }) {
@@ -175,9 +189,12 @@ export function createBenchmark(container, { getState, client, routeUrlFor, onDo
       if (ok.length) {
         const server = ok.map((r) => r.headers.responseTimeMs).filter(present);
         const trip = ok.map((r) => r.client.roundTripMs);
+        const hits = ok.filter((r) => r.body?.meta?.plan_cache === 'hit').length;
         children.push(el('div', { class: 'bench-result' },
           el('table', { class: 'data compact' },
-            el('caption', {}, `${ok.length} answers, all from the plan cache`),
+            el('caption', {}, hits === ok.length
+              ? `${plural(ok.length, 'answer')}, all from the plan cache`
+              : `${plural(ok.length, 'answer')}, ${fmt.int(hits)} of them from the plan cache`),
             el('thead', {}, el('tr', {}, ['', 'min', 'p50', 'p95', 'max'].map((h) => el('th', { scope: 'col', class: h ? 'num' : null }, h)))),
             el('tbody', {}, server.length ? statRow('server', server) : null, statRow('round trip', trip))),
           el('figure', { class: 'spark-fig' }, sparkline([{ cls: 'trip', values: trip }, { cls: 'server', values: server }]),
@@ -243,15 +260,20 @@ export function renderSession(container, state, { onClear } = {}) {
 
 // --- since server start -------------------------------------------------------------------
 
+// The bar shows the p95 when there are enough samples, else the maximum.
+function barValue(p) {
+  return p.count >= MIN_SAMPLES_FOR_P95 ? p.p95 : p.max;
+}
+
 function pctRow(label, p, max) {
   if (!p) return el('tr', {}, el('th', { scope: 'row' }, label), el('td', { colspan: 5, class: 'muted' }, 'no request yet'));
   return el('tr', {},
     el('th', { scope: 'row' }, label),
     el('td', { class: 'num' }, fmt.int(p.count)),
     el('td', { class: 'num' }, fmt.ms(p.p50)),
-    el('td', { class: 'num' }, fmt.ms(p.p95)),
+    p95Cell(p.p95, p.count),
     el('td', { class: 'num' }, fmt.ms(p.max)),
-    el('td', { class: 'barcell' }, el('span', { class: 'hbar', css: { width: `${Math.max(1, (p.p95 / (max || 1)) * 100)}%` } })));
+    el('td', { class: 'barcell' }, el('span', { class: 'hbar', title: fmt.ms(barValue(p)), css: { width: `${Math.max(1, (barValue(p) / (max || 1)) * 100)}%` } })));
 }
 
 export function renderStats(container, stats, { onRefresh } = {}) {
@@ -264,9 +286,9 @@ export function renderStats(container, stats, { onRefresh } = {}) {
   const rr = stats.route_requests || {};
   const ext = stats.external_api || {};
   const lat = stats.latency_ms || {};
-  const outcomes = ['cold', 'route_cache_hit', 'plan_cache_hit', 'error'];
-  const maxP95 = Math.max(0, ...outcomes.map((k) => lat[k]?.p95 || 0));
+  const outcomes = ['cold', 'nominatim_call', 'route_cache_hit', 'plan_cache_hit', 'error'];
   const extLat = stats.external_latency_ms || {};
+  const maxBar = Math.max(0, ...[...outcomes.map((k) => lat[k]), extLat.osrm, extLat.nominatim].filter(Boolean).map(barValue));
   const kv = (obj) => Object.entries(obj || {}).map(([k, v]) => `${k} ${fmt.int(v)}`).join(' · ') || 'none';
   replace(container,
     el('div', { class: 'stats-head' },
@@ -275,21 +297,25 @@ export function renderStats(container, stats, { onRefresh } = {}) {
       refresh),
     el('div', { class: 'kpis kpis-perf' },
       card('Route requests', fmt.int(rr.total ?? 0), `by status: ${kv(rr.by_status)}`),
-      card('By outcome', kv(rr.by_outcome), 'cold · route cache · plan cache · error'),
+      card('By outcome', kv(rr.by_outcome), 'cold = routing call · nominatim_call = free text geocoded · cache hits · errors'),
       card('External calls', fmt.int(ext.calls ?? 0), `${kv(ext.by_service)} · ${fmt.ms(ext.total_ms ?? 0)} in total`),
       card('OSRM calls per routing request', present(ext.osrm_calls_per_routing_request) ? fmt.num(ext.osrm_calls_per_routing_request) : '—',
-        `at most ${fmt.int(ext.max_calls_in_one_request ?? 0)} in one request`),
+        present(ext.max_osrm_calls_in_one_request)
+          ? `at most ${plural(ext.max_osrm_calls_in_one_request, 'OSRM call')} in one request${(ext.max_calls_in_one_request ?? 0) > ext.max_osrm_calls_in_one_request ? ` (${plural(ext.max_calls_in_one_request, 'external call')} with geocoding)` : ''}`
+          : `at most ${plural(ext.max_calls_in_one_request ?? 0, 'external call')} in one request`),
       card('Errors', kv(rr.errors), `${fmt.int(rr.errors_without_external_calls ?? 0)} of them cost no external call`)),
     el('h4', {}, `Latency by outcome (last ${fmt.int(lat.window ?? 0)} requests, server time)`),
     el('div', { class: 'table-wrap' }, el('table', { class: 'data compact latency-table' },
-      el('thead', {}, el('tr', {}, ['Outcome', 'Requests', 'p50', 'p95', 'max', 'p95'].map((h, i) => el('th', { scope: 'col', class: i > 0 && i < 5 ? 'num' : null }, h)))),
+      el('thead', {}, el('tr', {}, ['Outcome', 'Requests', 'p50', 'p95', 'max', 'Relative'].map((h, i) => el('th', { scope: 'col', class: i > 0 && i < 5 ? 'num' : null }, h)))),
       el('tbody', {},
-        pctRow('cold (routing call)', lat.cold, maxP95),
-        pctRow('route cache hit', lat.route_cache_hit, maxP95),
-        pctRow('plan cache hit', lat.plan_cache_hit, maxP95),
-        pctRow('error', lat.error, maxP95),
-        pctRow('OSRM call alone', extLat.osrm, maxP95),
-        extLat.nominatim ? pctRow('Nominatim call alone', extLat.nominatim, maxP95) : null))),
+        pctRow('cold: the routing call', lat.cold, maxBar),
+        pctRow('free text: a Nominatim call (+ routing)', lat.nominatim_call, maxBar),
+        pctRow('route cache hit', lat.route_cache_hit, maxBar),
+        pctRow('plan cache hit', lat.plan_cache_hit, maxBar),
+        pctRow('error', lat.error, maxBar),
+        pctRow('OSRM call alone', extLat.osrm, maxBar),
+        extLat.nominatim ? pctRow('Nominatim call alone', extLat.nominatim, maxBar) : null))),
+    el('p', { class: 'muted small' }, `p95 is shown from ${MIN_SAMPLES_FOR_P95} requests on; the bar is the p95, or the maximum below that.`),
     el('h4', {}, 'Recent route requests (no locations are kept)'),
     (stats.recent || []).length
       ? el('div', { class: 'table-wrap table-scroll' }, el('table', { class: 'data compact cards' },

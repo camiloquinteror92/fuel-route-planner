@@ -8,17 +8,20 @@
   <h3>The pipeline of this answer</h3>
   <p class="muted" data-live-unless="derived.has_plan">Plan a trip to fill these numbers.</p>
   <p class="muted" data-live-if="derived.has_plan">Times are those of the computation that built this plan
-    (<span data-live="route.pipeline.computed_at" data-format="time">—</span>), also when it is served from the cache.</p>
+    (<span data-live="route.pipeline.computed_at" data-format="time">—</span>), also when it is served from the cache;
+    what belongs to this response alone says so.</p>
   <ol class="pipeline">
     <li class="stage">
       <h4>Validate</h4>
       <p>Format, ranges and unknown parameters are checked with no lookup, so a bad request is rejected without any external call.</p>
-      <p class="stage-live"><span data-live="stats.route_requests.errors_without_external_calls" data-format="int">—</span> rejected requests cost no external call since the server started.</p>
+      <p class="stage-live"><span data-live="derived.rejected_without_calls_text">—</span> cost no external call since the server started.</p>
       <a class="code-link" data-code="serializers.request">code</a>
     </li>
     <li class="stage">
       <h4>Geocode offline</h4>
-      <p>“City, ST” and “lat,lon” are resolved from a local index of US places; only other free text goes to Nominatim.</p>
+      <p>“lat,lon” is parsed; “City, ST” is looked up in an offline index of US places; “City, XX” with a region that is not a
+        US state (“Toronto, ON”) is rejected at once. Only what the index cannot place (an address, a landmark) goes to
+        Nominatim, cached, at most one request per second.</p>
       <p class="stage-live">start: <code data-live="route.start.geocoder">—</code> · finish: <code data-live="route.finish.geocoder">—</code> ·
         <span data-live="about.data.places_index_entries" data-format="int">—</span> places ·
         <span data-live="route.pipeline.timings_ms.geocoding_ms" data-format="ms">—</span></p>
@@ -26,29 +29,32 @@
     </li>
     <li class="stage">
       <h4>Checks before spending the call</h4>
-      <p>Same place written two ways, Alaska or Hawaii (no price data), points outside the USA, station table not loaded: all rejected before routing.</p>
-      <p class="stage-live"><span data-live="about.data.stations" data-format="int">—</span> stations loaded, data version <code data-live="about.data.version">—</code></p>
+      <p>Same place written two ways, Alaska, Hawaii or a territory (no price data), points outside the USA, station table not loaded: all rejected before routing.</p>
+      <p class="stage-live"><span data-live="about.data.geocoded" data-format="int">—</span> usable stations
+        (of <span data-live="about.data.stations" data-format="int">—</span> in the file), data version <code data-live="about.data.version">—</code></p>
       <a class="code-link" data-code="planner.check_endpoints">code</a> <a class="code-link" data-code="usa.in_usa">USA test</a>
     </li>
     <li class="stage">
       <h4>One routing call</h4>
       <p>OSRM returns the road geometry as an encoded polyline, decoded and resampled locally; the prepared route is cached by coordinates.</p>
-      <p class="stage-live"><span data-live="route.pipeline.external_api_calls" data-format="int">—</span> call(s),
+      <p class="stage-live"><span data-live="derived.pipeline_calls_text">—</span>,
         <span data-live="route.pipeline.external_api_ms" data-format="ms">—</span> ·
         <code data-literal>polyline6</code> <span data-live="route.pipeline.routing.polyline_chars" data-format="int">—</span> characters
         → <span data-live="route.pipeline.routing.geometry_points" data-format="int">—</span> points
         → <span data-live="route.pipeline.routing.samples" data-format="int">—</span> samples every <span data-live="route.pipeline.routing.sample_spacing_miles" data-format="miles">—</span>
         → <span data-live="route.pipeline.routing.map_points" data-format="int">—</span> map points</p>
-      <p class="stage-live">From the route cache: <span data-live="derived.routing_from_cache_text">—</span> · our part <span data-live="derived.pipeline_route_prep_ms" data-format="ms">—</span></p>
+      <p class="stage-live">Route: <span data-live="derived.routing_from_cache_text">—</span> · our part <span data-live="derived.pipeline_route_prep_ms" data-format="ms">—</span></p>
       <a class="code-link" data-code="osrm.get_route">call</a> <a class="code-link" data-code="osrm.decode_polyline">decoder</a>
       <a class="code-link" data-code="osrm.prepare_route">preparation</a> <a class="code-link" data-code="http.client">HTTP client</a>
     </li>
     <li class="stage stage-wide">
       <h4>Stations near the route</h4>
-      <p>numpy keeps the stations inside the route's bounding box, then a coarse pass along the route, then the exact distance to the line.</p>
+      <p>numpy keeps the stations inside the route's bounding box, then a coarse pass against one route point every
+        <span data-live="route.pipeline.corridor.coarse_step_miles" data-format="miles_round">—</span>, then the distance to the nearest
+        route sample (one every <span data-live="route.pipeline.routing.sample_spacing_miles" data-format="miles">—</span>).</p>
       <div id="funnel"></div>
       <p class="stage-live"><span data-live="route.pipeline.timings_ms.corridor_ms" data-format="ms">—</span>
-        · kept <span data-live="derived.corridor_kept_pct" data-format="pct">—</span> of the stations</p>
+        · kept <span data-live="derived.corridor_kept_pct" data-format="pct">—</span> of the usable stations</p>
       <a class="code-link" data-code="stations.stations_along_route">code</a>
     </li>
     <li class="stage">
@@ -72,12 +78,13 @@
     <li class="stage">
       <h4>Response</h4>
       <p>Money in Decimal, so the stop costs add up to the total to the cent; GeoJSON for the map; the strategy comparison.</p>
-      <p class="stage-live"><span data-live="derived.checks_passed" data-format="int">—</span>/<span data-live="derived.checks_total" data-format="int">—</span> contract checks ·
-        <span data-live="derived.geojson_features" data-format="int">—</span> GeoJSON features ·
-        <span data-live="client.decoded_bytes" data-format="bytes">—</span> ·
-        build <span data-live="route.pipeline.timings_ms.response_build_ms" data-format="ms">—</span> ·
+      <p class="stage-live">Computed with the plan: build <span data-live="route.pipeline.timings_ms.response_build_ms" data-format="ms">—</span> ·
         comparison <span data-live="route.pipeline.timings_ms.comparison_ms" data-format="ms">—</span> ·
-        JSON render <span data-live="derived.render_ms" data-format="ms">—</span></p>
+        <span data-live="derived.geojson_features" data-format="int">—</span> GeoJSON features</p>
+      <p class="stage-live">This response: <span data-live="client.decoded_bytes" data-format="bytes">—</span> of JSON
+        (<span data-live="client.encoded_bytes" data-format="bytes">—</span> on the wire) · JSON render
+        <span data-live="derived.render_ms" data-format="ms">—</span> ·
+        <span data-live="derived.checks_passed" data-format="int">—</span>/<span data-live="derived.checks_total" data-format="int">—</span> contract checks</p>
       <a class="code-link" data-code="planner.build_stops">stops</a> <a class="code-link" data-code="planner.build_geojson">GeoJSON</a>
       <a class="code-link" data-code="planner.comparison">comparison</a>
     </li>
@@ -94,26 +101,34 @@
     <p>That is optimal: every mile is driven on fuel from the cheapest station that could have supplied it.
       The pure optimum sometimes stops for a couple of gallons to save a cent, so stops under
       <span data-live="about.vehicle.min_stop_gallons" data-format="gal">—</span> are merged with a neighbour when each fix costs at most
-      <span data-live="about.vehicle.max_consolidation_cost" data-format="money">—</span>. The Plan tab shows the price of that comfort.</p>
+      <span data-live="about.vehicle.max_consolidation_cost" data-format="money">—</span>. Every stop of the final plan says where its fuel
+      was planned by the greedy and what moving it cost, so the “Why” column of the Plan tab explains the plan you see, not the
+      greedy's.</p>
     <p>Verified against an exact dynamic-programming solution on random routes in the test suite:
       <span data-test="fuelroute/tests/test_optimizer.py::test_greedy_matches_exact_dp"></span>.
       The price-blind baseline never beats it:
-      <span data-test="fuelroute/tests/test_optimizer.py::test_price_blind_driver_buys_the_same_gallons_and_never_beats_the_optimum"></span>.</p>
+      <span data-test="fuelroute/tests/test_optimizer.py::test_price_blind_driver_buys_the_same_gallons_and_never_beats_the_optimum"></span>.
+      Consolidation loses and invents no gallon, and its cost is exactly the cost of the fuel it moved:
+      <span data-test="fuelroute/tests/test_optimizer.py::test_consolidation_says_where_each_gallon_was_planned"></span>.</p>
   </div>
 
   <h3>The data</h3>
   <div class="data-grid">
     <dl class="facts">
       <dt>Price file</dt><dd><code data-live="about.data.price_file">—</code></dd>
-      <dt>Stations</dt><dd><span data-live="about.data.stations" data-format="int">—</span> from <span data-live="about.data.price_quotes" data-format="int">—</span> price quotes</dd>
-      <dt>Quoted several times</dt><dd><span data-live="about.data.stations_with_several_quotes" data-format="int">—</span>, priced with the <span data-live="about.planner.price_policy">—</span> quote</dd>
-      <dt>Geocoded offline</dt><dd><span data-live="about.data.geocoded_by_source.census" data-format="int">—</span> Census ·
+      <dt>Stations</dt><dd><span data-live="about.data.stations" data-format="int">—</span> in the file, from <span data-live="about.data.price_quotes" data-format="int">—</span> price quotes</dd>
+      <dt>Usable</dt><dd><span data-live="about.data.geocoded" data-format="int">—</span> geocoded offline:
+        <span data-live="about.data.geocoded_by_source.census" data-format="int">—</span> Census ·
         <span data-live="about.data.geocoded_by_source.geonames" data-format="int">—</span> GeoNames</dd>
       <dt>Left out</dt><dd><span data-live="about.data.not_geocoded" data-format="int">—</span> stations whose city could not be placed reliably: left out instead of guessed</dd>
-      <dt>Price per gallon</dt><dd><span data-live="about.data.price_per_gallon.min" data-format="price">—</span> ·
+      <dt>Quoted several times</dt><dd><span data-live="about.data.stations_with_several_quotes" data-format="int">—</span>, priced with the <span data-live="about.planner.price_policy">—</span> quote</dd>
+      <dt>Price per gallon <small>(usable stations)</small></dt><dd><span data-live="about.data.price_per_gallon.min" data-format="price">—</span> ·
         <span data-live="about.data.price_per_gallon.median" data-format="price">—</span> ·
         <span data-live="about.data.price_per_gallon.max" data-format="price">—</span> (min · median · max)</dd>
-      <dt>Lower-forty-eight states without a station</dt><dd><span data-live="derived.states_without_text">—</span></dd>
+      <dt>Lower-forty-eight states without a station</dt>
+      <dd data-live-if="derived.all_states_have_stations">none: every one has stations; the thinnest are <span data-live="derived.thinnest_text">—</span></dd>
+      <dd data-live-if="derived.some_states_without"><span data-live="derived.states_without_text">—</span></dd>
+      <dt>District of Columbia</dt><dd><span data-live="about.data.district_of_columbia_geocoded" data-format="int">—</span> stations</dd>
     </dl>
     <div>
       <p class="muted small">Stations per state (light: geocoded)</p>
@@ -130,7 +145,7 @@
       <summary>Offline geocoding instead of a geocoding API</summary>
       <p><strong>Instead of:</strong> calling Nominatim or Google for every “City, ST”.
         <strong>Why:</strong> no call, no key, no rate limit, and the same place always gets the same point.
-        <strong>Cost:</strong> city-level points; addresses fall back to Nominatim.
+        <strong>Cost:</strong> city-level points; addresses fall back to Nominatim, whose match is named in a warning.
         <strong>Evidence:</strong> <span data-live="about.data.places_index_entries" data-format="int">—</span> places;
         this answer: <code data-live="route.start.geocoder">—</code>.</p>
     </details>
@@ -157,8 +172,11 @@
     </details>
     <details>
       <summary>An exact greedy, checked against dynamic programming</summary>
-      <p><strong>Why:</strong> linear time and provably optimal for this problem.
-        <strong>Evidence:</strong> <span data-test="fuelroute/tests/test_optimizer.py::test_greedy_matches_exact_dp"></span>.</p>
+      <p><strong>Why:</strong> provably optimal for this problem, and cheap: <code data-literal>O(n log n + n·k)</code>, with
+        <var>n</var> the stations on the route and <var>k</var> those within one tank.
+        <strong>Evidence:</strong> <span data-live="route.pipeline.optimizer.candidates" data-format="int">—</span> stations in
+        <span data-live="route.pipeline.timings_ms.optimizer_ms" data-format="ms">—</span> on this trip;
+        <span data-test="fuelroute/tests/test_optimizer.py::test_greedy_matches_exact_dp"></span>.</p>
     </details>
     <details>
       <summary>Consolidation with a cost cap</summary>
@@ -167,11 +185,14 @@
         <span data-live="derived.consolidation_extra_cost" data-format="money_signed">—</span> on this trip.</p>
     </details>
     <details>
-      <summary>Pay every mile by default</summary>
-      <p><strong>Why:</strong> “total money spent on fuel” for the trip should not depend on a free tank at the start.
-        The truck leaves with a reserve and must return it; <code>start_tank=full</code> is the alternative.
+      <summary>Pay every mile by default; the range used literally</summary>
+      <p><strong>Why:</strong> “total money spent on fuel” for the trip should not depend on a free tank at the start. The truck
+        leaves with a reserve and must arrive with the same amount: borrowed and returned, so the fuel bought equals the fuel
+        burned. It is not a safety margin: between stops the full range is used, so a stop can be reached with an empty tank.
+        <code>start_tank=full</code> is the alternative: a free full tank, and only what is needed to arrive is bought.
         <strong>Evidence:</strong> <span data-live="route.summary.total_gallons_purchased" data-format="gal">—</span> bought for
-        <span data-live="derived.fuel_needed_gal" data-format="gal">—</span> burned.</p>
+        <span data-live="derived.fuel_needed_gal" data-format="gal">—</span> burned; lowest arrival at a stop
+        <span data-live="derived.lowest_arrival" data-format="gal">—</span>.</p>
     </details>
     <details>
       <summary>Median price for stations listed several times</summary>
@@ -189,8 +210,9 @@
       <summary>Protect the free upstream</summary>
       <p><strong>Why:</strong> the public OSRM and Nominatim servers have fair-use limits.
         <strong>How:</strong> connect and read timeouts, <span data-live="about.planner.http_retries" data-format="int">—</span> retry for transient
-        failures, an own rate limit of <span data-live="about.planner.rate_limit_per_minute" data-format="int">—</span> requests per minute,
-        and their rate limit turned into a clean answer with Retry-After.</p>
+        failures, an own rate limit of <span data-live="about.planner.rate_limit_per_minute" data-format="int">—</span> requests per minute
+        on <code>/api/route</code> (this page's own loads are not counted), and their rate limit turned into a clean answer with
+        Retry-After.</p>
     </details>
   </div>
 
@@ -199,26 +221,46 @@
     <li>Station coordinates are city-level: the farthest stop of this plan is <span data-live="derived.max_offroute" data-format="miles">—</span>
       from the route as computed, which is approximate.</li>
     <li>The detour to each stop is not priced: about <span data-live="derived.detour_approx" data-format="miles">—</span> there and back on this plan (approx).</li>
-    <li>Some states have few or no stations in the file: <span data-live="derived.states_without_count" data-format="int">—</span> of the lower forty-eight have none.</li>
-    <li>The public OSRM server has no SLA: its <span data-literal>p95</span> since this server started is <span data-live="stats.external_latency_ms.osrm.p95" data-format="ms">—</span>.</li>
-    <li>Caches and counters live in one process (pid <span data-live="stats.process.pid">—</span>, up <span data-live="stats.process.uptime_seconds" data-format="duration">—</span>).</li>
+    <li>No safety margin between stops: the plan uses the whole range, so
+      <span data-live="derived.stops_arriving_empty" data-format="int">—</span> of its
+      <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank. A configurable
+      minimum fuel at every stop is the next step; until then a smaller <code>MAX_RANGE_MILES</code> keeps a margin.</li>
+    <li data-live-if="derived.all_states_have_stations">Every one of the lower forty-eight states has stations in the file, but some
+      have very few: the thinnest are <span data-live="derived.thinnest_text">—</span>.</li>
+    <li data-live-if="derived.some_states_without">Lower-forty-eight states without a usable station:
+      <span data-live="derived.states_without_text">—</span>; the thinnest of the others are <span data-live="derived.thinnest_text">—</span>.</li>
+    <li>The public OSRM server has no SLA:
+      <span data-live-if="derived.osrm_p95">its <span data-literal>p95</span> since this server started is
+        <span data-live="derived.osrm_p95" data-format="ms">—</span>.</span>
+      <span data-live-if="derived.osrm_few_samples">its slowest call since this server started took
+        <span data-live="derived.osrm_max" data-format="ms">—</span> (<span data-live="derived.osrm_samples" data-format="int">—</span>
+        calls: too few for a percentile).</span></li>
+    <li>Caches and counters live in one process (pid <span data-live="stats.process.pid">—</span>, up <span data-live="stats.process.uptime_seconds" data-format="duration">—</span>);
+      a plan stays cached for <span data-live="about.planner.plan_cache_seconds" data-format="duration">—</span>.</li>
     <li>The duration comes from OSRM's car profile, not a truck's.</li>
   </ul>
-  <p class="muted">Next steps: Redis for shared caches and exported metrics; an own OSRM with a truck profile; exact exit coordinates;
-    a dated price feed; the time cost of a stop inside the objective; stops aligned with hours of service; a spatial index at scale.</p>
+  <p class="muted">Next steps: a minimum fuel at every stop; Redis for shared caches and exported metrics; an own OSRM with a truck
+    profile; exact exit coordinates; a dated price feed; the time cost of a stop inside the objective; stops aligned with hours of
+    service; a spatial index at scale.</p>
 
   <h3>How it was built</h3>
   <ol class="prose-list built">
     <li>Read the brief for what it asks directly (route, map, cheapest stops, total cost, a free routing API, few calls, fast answers)
       and between the lines (exact money, clear errors, messy data handled, tests).</li>
-    <li>Studied the price file first: no coordinates, stations repeated with different prices, city names shared by several places.
-      Built the offline place index and the homonym rules before writing the API.</li>
-    <li>One routing call, decoded and resampled locally, cached by coordinates with single flight.</li>
-    <li>The corridor search in numpy, checked against brute force.</li>
-    <li>The optimizer: the classic greedy, checked against an exact dynamic program on random routes, then the capped consolidation.</li>
-    <li>The response: Decimal money, every error with a code and the external calls already spent, Server-Timing, stats and about.</li>
-    <li>This page: a client of the same API. Every number on it comes from an answer, from the server's counters or from the browser.</li>
+    <li>Data first: the price file has no coordinates, so an offline index of US places (Census Gazetteer and GeoNames) and a
+      loader that merges repeated stations and places each one without any API.</li>
+    <li>The core: one routing call decoded locally, the corridor search in numpy, the greedy optimizer, the endpoint and a first
+      map, tested against brute force with the routing service faked.</li>
+    <li>Then the real data pushed back: stations in the destination city, homonym cities (resolved from the address or left out),
+      routes through Canada (a raster of the US outline), the empty-tank edge cases, and money in Decimal.</li>
+    <li>Explaining the plan: the reason of each stop, the price-blind baseline and the strategy comparison, the record of how
+      the plan was computed, Server-Timing, <code>/api/stats</code> and <code>/api/about</code>.</li>
+    <li>This page, a client of the same API, with tests that keep it honest: no number written by hand, and every test, code link
+      and requirement it cites exists on the server.</li>
+    <li>A review from the page itself: what a reviewer could notice (a Canadian city planned as a street in Indiana, a stop
+      explained by a station consolidation had removed, links that did not match GitHub) became fixes with regression tests.</li>
   </ol>
+  <p class="muted" id="history-summary"></p>
   <div class="built-grid">
     <div>
       <h4>Commits</h4>

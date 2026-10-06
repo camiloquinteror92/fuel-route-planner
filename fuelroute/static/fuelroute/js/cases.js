@@ -4,9 +4,11 @@
 //
 // "Run all" is sequential and waits between cases that may reach the public
 // routing server (its fair-use policy is about one request per second); a 429
-// stops the run and shows the server's Retry-After.
+// stops the run and shows the server's Retry-After. A case that depends on the
+// cache left by another one ("requires") runs that one first when it is run alone,
+// so its expectation holds whatever was run before.
 
-import { el, fmt, mark, replace, testBadge } from './format.js';
+import { el, fmt, mark, plural, replace, testBadge } from './format.js';
 import { request, routeUrl, tripLabel } from './api.js';
 
 const ROUTE_SPACING_MS = 1100;
@@ -45,7 +47,7 @@ export const CASES = [
   {
     id: 'la_sf_full', label: 'Los Angeles, CA → San Francisco, CA (full)', proves: 'Same trip on a full tank: no stop, route from the cache.',
     params: { start: 'Los Angeles, CA', finish: 'San Francisco, CA', start_tank: 'full' },
-    expected: { status: 200, stops: 0, max_calls: 0 }, may_route: true, note: 'after the previous case',
+    expected: { status: 200, stops: 0, max_calls: 0 }, may_route: true, requires: 'la_sf_empty',
     test_id: `${T}test_short_trip_with_full_tank_has_no_stops`,
   },
   {
@@ -54,9 +56,21 @@ export const CASES = [
     expected: { status: 200, stops: 0, max_calls: 1 }, may_route: true, test_id: `${T}test_short_trip_with_full_tank_has_no_stops`,
   },
   {
-    id: 'paris', label: 'Paris coordinates → Austin, TX', proves: 'A point outside the USA is rejected before any call.',
+    id: 'paris', label: 'Paris coordinates → Austin, TX', proves: 'Coordinates outside the USA are rejected by validation, before any call.',
     params: { start: '48.8566,2.3522', finish: 'Austin, TX', start_tank: 'empty' },
     expected: { status: 400, error: 'invalid_request', max_calls: 0 }, test_id: `${T}test_points_outside_the_usa_are_400_without_calls`,
+  },
+  {
+    id: 'toronto', label: 'Toronto, ON → Austin, TX', proves: 'A place in a Canadian province is outside the USA: no geocoding call, no street in Indiana.',
+    params: { start: 'Toronto, ON', finish: 'Austin, TX', start_tank: 'empty' },
+    expected: { status: 400, error: 'location_outside_usa', max_calls: 0 },
+    test_id: `${T}test_places_written_with_a_region_outside_the_states_are_rejected_without_calls`,
+  },
+  {
+    id: 'state_typo', label: 'Austin, TZ → Dallas, TX', proves: 'A state code that does not exist is caught offline, not guessed by a geocoder.',
+    params: { start: 'Austin, TZ', finish: 'Dallas, TX', start_tank: 'empty' },
+    expected: { status: 400, error: 'location_not_found', max_calls: 0 },
+    test_id: `${T}test_places_written_with_a_region_outside_the_states_are_rejected_without_calls`,
   },
   {
     id: 'anchorage', label: 'Anchorage, AK → Seattle, WA', proves: 'No price data in Alaska: 422 before routing.',
@@ -106,7 +120,7 @@ export const CASES = [
   {
     id: 'trailing_slash', label: '/api/route/ (trailing slash)', proves: 'The slash is optional; the first case is served from the plan cache.',
     params: { start: 'New York, NY', finish: 'Los Angeles, CA', start_tank: 'empty' }, slash: true,
-    expected: { status: 200, plan_cache: 'hit', max_calls: 0 }, note: 'after the first case', test_id: `${T}test_trailing_slash_and_unknown_paths`,
+    expected: { status: 200, plan_cache: 'hit', max_calls: 0 }, requires: 'ny_la', test_id: `${T}test_trailing_slash_and_unknown_paths`,
   },
   {
     id: 'not_found', label: '/api/nope', proves: 'Unknown paths under /api/ answer a JSON 404.',
@@ -117,6 +131,8 @@ export const CASES = [
 // Which case shows each error code (for "Try it" in the error catalog).
 export const CASE_FOR_ERROR = {
   invalid_request: 'paris',
+  location_outside_usa: 'toronto',
+  location_not_found: 'state_typo',
   same_location: 'same_place',
   no_fuel_data_in_region: 'anchorage',
   no_reachable_fuel_station: 'seattle_la',
@@ -134,7 +150,7 @@ export function expectedText(expected) {
   if (expected.detail_has) parts.push(`detail.${expected.detail_has}`);
   if (expected.stops !== undefined) parts.push(`${expected.stops === 0 ? 'no' : expected.stops} stops`);
   if (expected.plan_cache) parts.push(`plan cache ${expected.plan_cache}`);
-  if (expected.max_calls !== undefined) parts.push(expected.max_calls === 0 ? 'no external call' : `≤ ${expected.max_calls} external call`);
+  if (expected.max_calls !== undefined) parts.push(expected.max_calls === 0 ? 'no external call' : `≤ ${plural(expected.max_calls, 'external call')}`);
   return parts.join(' · ');
 }
 
@@ -151,7 +167,7 @@ export function evaluate(c, r) {
   if (e.max_calls !== undefined) {
     const calls = body.meta?.external_api_calls;
     if (calls === undefined || calls === null) problems.push('no meta.external_api_calls');
-    else if (calls > e.max_calls) problems.push(`${calls} external call(s)`);
+    else if (calls > e.max_calls) problems.push(plural(calls, 'external call'));
   }
   return { ok: problems.length === 0, problems };
 }
@@ -237,6 +253,15 @@ export function createCases({ routeBase, getAbout, onOpen, onChange }) {
     if (!c || running) return null;
     running = true;
     try {
+      // Its prerequisite first (a cache hit, so free, when it already ran).
+      const before = c.requires ? CASES.find((x) => x.id === c.requires) : null;
+      if (before) {
+        const r = await run(before);
+        if (r.status === 429) {
+          startCountdown(Number(r.headers.retryAfter) || 0);
+          return r;
+        }
+      }
       const r = await run(c);
       if (r.status === 429) startCountdown(Number(r.headers.retryAfter) || 0);
       return r;
@@ -268,11 +293,12 @@ export function createCases({ routeBase, getAbout, onOpen, onChange }) {
       let actual = '—';
       if (res?.running) actual = 'running…';
       else if (r) {
-        actual = [r.status || r.failure, body.error, body.meta ? `${body.meta.external_api_calls} call(s)` : null,
+        actual = [r.status || r.failure, body.error, body.meta ? plural(body.meta.external_api_calls, 'call') : null,
           r.headers.responseTimeMs !== null ? fmt.ms(r.headers.responseTimeMs) : null].filter((x) => x !== null && x !== undefined).join(' · ');
       }
       return el('tr', {},
-        el('th', { scope: 'row', 'data-label': 'Case' }, c.label, c.note ? el('small', { class: 'muted' }, ` (${c.note})`) : null),
+        el('th', { scope: 'row', 'data-label': 'Case' }, c.label,
+          c.requires ? el('small', { class: 'muted' }, ` (runs “${CASES.find((x) => x.id === c.requires)?.label}” first)`) : null),
         el('td', { 'data-label': 'What it proves' }, c.proves),
         el('td', { 'data-label': 'Expected' }, el('code', {}, expectedText(c.expected))),
         el('td', { 'data-label': 'Actual' }, actual, res && res.problems?.length ? el('small', { class: 'bad' }, res.problems.join('; ')) : null),

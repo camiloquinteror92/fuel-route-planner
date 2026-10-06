@@ -86,7 +86,7 @@ function record(result) {
 }
 
 function emptyHeaders() {
-  return { responseTimeMs: null, serverTiming: [], retryAfter: null, contentType: null, contentLength: null };
+  return { responseTimeMs: null, serverTiming: [], retryAfter: null, contentType: null, contentLength: null, contentEncoding: null };
 }
 
 // request('GET', url) -> {ok, status, body, text, url, method, headers, client, ...}
@@ -116,7 +116,7 @@ export async function request(method, url, options = {}) {
       ok: false, status: 0, body: null, text: '', url: absolute, method, at, origin, trip, requestBody: init.body ?? null,
       failure: signal?.aborted ? 'timeout' : 'network', message: String(error?.message || error),
       headers: emptyHeaders(),
-      client: { roundTripMs: performance.now() - started, ttfbMs: null, transferBytes: null, decodedBytes: null, parseMs: null, source: 'performance.now' },
+      client: { roundTripMs: performance.now() - started, ttfbMs: null, transferBytes: null, encodedBytes: null, decodedBytes: null, parseMs: null, source: 'performance.now' },
     };
     record(failed);
     return failed;
@@ -150,18 +150,25 @@ export async function request(method, url, options = {}) {
       retryAfter: h.get('Retry-After'),
       contentType: h.get('Content-Type'),
       contentLength: h.get('Content-Length'),
-      raw: { 'Content-Type': h.get('Content-Type'), 'X-Response-Time-ms': serverMs, 'Server-Timing': h.get('Server-Timing'), 'Retry-After': h.get('Retry-After') },
+      contentEncoding: h.get('Content-Encoding'),
+      raw: {
+        'Content-Type': h.get('Content-Type'), 'Content-Encoding': h.get('Content-Encoding'), 'X-Response-Time-ms': serverMs,
+        'Server-Timing': h.get('Server-Timing'), 'Retry-After': h.get('Retry-After'),
+      },
     },
     client: entry
       ? {
           roundTripMs: entry.duration,
           ttfbMs: entry.responseStart > 0 ? entry.responseStart - entry.startTime : null,
+          // transferSize: what travelled, headers included; encodedBodySize: the body as
+          // sent (gzip); decodedBodySize: the body after decompression.
           transferBytes: entry.transferSize || null,
+          encodedBytes: entry.encodedBodySize || null,
           decodedBytes: entry.decodedBodySize || new Blob([text]).size,
           parseMs,
           source: 'resource-timing',
         }
-      : { roundTripMs: ended - started, ttfbMs: null, transferBytes: null, decodedBytes: new Blob([text]).size, parseMs, source: 'performance.now' },
+      : { roundTripMs: ended - started, ttfbMs: null, transferBytes: null, encodedBytes: null, decodedBytes: new Blob([text]).size, parseMs, source: 'performance.now' },
   };
   record(result);
   return result;

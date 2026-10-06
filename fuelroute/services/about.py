@@ -97,6 +97,7 @@ CODE_LINKS: dict[str, tuple[str, str]] = {
     "metrics.route_metrics": ("fuelroute/services/metrics.py", "RouteMetrics"),
     "planner.settings": ("fuelroute/services/planner.py", "PlanSettings"),
     "optimizer.plan_fuel_stops": ("fuelroute/services/optimizer.py", "plan_fuel_stops"),
+    "places.search": ("fuelroute/services/places.py", "PlaceIndex.search"),
 }
 
 # The assessment, requirement by requirement. ``brief`` / ``how`` are templates
@@ -116,6 +117,7 @@ REQUIREMENTS: list[dict] = [
         ),
         "sources": ["serializers.request", "geocoding.geocode", "places.index", "usa.in_usa", "planner.check_endpoints"],
         "tests": [
+            "test_places::test_every_label_plans_to_the_same_point",
             "test_api::test_points_outside_the_usa_are_400_without_calls",
             "test_api::test_places_written_with_a_region_outside_the_states_are_rejected_without_calls",
             "test_api::test_alaska_and_hawaii_are_422_before_routing",
@@ -246,6 +248,7 @@ REQUIREMENTS: list[dict] = [
             "test_api::test_second_request_uses_the_plan_cache",
             "test_api::test_identical_concurrent_requests_make_one_routing_call",
             "test_api::test_server_timing_header_breaks_down_the_request",
+            "test_places::test_search_is_fast_on_the_real_index",
         ],
     },
     {
@@ -371,6 +374,7 @@ HTTP_ERRORS = [
 ENDPOINTS = [
     {"method": "GET|POST", "path": "/api/route", "description": "Plan a trip: route, cheapest fuel stops, total cost and map (JSON)."},
     {"method": "GET", "path": "/api/route/map", "description": "The planner page (HTML), a client of /api/route."},
+    {"method": "GET", "path": "/api/places", "description": "Type-ahead of US places (offline index, no external call)."},
     {"method": "GET", "path": "/api/stats", "description": "Requests, external calls and latency since this server process started."},
     {"method": "GET", "path": "/api/about", "description": "Versions, configuration, loaded data, requirements, tests and errors."},
     {"method": "GET", "path": "/", "description": "Browsers are sent to the planner page; API clients get a JSON index."},

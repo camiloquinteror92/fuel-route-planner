@@ -1,6 +1,7 @@
 """HTTP layer of the JSON API: validates the input, calls the planner, shapes the response.
 
-* ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``)
+* ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``), with optional what-if settings
+* ``GET /api/places``     -> type-ahead of US places from the offline index (``PlacesView``)
 * ``GET /api/stats``      -> requests, external calls and latency since start (``StatsView``)
 * ``GET /api/about``      -> versions, config, data, requirements, tests, errors (``AboutView``)
 * ``GET /``               -> browsers: redirect to the planner page; API clients: a small JSON index
@@ -16,6 +17,7 @@ service). Every ``/api/route`` response, errors included, carries a
 ``Server-Timing`` header with the time of each step (``server_timing``).
 """
 
+import time
 from collections import defaultdict
 
 from django.http import JsonResponse
@@ -24,11 +26,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.views import exception_handler as drf_exception_handler
 
-from .serializers import RouteRequestSerializer
+from .serializers import PlacesRequestSerializer, RouteRequestSerializer
 from .services.about import build_about
 from .services.errors import PlannerError
 from .services.http import ExternalApiClient
 from .services.metrics import route_metrics
+from .services.places import get_place_index
 from .services.planner import plan_trip
 
 
@@ -152,6 +155,37 @@ class StatsView(APIView):
         return Response(route_metrics.snapshot(), headers={"Cache-Control": "no-store"})
 
 
+class PlacesView(APIView):
+    """GET /api/places?q=chi[, il]&limit=8: US places whose name starts with ``q``.
+
+    From the offline index the planner geocodes with (0 external calls), most
+    populated first; each ``label`` plans to exactly the point shown. Fewer than two
+    letters: no results.
+    """
+
+    def get(self, request):
+        started = time.perf_counter()
+        serializer = PlacesRequestSerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(
+                {"error": "invalid_request", "detail": serializer.errors, "meta": no_calls_meta()}, status=400
+            )
+        query, limit = serializer.validated_data["q"], serializer.validated_data["limit"]
+        results, matches = get_place_index().search(query, limit)
+        return Response(
+            {
+                "results": results,
+                "meta": {
+                    "external_api_calls": 0,
+                    "query": query,
+                    "matches": matches,
+                    "took_ms": round((time.perf_counter() - started) * 1000, 2),
+                },
+            },
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+
 class AboutView(APIView):
     """GET /api/about: versions, configuration, loaded data, requirements -> code and tests,
     the last pytest run and the error catalog (``services/about.py``). 0 external calls."""
@@ -169,9 +203,12 @@ def index(request):
             "service": "Spotter fuel route API",
             "endpoints": {
                 "GET|POST /api/route": (
-                    "start, finish ('City, ST' or 'lat,lon'), start_tank (empty|full), include (candidates)"
+                    "start, finish ('City, ST' or 'lat,lon'), start_tank (empty|full), include (candidates); "
+                    "what-if: mpg, max_range_miles, corridor_miles, price_policy (median|min|max), consolidate, "
+                    "safety_reserve_gal"
                 ),
                 "GET /api/route/map": "same parameters, the planner page (HTML)",
+                "GET /api/places": "q (the start of a US place name, 'chi' or 'chi, il'), limit: type-ahead",
                 "GET /api/stats": "requests, external calls and latency since the server started",
                 "GET /api/about": "versions, configuration, loaded data, requirements, tests and error codes",
             },
@@ -184,7 +221,7 @@ def api_not_found(request, *args, **kwargs):
     return JsonResponse(
         {
             "error": "not_found",
-            "detail": f"No endpoint at {request.path}. Use /api/route, /api/stats or /api/about.",
+            "detail": f"No endpoint at {request.path}. Use /api/route, /api/places, /api/stats or /api/about.",
             "meta": no_calls_meta(),
         },
         status=404,

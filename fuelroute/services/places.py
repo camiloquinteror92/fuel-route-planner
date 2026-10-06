@@ -8,17 +8,26 @@ state) and each group is ordered best-first, so:
   incorporated one. Used for user input ("Mountain View, CA").
 * ``candidates()`` returns every place of the group. Used by the station loader to
   detect ambiguous city names (12 "Antioch" in Tennessee) instead of guessing.
+* ``search()`` is the type-ahead of ``GET /api/places``: names that START with what
+  was typed, most populated first, one row per (name, state) (the place
+  ``lookup()`` would pick, so a suggestion always plans to the same point).
 
 Memory: ~190k places are kept in numpy arrays and two dicts of
 ``"name|ST" -> packed (first row, row count)`` integers, about 55 MB per process
 instead of ~200 MB for dicts of Python objects. Loading takes about 0.4 s and is
-done once per process (``fuelroute/warmup.py``).
+done once per process (``fuelroute/warmup.py``). The type-ahead adds a sorted list
+of the same key strings (pointers, ~1.5 MB) and two small arrays, built on first use
+(also by the warm-up); a search is a binary search plus a top-k on numpy, well
+under a millisecond.
 """
 
 from __future__ import annotations
 
 import csv
 import gzip
+import re
+import threading
+from bisect import bisect_left
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -26,7 +35,16 @@ from pathlib import Path
 import numpy as np
 from django.conf import settings
 
-from .text import compact, normalize_place
+from .text import US_STATES, compact, normalize_place
+
+# States whose places can be suggested ("City, ST" geocodes there). Alaska and Hawaii
+# are suggested but flagged: the price file has no station there (planning is a 422).
+_NO_FUEL_DATA_STATES = ("AK", "HI")
+_LETTER = re.compile(r"[a-z]")
+# The type-ahead answers nothing until this many letters of the name were typed.
+MIN_QUERY_LETTERS = 2
+# Sorts after any character of a name: [prefix, prefix + this) holds every name with that prefix.
+_AFTER_EVERY_NAME = chr(0x10FFFF)
 
 _SOURCES = ("census", "geonames")
 # A group never has more than a few dozen places; 12 bits leave plenty of room.
@@ -78,6 +96,10 @@ class PlaceIndex:
             if " " in name:
                 self._compact.setdefault(f"{compact(name)}|{state}", packed)
 
+        # Type-ahead index (``search``), built on first use.
+        self._prefix: tuple | None = None
+        self._prefix_lock = threading.Lock()
+
     @staticmethod
     def _pack(start: int, count: int) -> int:
         return (start << _COUNT_BITS) | min(count, (1 << _COUNT_BITS) - 1)
@@ -103,6 +125,67 @@ class PlaceIndex:
         start = packed >> _COUNT_BITS
         return range(start, start + (packed & ((1 << _COUNT_BITS) - 1)))
 
+    # --- type-ahead -------------------------------------------------------------------
+
+    def _prefix_index(self) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+        """(sorted "name|ST" keys, first row, population, state) of every US-state group."""
+        index = self._prefix
+        if index is None:
+            with self._prefix_lock:
+                index = self._prefix
+                if index is None:
+                    keys = sorted(key for key in self._exact if key[-2:] in US_STATES)
+                    rows = np.array([self._exact[key] >> _COUNT_BITS for key in keys], dtype=np.int64)
+                    index = (
+                        keys,
+                        rows,
+                        self._population[rows] if len(rows) else np.zeros(0, dtype=np.int64),
+                        np.array([key[-2:] for key in keys], dtype="<U2"),
+                    )
+                    self._prefix = index
+        return index
+
+    def search(self, query: str, limit: int = 8) -> tuple[list[dict], int]:
+        """Places whose name starts with ``query``, most populated first: (rows, matches).
+
+        ``query``: what is being typed, "chi" or "chi, il" (after the comma, a state code
+        or name, or the start of one: "chi, i" keeps IA, ID, IL and IN). The name is
+        normalized like every lookup (accents, "St." = "Saint", case). Fewer than
+        ``MIN_QUERY_LETTERS`` letters, or a state part that is no US state: no rows.
+        """
+        parsed = parse_place_query(query)
+        if parsed is None or limit <= 0:
+            return [], 0
+        prefix, states = parsed
+        keys, rows, population, state_of = self._prefix_index()
+        low = bisect_left(keys, prefix)
+        high = bisect_left(keys, prefix + _AFTER_EVERY_NAME, lo=low)
+        if high <= low:
+            return [], 0
+        found = np.arange(low, high)
+        if states is not None:
+            found = found[np.isin(state_of[low:high], sorted(states))]
+        matches = len(found)
+        if matches > limit:
+            # Top ``limit`` by population, then in name order (``found`` is sorted by key).
+            found = found[np.argpartition(-population[found], limit - 1)[:limit]]
+        found = found[np.lexsort((found, -population[found]))]
+        return [self._suggestion(keys[i], int(rows[i])) for i in found], matches
+
+    def _suggestion(self, key: str, row: int) -> dict:
+        name, state = key.split("|")
+        city = " ".join(word[:1].upper() + word[1:] for word in name.split())
+        return {
+            "label": f"{city}, {state}",
+            "city": city,
+            "state": state,
+            "lat": round(float(self._lat[row]), 6),
+            "lon": round(float(self._lon[row]), 6),
+            "population": int(self._population[row]),
+            # False in Alaska and Hawaii: a real US place, but no fuel prices there.
+            "plannable": state not in _NO_FUEL_DATA_STATES,
+        }
+
     def lookup(self, city: str, state: str) -> Place | None:
         """Best place for (city, state), or None. The best is the most populated one."""
         group = self._group(city, state)
@@ -118,6 +201,41 @@ class PlaceIndex:
             reader = csv.reader(handle)
             next(reader)  # header
             return cls(reader, normalized=True)
+
+
+def _states_starting_with(text: str) -> set[str] | None:
+    """US state codes whose code or name starts with ``text`` ("il", "ill", "new", "d.c.");
+    None for an empty text (no filter)."""
+    typed = " ".join(text.replace(".", "").split()).lower()
+    if not typed:
+        return None
+    return {
+        code
+        for code, name in US_STATES.items()
+        if code.lower().startswith(typed) or name.lower().startswith(typed)
+        or (code == "DC" and len(typed) > len("washington") and "washington dc".startswith(typed))
+    }
+
+
+def parse_place_query(query: str) -> tuple[str, set[str] | None] | None:
+    """("normalized name prefix", state codes or None) of a type-ahead query, or None
+    when nothing should be suggested (too short, or a state part that is no US state).
+
+    A space typed after a word is kept ("new " finds New York, not Newark).
+    """
+    text = (query or "").lstrip()
+    states = None
+    if "," in text:
+        text, state_part = text.rsplit(",", 1)
+        states = _states_starting_with(state_part)
+        if states is not None and not states:
+            return None
+    prefix = normalize_place(text)
+    if len(_LETTER.findall(prefix)) < MIN_QUERY_LETTERS:
+        return None
+    if text[-1:].isspace() and "," not in query:
+        prefix += " "
+    return prefix, states
 
 
 @lru_cache(maxsize=1)

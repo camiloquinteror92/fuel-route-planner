@@ -33,7 +33,7 @@ CONTRACT_CODE_LINKS = {
     "stations.stations_along_route", "optimizer.greedy", "optimizer.consolidate", "optimizer.plan_price_blind",
     "station_loader.load_stations", "station_loader.resolve_homonym", "middleware.response_time",
     "middleware.rate_limit", "metrics.route_metrics",
-    "planner.settings", "optimizer.plan_fuel_stops",
+    "planner.settings", "optimizer.plan_fuel_stops", "places.search",
 }
 
 JUNIT = """<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" \
@@ -125,7 +125,7 @@ def test_about_reports_running_versions_and_data_counts(stations):
     assert body["api"]["include_values"] == ["candidates"]
     assert {s["name"] for s in body["external_services"]} == {"osrm", "nominatim", "openstreetmap_tiles"}
     assert {e["path"] for e in body["endpoints"]} >= {
-        "/api/route", "/api/route/map", "/api/stats", "/api/about",
+        "/api/route", "/api/route/map", "/api/places", "/api/stats", "/api/about",
     }
 
     build = body["build"]

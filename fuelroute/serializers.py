@@ -189,3 +189,32 @@ class RouteRequestSerializer(serializers.Serializer):
             )
         return frozenset(items)
 
+
+class PlacesRequestSerializer(serializers.Serializer):
+    """``GET /api/places``: ``q`` (what is being typed) and ``limit``. Nothing else is accepted."""
+
+    q = serializers.CharField(
+        required=False,
+        default="",
+        max_length=100,
+        allow_blank=True,
+        trim_whitespace=False,  # a space typed after a word narrows the search ("new ")
+        help_text="The start of a US place name, optionally with a state: 'chi', 'chi, il', 'san jose'.",
+    )
+    limit = serializers.IntegerField(
+        required=False,
+        default=8,
+        min_value=1,
+        max_value=20,
+        error_messages={"min_value": "Must be between 1 and 20.", "max_value": "Must be between 1 and 20."},
+        help_text="How many places to return (1 to 20, default 8).",
+    )
+
+    def to_internal_value(self, data):
+        if hasattr(data, "keys"):
+            unknown = sorted(set(data.keys()) - {"q", "limit"})
+            if unknown:
+                raise serializers.ValidationError(
+                    {"non_field_errors": [f"Unknown parameter(s): {', '.join(unknown)}. Allowed: q, limit."]}
+                )
+        return super().to_internal_value(data)

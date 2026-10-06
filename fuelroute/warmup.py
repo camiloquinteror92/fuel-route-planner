@@ -1,6 +1,7 @@
 """Pay the one-off costs at process start instead of on the first request.
 
-Called from ``config/wsgi.py``. Loads the places index (~0.4 s), the US mask, the
+Called from ``config/wsgi.py``. Loads the places index (~0.4 s) and its type-ahead
+index for ``/api/places`` (~0.1 s), the US mask, the
 station arrays (if the table exists), runs numpy once with the shapes of a
 coast-to-coast request and builds ``/api/about`` once (git, source AST, JUnit
 report), so the planner page's first load is fast too. The station arrays reload
@@ -27,6 +28,7 @@ def warm_up() -> None:
 
     started = time.perf_counter()
     places = len(get_place_index())
+    get_place_index().search("warm up", 1)  # builds the type-ahead index of /api/places
     in_usa(40.0, -100.0)
     try:
         stations = len(get_station_arrays())

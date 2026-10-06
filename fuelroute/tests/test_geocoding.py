@@ -1,7 +1,12 @@
+"""Turning user input into coordinates: formats, offline index, homonyms, Nominatim."""
+
+import time
+
 import pytest
 
-from fuelroute.services.errors import LocationNotFound, LocationOutsideUSA
-from fuelroute.services.geocoding import geocode, is_in_usa, parse_coordinates
+from fuelroute.services.errors import ExternalServiceError, LocationNotFound, LocationOutsideUSA
+from fuelroute.services.geocoding import geocode, parse_coordinates, split_city_state
+from fuelroute.services.http import ExternalApiClient
 
 
 class NoNetworkClient:
@@ -15,35 +20,79 @@ class NoNetworkClient:
 
 
 class FakeNominatim:
-    def __init__(self, payload):
-        self.payload = payload
+    def __init__(self, payload, status=200):
+        self.payload, self.status = payload, status
         self.calls = []
 
-    def get_json(self, service, url, params=None):
+    def get_json(self, service, url, params=None, min_interval=0.0):
         self.calls.append(service)
-        return 200, self.payload
+        return self.status, self.payload
 
 
 def test_parse_coordinates():
     assert parse_coordinates("40.7128,-74.0060") == (40.7128, -74.006)
     assert parse_coordinates(" 40.7 , -74 ") == (40.7, -74.0)
+    assert parse_coordinates("40.7128 -74.0060") == (40.7128, -74.006)  # space-separated
     assert parse_coordinates("Austin, TX") is None
+    assert parse_coordinates("Austin TX 78701") is None
 
 
-def test_usa_bounding_boxes():
-    assert is_in_usa(30.27, -97.74)  # Austin
-    assert is_in_usa(61.2, -149.9)  # Anchorage
-    assert is_in_usa(21.3, -157.8)  # Honolulu
-    assert not is_in_usa(48.85, 2.35)  # Paris
-    assert not is_in_usa(19.43, -99.13)  # Mexico City
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Austin, TX", ("Austin", "TX")),
+        ("Austin TX", ("Austin", "TX")),
+        ("austin, texas", ("austin", "TX")),
+        ("Austin, TX, USA", ("Austin", "TX")),
+        ("Albany New York", ("Albany", "NY")),
+        ("Charlotte North Carolina", ("Charlotte", "NC")),
+        ("Charleston West Virginia", ("Charleston", "WV")),  # not ("Charleston West", "VA")
+        ("New York New York", ("New York", "NY")),
+        ("Washington, D.C.", ("Washington", "DC")),
+        ("Washington DC", ("Washington", "DC")),
+        ("Columbus", None),  # not "Colomb" + "US"
+        ("Toronto, ON", None),
+    ],
+)
+def test_split_city_state(text, expected):
+    assert split_city_state(text) == expected
 
 
-@pytest.mark.parametrize("text", ["Austin, TX", "austin, texas", "Austin TX", "Austin, TX, USA"])
+@pytest.mark.parametrize(
+    "text",
+    ["Austin, TX", "austin, texas", "Austin TX", "Austin, TX, USA", "Austin Texas"],
+)
 def test_city_state_is_geocoded_offline(text):
     location = geocode(text, NoNetworkClient(), field="start")
     assert location.geocoder == "offline"
     assert location.latitude == pytest.approx(30.3, abs=0.2)
     assert location.longitude == pytest.approx(-97.75, abs=0.2)
+
+
+@pytest.mark.parametrize(
+    ("text", "lat", "lon"),
+    [
+        # Homonyms in the same state resolve to the populated / incorporated place.
+        ("Mountain View, CA", 37.39, -122.08),  # the city, not the 0.3 sq mi CDP 70 mi north
+        ("Marietta, OK", 33.94, -97.12),  # Love County, on I-35
+        ("Wilmington, IL", 41.32, -88.16),
+        ("Bel Air, MD", 39.54, -76.35),
+        ("Bronx, NY", 40.85, -73.87),  # the dataset name is "The Bronx"
+        ("Albany New York", 42.67, -73.80),
+        ("Washington, D.C.", 38.90, -77.02),
+        ("Saint Louis, MO", 38.64, -90.25),
+        ("St. Louis, MO", 38.64, -90.25),
+    ],
+)
+def test_offline_lookups(text, lat, lon):
+    location = geocode(text, NoNetworkClient(), field="start")
+    assert (location.latitude, location.longitude) == (pytest.approx(lat, abs=0.05), pytest.approx(lon, abs=0.05))
+
+
+def test_region_is_attached():
+    assert geocode("Anchorage, AK", NoNetworkClient(), field="start").region == "alaska"
+    assert geocode("Honolulu, HI", NoNetworkClient(), field="start").region == "hawaii"
+    assert geocode("Austin, TX", NoNetworkClient(), field="start").region == "lower48"
 
 
 def test_free_text_falls_back_to_nominatim_once_and_is_cached():
@@ -55,11 +104,44 @@ def test_free_text_falls_back_to_nominatim_once_and_is_cached():
     assert client.calls == ["nominatim"]
 
 
-def test_unknown_place_raises():
+def test_unknown_place_raises_and_the_miss_is_cached_briefly():
+    client = FakeNominatim([])
+    for _ in range(2):
+        with pytest.raises(LocationNotFound):
+            geocode("Nowhere at all", client, field="start")
+    assert client.calls == ["nominatim"]
+
+
+def test_nominatim_error_status_is_an_upstream_error_and_not_cached():
+    # Regression: a 403 (blocked) used to be answered as "location not found" and
+    # remembered for 24 h.
+    with pytest.raises(ExternalServiceError):
+        geocode("1600 Pennsylvania Ave, Washington", FakeNominatim([], status=403), field="start")
+    # Nothing was cached: the next request asks Nominatim again and succeeds.
+    ok = FakeNominatim([{"lat": "38.8977", "lon": "-77.0365", "display_name": "White House"}])
+    assert geocode("1600 Pennsylvania Ave, Washington", ok, field="start").geocoder == "nominatim"
+    assert ok.calls == ["nominatim"]
+
+
+def test_text_without_letters_is_not_sent_to_nominatim():
     with pytest.raises(LocationNotFound):
-        geocode("Nowhere at all", FakeNominatim([]), field="start")
+        geocode("???", NoNetworkClient(), field="start")
 
 
 def test_coordinates_outside_usa_raise():
-    with pytest.raises(LocationOutsideUSA):
-        geocode("48.85,2.35", NoNetworkClient(), field="finish")
+    for text in ("48.85,2.35", "43.6532,-79.3832", "25.6866,-100.3161"):  # Paris, Toronto, Monterrey
+        with pytest.raises(LocationOutsideUSA):
+            geocode(text, NoNetworkClient(), field="finish")
+
+
+def test_nominatim_calls_are_spaced(upstream, settings, monkeypatch):
+    # Nominatim's policy: at most 1 request per second. Two different free-text
+    # inputs in a row must not hit it back to back.
+    monkeypatch.setitem(settings.FUEL_PLANNER, "NOMINATIM_MIN_INTERVAL_SECONDS", 0.3)
+    upstream.respond((200, [{"lat": "40.7", "lon": "-74.0", "display_name": "x"}]))
+    client = ExternalApiClient()
+    started = time.perf_counter()
+    geocode("Empire State Building", client, field="start")
+    geocode("Statue of Liberty", client, field="finish")
+    assert time.perf_counter() - started >= 0.3
+    assert client.calls == ["nominatim", "nominatim"]

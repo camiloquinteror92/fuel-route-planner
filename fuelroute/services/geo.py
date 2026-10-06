@@ -1,4 +1,10 @@
-"""Vectorized geometry helpers (numpy). All coordinates are (lat, lon) in degrees."""
+"""Vectorised geometry helpers (numpy). All coordinates are (lat, lon) in degrees.
+
+Used by the routing step (mile markers, resampling, simplification for the map)
+and by the corridor search (nearest route point of each station). Distances are
+great-circle (haversine) miles: at the scale of a US road trip the error against
+an ellipsoid is well below the city-level error of the station coordinates.
+"""
 
 from __future__ import annotations
 

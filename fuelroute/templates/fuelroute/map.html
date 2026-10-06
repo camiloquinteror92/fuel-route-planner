@@ -1,10 +1,17 @@
 <!doctype html>
+{% comment %}
+  Map of one plan (RouteMapView). The GeoJSON of the API response is embedded with
+  json_script (safe against HTML injection) and drawn with Leaflet + OpenStreetMap
+  tiles. Popup text is escaped with esc(). Leaflet is loaded from unpkg with
+  Subresource Integrity hashes of the official 1.9.4 files.
+{% endcomment %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fuel Route Map</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <style>
     html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
     body { display: flex; flex-direction: column; }
@@ -15,11 +22,16 @@
     .error { padding: 24px; color: #8a1f11; }
     table { border-collapse: collapse; font-size: 13px; }
     td { padding: 2px 6px; }
+    .warning { margin-top: 4px; color: #ffd27a; }
   </style>
 </head>
 <body>
-{% if error %}
-  <div class="error"><h1>Could not plan this route</h1><pre>{{ error }}</pre></div>
+{% if error_code %}
+  <div class="error">
+    <h1>Could not plan this route</h1>
+    <p><code>{{ error_code }}</code></p>
+    <ul>{% for line in error_lines %}<li>{{ line }}</li>{% endfor %}</ul>
+  </div>
 {% else %}
   <header>
     <h1>{{ result.start.label }} &rarr; {{ result.finish.label }}</h1>
@@ -29,10 +41,12 @@
       <strong>${{ result.summary.total_fuel_cost }}</strong> total fuel cost
       (start tank: {{ result.vehicle.start_tank }})
     </p>
+    {% for warning in result.warnings %}<p class="warning">&#9888; {{ warning }}</p>{% endfor %}
   </header>
   <div id="map"></div>
   {{ geojson|json_script:"route-data" }}
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
     const data = JSON.parse(document.getElementById("route-data").textContent);
     const container = document.getElementById("map");

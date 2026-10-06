@@ -1,3 +1,5 @@
+"""Django app configuration for ``fuelroute``."""
+
 from django.apps import AppConfig
 
 

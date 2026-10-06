@@ -11,7 +11,7 @@
     header { padding: 10px 16px; background: #10243e; color: #fff; }
     header h1 { margin: 0 0 4px; font-size: 18px; }
     header p { margin: 0; font-size: 14px; opacity: .9; }
-    #map { flex: 1; }
+    #map { flex: 1; width: 100%; min-height: 420px; }
     .error { padding: 24px; color: #8a1f11; }
     table { border-collapse: collapse; font-size: 13px; }
     td { padding: 2px 6px; }
@@ -69,7 +69,17 @@
         }
       },
     }).addTo(map);
-    map.fitBounds(layer.getBounds(), { padding: [20, 20] });
+    // Fit the route as soon as the map has a real size (it can be 0 while the
+    // page is still laying out, e.g. in a hidden tab).
+    let fitted = false;
+    const fit = () => {
+      map.invalidateSize();
+      if (fitted || map.getSize().x === 0 || map.getSize().y === 0) return;
+      map.fitBounds(layer.getBounds(), { padding: [30, 30] });
+      fitted = true;
+    };
+    fit();
+    new ResizeObserver(fit).observe(document.getElementById("map"));
   </script>
 {% endif %}
 </body>

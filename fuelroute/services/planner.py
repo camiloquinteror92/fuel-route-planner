@@ -210,6 +210,7 @@ def plan_trip(
 
 
 def map_path(start: Location, finish: Location, start_tank: str) -> str:
-    # Resolved coordinates, so the map page never needs to geocode again.
-    query = urlencode({"start": start.as_param, "finish": finish.as_param, "start_tank": start_tank})
+    # Same inputs as the API call: the map page hits the plan cache (offline
+    # geocoding + cached route), so it makes no external call.
+    query = urlencode({"start": start.query, "finish": finish.query, "start_tank": start_tank})
     return f"{reverse('route-map')}?{query}"

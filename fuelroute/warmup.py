@@ -1,5 +1,5 @@
 """Pay the one-off costs at process start instead of on the first request:
-the place index (~1 s), the station arrays and numpy/BLAS initialisation."""
+the place index (~1.5 s), the station arrays and numpy's first-call overhead."""
 
 import logging
 import time
@@ -21,8 +21,9 @@ def warm_up() -> None:
         stations = len(get_station_arrays())
     except DatabaseError:  # not migrated yet
         stations = 0
-    line = np.array([[30.0, -97.0], [31.0, -96.0]] * 600)
-    nearest_on_line(np.full(2000, 30.5), np.full(2000, -96.5), line)
+    # Same shapes as a coast-to-coast request.
+    line = np.column_stack((np.linspace(30, 40, 3000), np.linspace(-120, -75, 3000)))
+    nearest_on_line(np.full(5000, 35.0), np.linspace(-120, -75, 5000), line)
     logger.info(
         "event=warm_up places=%s stations=%s duration_ms=%.0f",
         places, stations, (time.perf_counter() - started) * 1000,

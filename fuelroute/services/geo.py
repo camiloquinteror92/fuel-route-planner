@@ -38,29 +38,50 @@ def resample(points: np.ndarray, cumulative: np.ndarray, step_miles: float):
 
 def to_unit_vectors(lat, lon) -> np.ndarray:
     """3D unit vectors. The angle between two of them is the great-circle angle,
-    so "nearest point" becomes "largest dot product": one matrix multiply."""
+    so "nearest point" becomes "largest dot product"."""
     lat, lon = np.radians(lat), np.radians(lon)
     cos_lat = np.cos(lat)
     return np.column_stack((cos_lat * np.cos(lon), cos_lat * np.sin(lon), np.sin(lat)))
 
 
-def nearest_on_line(
-    query_lat: np.ndarray, query_lon: np.ndarray, line_points: np.ndarray, chunk: int = 1024
-):
-    """For each query point: index of the closest line point and the distance (miles).
+def _dots(query: np.ndarray, line: np.ndarray) -> np.ndarray:
+    """(Q, 3) x (L, 3) -> (Q, L) dot products.
 
-    The argmax runs in float32 (a single BLAS call, ~4x faster than float64 here);
-    its precision is ~1 mile, which is only used to pick the nearest sample. The
-    reported distance is then recomputed exactly with haversine in float64.
+    Written as three broadcast multiply-adds instead of ``query @ line.T``: with an
+    inner dimension of 3 BLAS gains nothing, and OpenBLAS pays ~300 ms of set-up
+    the first time it runs on each new thread (every request thread in runserver).
     """
-    line_vectors = to_unit_vectors(line_points[:, 0], line_points[:, 1]).astype(np.float32).T.copy()
-    query_vectors = to_unit_vectors(query_lat, query_lon).astype(np.float32)
+    out = query[:, 0, None] * line[:, 0]
+    out += query[:, 1, None] * line[:, 1]
+    out += query[:, 2, None] * line[:, 2]
+    return out
+
+
+def nearest_on_line(
+    query_lat: np.ndarray, query_lon: np.ndarray, line_points: np.ndarray, chunk: int = 512
+):
+    """For each query point: index of the closest line point and the distance (miles)."""
+    line_vectors = to_unit_vectors(line_points[:, 0], line_points[:, 1])
+    query_vectors = to_unit_vectors(query_lat, query_lon)
     indexes = np.empty(len(query_vectors), dtype=np.int64)
     for start in range(0, len(query_vectors), chunk):
-        indexes[start:start + chunk] = np.argmax(query_vectors[start:start + chunk] @ line_vectors, axis=1)
+        indexes[start:start + chunk] = np.argmax(_dots(query_vectors[start:start + chunk], line_vectors), axis=1)
     nearest = line_points[indexes]
     distances = haversine_miles(query_lat, query_lon, nearest[:, 0], nearest[:, 1])
     return indexes, distances
+
+
+def within_distance(
+    query_lat: np.ndarray, query_lon: np.ndarray, line_points: np.ndarray, miles: float, chunk: int = 2048
+) -> np.ndarray:
+    """Boolean mask: query points that are within ``miles`` of ANY line point."""
+    line_vectors = to_unit_vectors(line_points[:, 0], line_points[:, 1])
+    query_vectors = to_unit_vectors(query_lat, query_lon)
+    min_dot = np.cos(miles / EARTH_RADIUS_MILES)
+    mask = np.empty(len(query_vectors), dtype=bool)
+    for start in range(0, len(query_vectors), chunk):
+        mask[start:start + chunk] = (_dots(query_vectors[start:start + chunk], line_vectors) >= min_dot).any(axis=1)
+    return mask
 
 
 def simplify(points: np.ndarray, tolerance_deg: float = 0.0005) -> np.ndarray:

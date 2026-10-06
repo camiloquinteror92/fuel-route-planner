@@ -952,7 +952,7 @@
       ]
     },
     {
-      "name": "22. POST /api/tests/run (runs pytest; local server only, about 10 s)",
+      "name": "22. POST /api/tests/run (runs pytest; only a local runserver, only with an Origin)",
       "request": {
         "method": "POST",
         "url": {
@@ -965,7 +965,15 @@
             "tests",
             "run"
           ]
-        }
+        },
+        "header": [
+          {
+            "key": "Origin",
+            "value": "{{baseUrl}}",
+            "description": "What a browser sends from the page. Without it the server refuses to start a run (curl, scripts)."
+          }
+        ],
+        "description": "Runs the whole pytest suite on the server and answers every result by file. Only under `manage.py runserver` (or ENABLE_TEST_RUNNER=1), only from the same machine (loopback address and host name, no proxy header) and only with an Origin equal to the host: anywhere else a 403 says why."
       },
       "event": [
         {
@@ -978,7 +986,7 @@
               "  pm.test('no failed test', () => pm.expect(body.failed + body.errors).to.eql(0));",
               "  console.log(body.passed + ' passed, ' + body.failed + ' failed, ' + body.skipped + ' skipped in ' + body.duration_s + ' s');",
               "} else {",
-              "  pm.test('403 away from your machine, 409 while a run is going', () => pm.expect([403, 409]).to.include(pm.response.code));",
+              "  pm.test('403 when not allowed (another machine, no Origin, runner off), 409 while a run is going', () => pm.expect([403, 409]).to.include(pm.response.code));",
               "  console.log(body.error, body.detail);",
               "}"
             ]

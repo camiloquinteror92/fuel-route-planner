@@ -1,8 +1,10 @@
 """The page's test runner: GET /api/tests (inventory + last run), POST /api/tests/run.
 
-Local requests only (403 otherwise), one run at a time (409), a fixed command that
-reads nothing from the request, and results grouped by file with what each test checks.
-Most tests fake ``subprocess.run``; one runs a real toy suite end to end.
+Opt-in (on by default only under ``runserver``), local requests sent by the page only
+(403 otherwise: another machine, a proxy, a DNS-rebinding host name, another site, curl),
+one run at a time (409), a fixed command that reads nothing from the request, and results
+grouped by file with what each test checks. Most tests fake ``subprocess.run``; one runs a
+real toy suite end to end.
 """
 
 import subprocess
@@ -15,6 +17,7 @@ import pytest
 from django.conf import settings as project_settings
 from rest_framework.test import APIClient
 
+from config import settings as config_module
 from fuelroute.services import testrunner
 
 REPO = Path(project_settings.BASE_DIR)
@@ -68,6 +71,18 @@ def _never_run(*args, **kwargs):
     raise AssertionError("the runner must not start pytest for this request")
 
 
+# What the page itself sends when it is opened at http://127.0.0.1:8000 on this machine.
+PAGE_HEADERS = {
+    "REMOTE_ADDR": "127.0.0.1", "HTTP_HOST": "127.0.0.1:8000",
+    "HTTP_ORIGIN": "http://127.0.0.1:8000", "HTTP_SEC_FETCH_SITE": "same-origin",
+}
+
+
+def page() -> APIClient:
+    """A client that sends what the page sends (this machine, same origin)."""
+    return APIClient(**PAGE_HEADERS)
+
+
 # --- who may run it ----------------------------------------------------------------------------------
 
 
@@ -77,20 +92,72 @@ def _never_run(*args, **kwargs):
     [
         {"REMOTE_ADDR": "203.0.113.7"},  # another machine
         {"REMOTE_ADDR": "192.168.1.20"},  # the local network is not this machine either
-        {"REMOTE_ADDR": "127.0.0.1", "HTTP_X_FORWARDED_FOR": "203.0.113.7"},  # behind a proxy on this host
-        {"REMOTE_ADDR": "127.0.0.1", "HTTP_FORWARDED": "for=203.0.113.7"},
+        {"HTTP_X_FORWARDED_FOR": "203.0.113.7"},  # behind a proxy on this host
+        {"HTTP_FORWARDED": "for=203.0.113.7"},
+        {"HTTP_X_REAL_IP": "203.0.113.7"},
+        {"HTTP_CF_CONNECTING_IP": "203.0.113.7"},  # proxies that only send their own header
+        {"HTTP_TRUE_CLIENT_IP": "203.0.113.7"},
+        {"HTTP_X_CLIENT_IP": "203.0.113.7"},
+        {"HTTP_X_FORWARDED_HOST": "fuel.example"},
+        {"HTTP_X_FORWARDED_PROTO": "https"},
+        {"HTTP_VIA": "1.1 proxy"},
     ],
 )
 def test_runner_answers_403_unless_the_request_is_local(monkeypatch, extra):
     monkeypatch.setattr(testrunner.subprocess, "run", _never_run)
-    response = APIClient().post("/api/tests/run", **extra)
+    response = page().post("/api/tests/run", **extra)
     assert response.status_code == 403
     body = response.json()
     assert body["error"] == "test_runner_unavailable"
     assert "only available when you run the project locally" in body["detail"]
     assert body["meta"] == {"external_api_calls": 0, "external_api_services": []}
-    listing = APIClient().get("/api/tests", **extra).json()  # the inventory is still shown
+    listing = page().get("/api/tests", **extra).json()  # the inventory is still shown
     assert listing["runner"]["available"] is False and listing["inventory"]["tests"] > 0
+
+
+@pytest.mark.django_db
+def test_a_site_whose_name_points_at_this_machine_cannot_start_a_run(monkeypatch, settings):
+    """DNS rebinding: evil.example resolves to 127.0.0.1, so the address is local and Origin
+    equals Host. Even with DJANGO_ALLOWED_HOSTS=* the host name is not this machine's."""
+    monkeypatch.setattr(testrunner.subprocess, "run", _never_run)
+    settings.ALLOWED_HOSTS = ["*"]
+    response = page().post(
+        "/api/tests/run", HTTP_HOST="evil.example:8000", HTTP_ORIGIN="http://evil.example:8000"
+    )
+    assert response.status_code == 403
+    assert "only available when you run the project locally" in response.json()["detail"]
+
+
+@pytest.mark.django_db
+def test_a_request_that_does_not_say_where_it_comes_from_cannot_start_a_run(monkeypatch):
+    """curl or a script on this machine (no Origin, no Sec-Fetch-Site): the page itself
+    always sends them on a POST, so only the page starts a run."""
+    monkeypatch.setattr(testrunner.subprocess, "run", _never_run)
+    curl = APIClient(REMOTE_ADDR="127.0.0.1", HTTP_HOST="127.0.0.1:8000")
+    response = curl.post("/api/tests/run")
+    assert response.status_code == 403 and "without an Origin header" in response.json()["detail"]
+    # Reading the inventory needs no proof: the tab says the runner is there.
+    assert curl.get("/api/tests").json()["runner"]["available"] is True
+
+
+@pytest.mark.parametrize(
+    ("argv", "debug", "env", "enabled"),
+    [
+        (["manage.py", "runserver"], False, {}, True),  # the documented local run
+        (["manage.py", "runserver", "8077"], False, {}, True),
+        (["gunicorn", "config.wsgi"], False, {}, False),  # a deployment: off
+        (["gunicorn", "config.wsgi"], True, {}, True),  # DJANGO_DEBUG=true
+        (["gunicorn", "config.wsgi"], False, {"ENABLE_TEST_RUNNER": "1"}, True),
+        (["manage.py", "runserver"], False, {"DISABLE_TEST_RUNNER": "1"}, False),
+        (["manage.py", "runserver"], True, {"DISABLE_TEST_RUNNER": "true", "ENABLE_TEST_RUNNER": "1"}, False),
+    ],
+)
+def test_the_runner_is_opt_in(monkeypatch, argv, debug, env, enabled):
+    for name in ("ENABLE_TEST_RUNNER", "DISABLE_TEST_RUNNER"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert config_module._test_runner_enabled(argv, debug) is enabled
 
 
 @pytest.mark.django_db
@@ -100,7 +167,7 @@ def test_runner_answers_403_unless_the_request_is_local(monkeypatch, extra):
 )
 def test_a_page_of_another_site_cannot_start_a_run(monkeypatch, extra):
     monkeypatch.setattr(testrunner.subprocess, "run", _never_run)
-    response = APIClient().post("/api/tests/run", **extra)
+    response = page().post("/api/tests/run", **extra)
     assert response.status_code == 403 and response.json()["error"] == "test_runner_unavailable"
 
 
@@ -108,7 +175,7 @@ def test_a_page_of_another_site_cannot_start_a_run(monkeypatch, extra):
 def test_runner_can_be_turned_off(monkeypatch, settings):
     monkeypatch.setattr(testrunner.subprocess, "run", _never_run)
     settings.TEST_RUNNER_ENABLED = False
-    response = APIClient().post("/api/tests/run")
+    response = page().post("/api/tests/run")
     assert response.status_code == 403 and "DISABLE_TEST_RUNNER" in response.json()["detail"]
 
 
@@ -126,10 +193,9 @@ def test_loopback_addresses(address, local):
 
 @pytest.mark.django_db
 def test_run_answers_every_test_grouped_by_file(fake_run, settings):
-    client = APIClient()
+    client = page()
     response = client.post(
         "/api/tests/run?-k=evil", {"args": ["-k", "x", "--rootdir=/"], "command": "rm"}, format="json",
-        HTTP_ORIGIN="http://testserver", HTTP_SEC_FETCH_SITE="same-origin",
     )
     assert response.status_code == 200, response.json()
     body = response.json()
@@ -141,6 +207,7 @@ def test_run_answers_every_test_grouped_by_file(fake_run, settings):
     assert not any("evil" in arg or "rm" == arg or arg == "-k" for arg in args)
     assert kwargs["cwd"] == Path(settings.BASE_DIR) and kwargs["timeout"] == settings.TEST_RUNNER_TIMEOUT_SECONDS
     assert kwargs["env"]["DISABLE_TEST_RUNNER"] == "1"
+    assert kwargs["stdin"] is subprocess.DEVNULL  # the child never reads the server's console
 
     assert (body["passed"], body["failed"], body["errors"], body["skipped"], body["total"]) == (2, 1, 0, 1, 4)
     assert body["duration_s"] == 2.5 and body["ran_at"].startswith("2026-10-06")
@@ -166,6 +233,11 @@ def test_run_answers_every_test_grouped_by_file(fake_run, settings):
     assert listing["last_run"] == body
     assert listing["runner"] == {**listing["runner"], "available": True, "running": False}
 
+    # Another machine sees the counts and outcomes, not the messages or the output (local paths).
+    remote = APIClient(REMOTE_ADDR="203.0.113.7").get("/api/tests").json()["last_run"]
+    assert (remote["passed"], remote["failed"], remote["total"]) == (2, 1, 4) and remote["output_tail"] == []
+    assert all(test["message"] is None for group in remote["groups"] for test in group["tests"])
+
 
 @pytest.mark.django_db
 def test_second_concurrent_run_is_409(monkeypatch):
@@ -173,21 +245,21 @@ def test_second_concurrent_run_is_409(monkeypatch):
     fake = FakeRun(gate=gate)
     monkeypatch.setattr(testrunner.subprocess, "run", fake)
     answers = {}
-    first = threading.Thread(target=lambda: answers.setdefault("first", APIClient().post("/api/tests/run")))
+    first = threading.Thread(target=lambda: answers.setdefault("first", page().post("/api/tests/run")))
     first.start()
     for _ in range(200):
         if testrunner.is_running():
             break
         threading.Event().wait(0.01)
     assert testrunner.is_running()
-    second = APIClient().post("/api/tests/run")
-    assert APIClient().get("/api/tests").json()["runner"]["running"] is True
+    second = page().post("/api/tests/run")
+    assert page().get("/api/tests").json()["runner"]["running"] is True
     gate.set()
     first.join(10)
     assert second.status_code == 409 and second.json()["error"] == "test_run_in_progress"
     assert answers["first"].status_code == 200
     assert len(fake.calls) == 1
-    assert APIClient().post("/api/tests/run").status_code == 200  # free again
+    assert page().post("/api/tests/run").status_code == 200  # free again
 
 
 @pytest.mark.django_db
@@ -200,7 +272,7 @@ def test_second_concurrent_run_is_409(monkeypatch):
 )
 def test_a_run_that_cannot_finish_is_a_clear_error(monkeypatch, error, text):
     monkeypatch.setattr(testrunner.subprocess, "run", FakeRun(error=error))
-    response = APIClient().post("/api/tests/run")
+    response = page().post("/api/tests/run")
     assert response.status_code == 500
     assert response.json()["error"] == "test_run_failed" and text in response.json()["detail"]
     assert not testrunner.is_running()
@@ -213,7 +285,7 @@ def test_a_run_without_a_report_says_what_pytest_printed(monkeypatch):
             return subprocess.CompletedProcess(args, 4, stdout=b"ERROR: usage error\n", stderr=b"")
 
     monkeypatch.setattr(testrunner.subprocess, "run", NoReport())
-    response = APIClient().post("/api/tests/run")
+    response = page().post("/api/tests/run")
     assert response.status_code == 500 and "usage error" in response.json()["detail"]
 
 

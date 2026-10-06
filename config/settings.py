@@ -11,6 +11,7 @@ signs nothing that must survive a restart: no sessions, no auth).
 
 import os
 import secrets
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -22,6 +23,10 @@ def _env(name: str, default: str) -> str:
 
 def _env_list(name: str, default: str) -> list[str]:
     return [item.strip() for item in _env(name, default).split(",") if item.strip()]
+
+
+def _env_flag(name: str) -> bool:
+    return _env(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or secrets.token_urlsafe(50)
@@ -167,10 +172,18 @@ FUEL_PLANNER = {
 }
 
 # Test runner of the planner page (POST /api/tests/run runs pytest on this machine).
-# Even when on, it only answers requests from the loopback address (127.0.0.1 / ::1)
-# without proxy headers: a deployment never runs processes for its visitors. Set
-# DISABLE_TEST_RUNNER=1 to turn it off completely.
-TEST_RUNNER_ENABLED = os.environ.get("DISABLE_TEST_RUNNER", "").strip().lower() in ("", "0", "false", "no")
+# Opt-in: on by default only under Django's development server (`manage.py runserver`,
+# never a deployment) or with DJANGO_DEBUG=true; ENABLE_TEST_RUNNER=1 turns it on under
+# any server, DISABLE_TEST_RUNNER=1 turns it off. Even when on, it only answers a request
+# from this machine (loopback address and host name, no proxy header) that the page
+# itself sent (Origin / Sec-Fetch-Site): see fuelroute/services/testrunner.py.
+def _test_runner_enabled(argv: list[str], debug: bool) -> bool:
+    if _env_flag("DISABLE_TEST_RUNNER"):
+        return False
+    return _env_flag("ENABLE_TEST_RUNNER") or debug or (len(argv) > 1 and argv[1] == "runserver")
+
+
+TEST_RUNNER_ENABLED = _test_runner_enabled(sys.argv, DEBUG)
 TEST_RUNNER_TIMEOUT_SECONDS = float(_env("TEST_RUNNER_TIMEOUT_SECONDS", "180"))
 
 LOGGING = {

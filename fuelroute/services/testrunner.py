@@ -1,19 +1,22 @@
 """Run the project's pytest suite from the page: ``POST /api/tests/run``, ``GET /api/tests``.
 
 * ``inventory()``: every test file and test function, read from the source with the
-  AST (no import, no run): the file's title is the first line of its docstring, a
-  test's description is the first line of its docstring, or its name in words when
-  it has none.
+  AST (no import, no run): the file's title is the first paragraph of its docstring,
+  a test's description the first paragraph of its docstring (joined into one line),
+  or its name in words when it has none.
 * ``run_tests()``: runs ``python -m pytest`` in a subprocess with the SAME
   interpreter, in the project directory, with a JUnit report written to a temporary
   file, and a timeout. The command is fixed: nothing from the request reaches it.
   One run at a time per process (a second one gets ``SuiteRunInProgress``, a 409).
   The report is parsed into groups per file, then copied to ``TEST_REPORT_FILE`` so
   ``/api/about`` (the Requirements tab) shows the same run.
-* ``runner_status(request)``: the runner works only for a request from this machine
-  (loopback address, no proxy header, no cross-site origin) and only while
-  ``TEST_RUNNER_ENABLED`` is on (``DISABLE_TEST_RUNNER`` turns it off). A public
-  deployment never starts processes for its visitors.
+* ``runner_status(request)``: the runner works only while ``TEST_RUNNER_ENABLED`` is on
+  (by default only under ``manage.py runserver``, see settings) and only for a request
+  from this machine: loopback address, a loopback host name (no DNS rebinding), no
+  proxy header. Starting a run also needs proof that the page itself sent it (an Origin
+  equal to the host, or ``Sec-Fetch-Site: same-origin``): curl or a page of another
+  site cannot start one. A public deployment never starts processes for its visitors,
+  and ``GET /api/tests`` hides failure messages and output from anyone but this machine.
 """
 
 from __future__ import annotations
@@ -34,15 +37,29 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.exceptions import DisallowedHost
+from django.http.request import split_domain_port
 
 from .errors import SuiteRunFailed, SuiteRunInProgress, SuiteRunnerUnavailable
 
 TEST_DIR = Path("fuelroute") / "tests"
 UNAVAILABLE_DETAIL = (
-    "The test runner is only available when you run the project locally "
-    "(open the page at http://127.0.0.1:8000). Run `python -m pytest` instead."
+    "The test runner is only available when you run the project locally and open the page on that "
+    "machine (127.0.0.1 or localhost). Run `python -m pytest` instead."
 )
-_PROXY_HEADERS = ("HTTP_X_FORWARDED_FOR", "HTTP_X_REAL_IP", "HTTP_FORWARDED")
+OFF_DETAIL = (
+    "The test runner is off on this server: it is on by default only under `manage.py runserver` "
+    "(or with ENABLE_TEST_RUNNER=1), and DISABLE_TEST_RUNNER=1 turns it off. Run `python -m pytest` instead."
+)
+NO_ORIGIN_DETAIL = (
+    "Start the run from the page: a request without an Origin header (curl, a script) cannot start one. "
+    "In a terminal, run `python -m pytest`."
+)
+# Any of these means a proxy (or a client pretending to be one) is in between.
+_PROXY_HEADERS = (
+    "HTTP_X_FORWARDED_FOR", "HTTP_X_REAL_IP", "HTTP_FORWARDED", "HTTP_X_FORWARDED_HOST", "HTTP_X_FORWARDED_PROTO",
+    "HTTP_CF_CONNECTING_IP", "HTTP_TRUE_CLIENT_IP", "HTTP_X_CLIENT_IP", "HTTP_X_CLUSTER_CLIENT_IP", "HTTP_VIA",
+)
 _OUTCOMES = ("passed", "failed", "error", "skipped")
 _TAIL_LINES = 30
 
@@ -78,35 +95,81 @@ def _is_loopback(address: str) -> bool:
     return ip.is_loopback
 
 
-def _same_origin(request) -> bool:
-    """A browser request from another site carries its Origin / Sec-Fetch-Site: refuse it."""
-    if request.META.get("HTTP_SEC_FETCH_SITE", "") in ("cross-site", "same-site"):
+def _host_name(request) -> str | None:
+    try:
+        host = request.get_host()
+    except DisallowedHost:
+        return None
+    return split_domain_port(host)[0].strip("[]")
+
+
+def _loopback_host(request) -> bool:
+    """The page was opened at this machine's own name: "localhost" or a loopback address.
+    A site whose DNS points at 127.0.0.1 (DNS rebinding) has another name, even when
+    DJANGO_ALLOWED_HOSTS lets it through."""
+    name = _host_name(request)
+    if not name:
+        return False
+    return name == "localhost" or name.endswith(".localhost") or _is_loopback(name)
+
+
+def is_local(request) -> bool:
+    """From this machine, to this machine, with no proxy in between."""
+    return (
+        _is_loopback(request.META.get("REMOTE_ADDR", ""))
+        and not any(request.META.get(header) for header in _PROXY_HEADERS)
+        and _loopback_host(request)
+    )
+
+
+def _same_origin(request, required: bool) -> bool:
+    """A browser says where a request comes from (Origin, Sec-Fetch-Site): a page of another
+    site is refused; with ``required``, so is a request that does not say it (curl, a script)."""
+    site = request.META.get("HTTP_SEC_FETCH_SITE", "")
+    if site in ("cross-site", "same-site"):
         return False
     origin = request.META.get("HTTP_ORIGIN")
-    if not origin or origin == "null":
-        return origin is None
-    parts = urlsplit(origin)
-    return parts.netloc.lower() == request.get_host().lower()
+    if origin is not None:
+        if origin == "null":
+            return False
+        try:
+            host = request.get_host().lower()
+        except DisallowedHost:
+            return False
+        return urlsplit(origin).netloc.lower() == host
+    return site == "same-origin" or not required
 
 
-def runner_status(request) -> dict:
-    """{"available": bool, "detail": str}: may THIS request start a run?"""
+def runner_status(request, starting: bool = False) -> dict:
+    """{"available": bool, "detail": str}: may THIS request start a run (``starting``: it is
+    the POST that would start it, so it must also prove it comes from the page)?"""
     if not getattr(settings, "TEST_RUNNER_ENABLED", False):
-        return {"available": False, "detail": "The test runner is turned off on this server (DISABLE_TEST_RUNNER)."}
-    local = _is_loopback(request.META.get("REMOTE_ADDR", "")) and not any(
-        request.META.get(header) for header in _PROXY_HEADERS
-    )
-    if not local:
+        return {"available": False, "detail": OFF_DETAIL}
+    if not is_local(request):
         return {"available": False, "detail": UNAVAILABLE_DETAIL}
-    if not _same_origin(request):
+    if not _same_origin(request, required=False):
         return {"available": False, "detail": "A page of another site cannot start a test run."}
-    return {"available": True, "detail": "Runs the whole pytest suite on this machine (about ten seconds)."}
+    if starting and not _same_origin(request, required=True):
+        return {"available": False, "detail": NO_ORIGIN_DETAIL}
+    return {"available": True, "detail": "Runs the whole pytest suite on this machine, in a separate process."}
 
 
 def check_allowed(request) -> None:
-    status = runner_status(request)
+    status = runner_status(request, starting=True)
     if not status["available"]:
         raise SuiteRunnerUnavailable(status["detail"])
+
+
+def redacted(result: dict | None) -> dict | None:
+    """A run as anyone may see it: counts and outcomes, without failure messages or the
+    output tail (they can name local paths). ``GET /api/tests`` from another machine."""
+    if result is None:
+        return None
+    result = {**result, "output_tail": []}
+    result["groups"] = [
+        {**group, "tests": [{**test, "message": None} for test in group["tests"]]} for group in result["groups"]
+    ]
+    return result
 
 
 def is_running() -> bool:
@@ -121,9 +184,28 @@ def _first_line(text: str | None) -> str:
     return text.splitlines()[0].strip() if text else ""
 
 
+def _first_paragraph(text: str | None) -> str:
+    """The docstring up to its first blank line, as one line (a sentence is never cut)."""
+    lines = []
+    for line in (text or "").strip().splitlines():
+        if not line.strip():
+            break
+        lines.append(line.strip())
+    return " ".join(lines)
+
+
+# Words that keep their capitals when a test name is turned into a sentence.
+_PROPER = {
+    "canada": "Canada", "mexico": "Mexico", "alaska": "Alaska", "hawaii": "Hawaii", "usa": "USA", "us": "US",
+    "toronto": "Toronto", "osrm": "OSRM", "nominatim": "Nominatim", "json": "JSON", "geojson": "GeoJSON",
+    "csv": "CSV", "api": "API", "dp": "DP", "html": "HTML", "url": "URL", "ip": "IP",
+}
+
+
 def _words(name: str) -> str:
-    """test_second_request_uses_the_plan_cache -> "Second request uses the plan cache"."""
-    text = re.sub(r"^test_?", "", name).replace("_", " ").strip()
+    """test_route_through_canada -> "Route through Canada"."""
+    words = re.sub(r"^test_?", "", name).replace("_", " ").split()
+    text = " ".join(_PROPER.get(word.lower(), word) for word in words)
     return text[:1].upper() + text[1:]
 
 
@@ -133,11 +215,11 @@ def _test_functions(tree: ast.Module) -> list[tuple[str, str]]:
     functions = (ast.FunctionDef, ast.AsyncFunctionDef)
     for node in tree.body:
         if isinstance(node, functions) and node.name.startswith("test"):
-            found.append((node.name, _first_line(ast.get_docstring(node)) or _words(node.name)))
+            found.append((node.name, _first_paragraph(ast.get_docstring(node)) or _words(node.name)))
         elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             for item in node.body:
                 if isinstance(item, functions) and item.name.startswith("test"):
-                    description = _first_line(ast.get_docstring(item)) or _words(item.name)
+                    description = _first_paragraph(ast.get_docstring(item)) or _words(item.name)
                     found.append((f"{node.name}::{item.name}", description))
     return found
 
@@ -156,7 +238,7 @@ def _parse_file(path: Path) -> dict:
         tree = ast.Module(body=[], type_ignores=[])
     group = {
         "file": relative,
-        "title": _first_line(ast.get_docstring(tree)) or _words(path.stem),
+        "title": _first_paragraph(ast.get_docstring(tree)) or _words(path.stem),
         "tests": [{"name": name, "description": text} for name, text in _test_functions(tree)],
     }
     with _state_lock:
@@ -279,6 +361,7 @@ def run_tests(timeout_seconds: float | None = None) -> dict:
                     [*command(), f"--junitxml={report}"],
                     cwd=_base_dir(),
                     capture_output=True,
+                    stdin=subprocess.DEVNULL,  # never the server's console
                     timeout=timeout,
                     env={**os.environ, "PYTHONIOENCODING": "utf-8", "DISABLE_TEST_RUNNER": "1"},
                     check=False,

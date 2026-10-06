@@ -207,6 +207,9 @@ class SuiteView(APIView):
     request may start a run (``runner``)."""
 
     def get(self, request):
+        last_run = testrunner.last_run()
+        if not testrunner.is_local(request):
+            last_run = testrunner.redacted(last_run)  # no failure messages or local paths for other machines
         return Response(
             {
                 "runner": {
@@ -214,7 +217,7 @@ class SuiteView(APIView):
                     "running": testrunner.is_running(),
                     "command": testrunner.display_command(),
                 },
-                "last_run": testrunner.last_run(),
+                "last_run": last_run,
                 "inventory": testrunner.inventory(),
             },
             headers={"Cache-Control": "no-store"},
@@ -224,8 +227,8 @@ class SuiteView(APIView):
 class SuiteRunView(APIView):
     """POST /api/tests/run: run the whole pytest suite now and answer its results.
 
-    Local requests only (403 otherwise), one run at a time (409), a fixed command:
-    nothing in the request is read.
+    Local requests sent by the page only (403 otherwise), one run at a time (409), a
+    fixed command: nothing in the request body or query is read.
     """
 
     def post(self, request):

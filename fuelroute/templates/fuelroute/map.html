@@ -1,49 +1,125 @@
 <!doctype html>
 {% comment %}
-  Map of one plan (RouteMapView). The GeoJSON of the API response is embedded with
-  json_script (safe against HTML injection) and drawn with Leaflet + OpenStreetMap
-  tiles. Popup text is escaped with esc(). Leaflet is loaded from unpkg with
-  Subresource Integrity hashes of the official 1.9.4 files.
+  Browser page for the planner (RouteMapView), also served at / for browsers.
+
+  * A small form (start, finish, start tank) submits a GET to this same page, so
+    trying routes needs no hand-written URLs. Without inputs the page shows only
+    the form: nothing is planned and no external call is made.
+  * With a plan: summary in the header, the route and numbered stops on a
+    Leaflet + OpenStreetMap map, and a table of the stops beside it.
+  * The GeoJSON of the API response is embedded with json_script (safe against
+    HTML injection); popup text is escaped with esc(). Leaflet is loaded from
+    unpkg with Subresource Integrity hashes of the official 1.9.4 files.
 {% endcomment %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fuel Route Map</title>
+  <title>Fuel Route Planner</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <style>
-    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    :root { color-scheme: light; }
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; color: #1f2328; background: #fff; }
     body { display: flex; flex-direction: column; }
-    header { padding: 10px 16px; background: #10243e; color: #fff; }
-    header h1 { margin: 0 0 4px; font-size: 18px; }
+    header { padding: 10px 16px; background: #10243e; color: #fff; display: grid; gap: 8px; }
+    header h1 { margin: 0; font-size: 18px; }
     header p { margin: 0; font-size: 14px; opacity: .9; }
-    #map { flex: 1; width: 100%; min-height: 420px; }
+    form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+    form label { display: grid; gap: 2px; font-size: 12px; opacity: .85; }
+    form input, form select { font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 6px; border: 1px solid #8c959f; min-width: 0; }
+    form input { width: 200px; }
+    form button { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 6px; border: 0; background: #2da44e; color: #fff; font-weight: 600; cursor: pointer; }
+    .links { font-size: 13px; }
+    .links a { color: #9ecbff; margin-right: 10px; }
+    main { flex: 1; display: flex; min-height: 0; }
+    #map { flex: 1; min-height: 420px; }
+    aside { width: 360px; max-width: 45%; overflow: auto; border-left: 1px solid #d0d7de; font-size: 13px; }
+    aside h2 { font-size: 14px; margin: 10px 12px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #eaeef2; vertical-align: top; }
+    th { font-weight: 600; background: #f6f8fa; position: sticky; top: 0; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     .error { padding: 24px; color: #8a1f11; }
-    table { border-collapse: collapse; font-size: 13px; }
-    td { padding: 2px 6px; }
-    .warning { margin-top: 4px; color: #ffd27a; }
+    .hint { padding: 24px; max-width: 640px; line-height: 1.5; }
+    .warning { color: #ffd27a; }
+    @media (max-width: 760px) { main { flex-direction: column; } aside { width: auto; max-width: none; border-left: 0; } }
   </style>
 </head>
 <body>
+  <header>
+    <form method="get" action="{% url 'route-map' %}">
+      <label>Start (City, ST or lat,lon)
+        <input name="start" value="{{ form.start }}" placeholder="New York, NY" required>
+      </label>
+      <label>Finish
+        <input name="finish" value="{{ form.finish }}" placeholder="Los Angeles, CA" required>
+      </label>
+      <label>Start tank
+        <select name="start_tank">
+          <option value="empty"{% if form.start_tank != "full" %} selected{% endif %}>empty (pay every mile)</option>
+          <option value="full"{% if form.start_tank == "full" %} selected{% endif %}>full</option>
+        </select>
+      </label>
+      <button type="submit">Plan route</button>
+    </form>
+    <div class="links">
+      Examples:
+      <a href="{% url 'route-map' %}?start=New+York%2C+NY&amp;finish=Los+Angeles%2C+CA">New York &rarr; Los Angeles</a>
+      <a href="{% url 'route-map' %}?start=Chicago%2C+IL&amp;finish=Houston%2C+TX">Chicago &rarr; Houston</a>
+      <a href="{% url 'route-map' %}?start=Dallas%2C+TX&amp;finish=Austin%2C+TX&amp;start_tank=full">Dallas &rarr; Austin (full tank)</a>
+      {% if result %}<a href="{{ api_url }}">See this plan as API JSON</a>{% endif %}
+    </div>
+    {% if result %}
+      <h1>{{ result.start.label }} &rarr; {{ result.finish.label }}</h1>
+      <p>
+        {{ result.route.distance_miles }} miles &middot; {{ result.summary.number_of_stops }} fuel stop(s)
+        &middot; {{ result.summary.total_gallons_purchased }} gal &middot;
+        <strong>${{ result.summary.total_fuel_cost }}</strong> total fuel cost
+        (start tank: {{ result.vehicle.start_tank }})
+      </p>
+      {% for warning in result.warnings %}<p class="warning">&#9888; {{ warning }}</p>{% endfor %}
+    {% endif %}
+  </header>
+
 {% if error_code %}
   <div class="error">
     <h1>Could not plan this route</h1>
     <p><code>{{ error_code }}</code></p>
     <ul>{% for line in error_lines %}<li>{{ line }}</li>{% endfor %}</ul>
   </div>
+{% elif not result %}
+  <div class="hint">
+    <p>Type a start and a finish inside the USA and press <b>Plan route</b>, or pick an example above.</p>
+    <p>The page shows the route, the cheapest fuel stops (500-mile range, 10 mpg) and the total fuel cost.
+       The same plan is available as JSON at <code>/api/route</code>.</p>
+  </div>
 {% else %}
-  <header>
-    <h1>{{ result.start.label }} &rarr; {{ result.finish.label }}</h1>
-    <p>
-      {{ result.route.distance_miles }} miles &middot; {{ result.summary.number_of_stops }} fuel stop(s)
-      &middot; {{ result.summary.total_gallons_purchased }} gal &middot;
-      <strong>${{ result.summary.total_fuel_cost }}</strong> total fuel cost
-      (start tank: {{ result.vehicle.start_tank }})
-    </p>
-    {% for warning in result.warnings %}<p class="warning">&#9888; {{ warning }}</p>{% endfor %}
-  </header>
-  <div id="map"></div>
+  <main>
+    <div id="map"></div>
+    <aside>
+      <h2>Fuel stops</h2>
+      {% if result.fuel_stops %}
+      <table>
+        <thead><tr><th>#</th><th>Station</th><th class="num">Mile</th><th class="num">$/gal</th><th class="num">Gal</th><th class="num">Cost</th></tr></thead>
+        <tbody>
+        {% for s in result.fuel_stops %}
+          <tr>
+            <td>{{ s.stop }}</td>
+            <td>{{ s.name }}<br><small>{{ s.city }}, {{ s.state }}</small></td>
+            <td class="num">{{ s.mile_marker }}</td>
+            <td class="num">{{ s.price_per_gallon }}</td>
+            <td class="num">{{ s.gallons }}</td>
+            <td class="num">${{ s.cost }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+        <p style="margin: 0 12px">No fuel stop needed for this trip.</p>
+      {% endif %}
+    </aside>
+  </main>
   {{ geojson|json_script:"route-data" }}
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>

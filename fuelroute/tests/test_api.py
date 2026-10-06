@@ -417,6 +417,35 @@ def test_own_rate_limit_answers_429(client, upstream, stations, settings, monkey
 
 
 @pytest.mark.django_db
+def test_map_page_without_inputs_shows_only_the_form(client, upstream):
+    page = client.get("/api/route/map")
+    assert page.status_code == 200
+    assert b'<form method="get"' in page.content and b'name="start"' in page.content
+    assert b"route-data" not in page.content  # nothing planned
+    assert upstream.calls == []
+
+
+@pytest.mark.django_db
+def test_map_page_keeps_the_inputs_in_the_form_and_links_to_the_json(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    page = client.get("/api/route/map", {"start": START, "finish": FINISH, "start_tank": "full"})
+    assert page.status_code == 200
+    html = page.content.decode()
+    assert f'name="start" value="{START}"' in html
+    assert '<option value="full" selected>' in html
+    assert "/api/route?start=" in html  # "See this plan as API JSON"
+    assert "Fuel stops" in html
+
+
+@pytest.mark.django_db
+def test_root_sends_browsers_to_the_planner_page_and_api_clients_get_json(client):
+    browser = client.get("/", HTTP_ACCEPT="text/html,application/xhtml+xml,*/*;q=0.8")
+    assert browser.status_code == 302 and browser["Location"].endswith("/api/route/map")
+    api = client.get("/", HTTP_ACCEPT="*/*")
+    assert api.status_code == 200 and "endpoints" in api.json()
+
+
+@pytest.mark.django_db
 def test_map_page_shows_readable_errors(client):
     page = client.get("/api/route/map", {"finish": "Austin, TX"})
     assert page.status_code == 400

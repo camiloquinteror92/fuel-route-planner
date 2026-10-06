@@ -1,8 +1,8 @@
 """HTTP layer: validates the input, calls the planner, shapes the response.
 
 * ``GET|POST /api/route``  -> JSON plan (``RoutePlanView``)
-* ``GET /api/route/map``   -> HTML map of the same plan (``RouteMapView``)
-* ``GET /``                -> a small JSON index with examples
+* ``GET /api/route/map``   -> browser page: form + HTML map of the same plan (``RouteMapView``)
+* ``GET /``                -> browsers: redirect to the page above; API clients: a small JSON index
 * anything else under ``/api/`` -> JSON 404
 
 Every error has the body ``{"error": "<code>", "detail": ..., "meta": {...}}``
@@ -10,7 +10,8 @@ where ``meta`` says how many external calls were made before the error.
 """
 
 from django.http import JsonResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.views import View
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -73,24 +74,39 @@ def _messages(detail) -> list[str]:
 
 
 class RouteMapView(View):
-    """HTML map (Leaflet + OpenStreetMap tiles) of the plan for the same inputs.
+    """Browser page: a form plus the HTML map (Leaflet + OpenStreetMap tiles) of the plan.
 
-    Uses the plan cache, so right after an API call it makes no external call.
+    * No ``start`` and no ``finish``: only the form is shown; nothing is planned.
+    * Otherwise the same inputs as ``/api/route`` are planned and drawn, with a
+      table of the stops. It uses the plan cache, so right after an API call it
+      makes no external call.
     """
 
     def get(self, request):
+        form = {
+            "start": request.GET.get("start", ""),
+            "finish": request.GET.get("finish", ""),
+            "start_tank": request.GET.get("start_tank", "empty"),
+        }
+        if not form["start"].strip() and not form["finish"].strip():
+            return render(request, "fuelroute/map.html", {"form": form})
         result, error, status, headers = _plan_from(request.GET)
         if error:
-            context = {"error_code": error["error"], "error_lines": _messages(error["detail"])}
+            context = {"form": form, "error_code": error["error"], "error_lines": _messages(error["detail"])}
             response = render(request, "fuelroute/map.html", context, status=status)
         else:
-            response = render(request, "fuelroute/map.html", {"result": result, "geojson": result["map"]["geojson"]})
+            api_url = reverse("route-plan") + "?" + request.GET.urlencode()
+            context = {"form": form, "result": result, "geojson": result["map"]["geojson"], "api_url": api_url}
+            response = render(request, "fuelroute/map.html", context)
         for name, value in headers.items():
             response[name] = value
         return response
 
 
 def index(request):
+    """``/``: browsers go to the planner page; API clients (Postman, curl) get a JSON index."""
+    if "text/html" in request.headers.get("Accept", ""):
+        return redirect("route-map")
     return JsonResponse(
         {
             "service": "Spotter fuel route API",

@@ -100,6 +100,7 @@ FUEL_PLANNER = {
     "USER_AGENT": _env("HTTP_USER_AGENT", "spotter-fuel-route/1.0 (coding assessment)"),
     # Data files
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
+    "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",
     "FUEL_PRICES_FILE": BASE_DIR / "data" / "fuel-prices-for-be-assessment.csv",
 }
 

@@ -197,8 +197,10 @@
     <details>
       <summary>Median price for stations listed several times</summary>
       <p><strong>Why:</strong> the file quotes some stations several times; the median resists outliers and the spread stays visible.
-        <strong>Evidence:</strong> <span data-live="about.data.stations_with_several_quotes" data-format="int">—</span> stations, policy
-        <code data-live="about.planner.price_policy">—</code>.</p>
+        The lowest and the highest quote are kept too, so <code>price_policy=min|max</code> prices the best and the worst case
+        without reloading the data.
+        <strong>Evidence:</strong> <span data-live="about.data.stations_with_several_quotes" data-format="int">—</span> stations, this plan
+        <code data-live="route.vehicle.price_policy">—</code>.</p>
     </details>
     <details>
       <summary>Decimal for money</summary>
@@ -221,10 +223,10 @@
     <li>Station coordinates are city-level: the farthest stop of this plan is <span data-live="derived.max_offroute" data-format="miles">—</span>
       from the route as computed, which is approximate.</li>
     <li>The detour to each stop is not priced: about <span data-live="derived.detour_approx" data-format="miles">—</span> there and back on this plan (approx).</li>
-    <li>No safety margin between stops: the plan uses the whole range, so
+    <li>No safety margin between stops by default: the plan uses the whole range, so
       <span data-live="derived.stops_arriving_empty" data-format="int">—</span> of its
-      <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank. A configurable
-      minimum fuel at every stop is the next step; until then a smaller <code>MAX_RANGE_MILES</code> keeps a margin.</li>
+      <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank. A safety
+      reserve (<code>safety_reserve_gal</code>) keeps fuel in the tank at every stop: try it in <a href="#whatif">What if…</a></li>
     <li data-live-if="derived.all_states_have_stations">Every one of the lower forty-eight states has stations in the file, but some
       have very few: the thinnest are <span data-live="derived.thinnest_text">—</span>.</li>
     <li data-live-if="derived.some_states_without">Lower-forty-eight states without a usable station:
@@ -239,9 +241,9 @@
       a plan stays cached for <span data-live="about.planner.plan_cache_seconds" data-format="duration">—</span>.</li>
     <li>The duration comes from OSRM's car profile, not a truck's.</li>
   </ul>
-  <p class="muted">Next steps: a minimum fuel at every stop; Redis for shared caches and exported metrics; an own OSRM with a truck
-    profile; exact exit coordinates; a dated price feed; the time cost of a stop inside the objective; stops aligned with hours of
-    service; a spatial index at scale.</p>
+  <p class="muted">Next steps: Redis for shared caches and exported metrics; an own OSRM with a truck profile; exact exit
+    coordinates; a dated price feed; the time cost of a stop inside the objective; stops aligned with hours of service; a spatial
+    index at scale (see <a href="#scale">How it scales</a>).</p>
 
   <h3>How it was built</h3>
   <ol class="prose-list built">

@@ -271,6 +271,7 @@ const TANK_REASONS = {
   full_tank: 'leaves with a full tank it did not pay for, and buys only what it needs to arrive',
   reserve: 'leaves with the reserve and must arrive with the same amount (borrowed and returned: not a safety margin)',
   first_station_beyond_reserve: 'leaves with enough fuel to reach the first station, and must arrive with the same amount',
+  safety_reserve: 'leaves with enough fuel to reach the first station with the safety reserve still in the tank, and must arrive with the same amount',
   no_station_on_route: 'no station on this route: only a trip the reserve covers works',
 };
 const CAPPED = '; capped: the last stretch is too long to arrive with that much, and the difference is unpriced';

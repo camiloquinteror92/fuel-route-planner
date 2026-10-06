@@ -324,5 +324,22 @@ export function createMap(container, { onStop, why } = {}) {
     frame();
   }
 
-  return { map, render, renderGap, showUsa, highlightStop, reframe, invalidate: frame };
+  // Play trip: the stop the truck is at ('current') and those it has passed ('visited').
+  function markStop(n, kind) {
+    const node = stopMarkers.get(n)?.getElement();
+    if (!node) return;
+    node.classList.toggle('is-current', kind === 'current');
+    node.classList.toggle('is-visited', kind === 'visited');
+  }
+
+  function clearMarks() {
+    for (const marker of stopMarkers.values()) marker.getElement()?.classList.remove('is-current', 'is-visited');
+  }
+
+  function stopLatLng(n) {
+    const marker = stopMarkers.get(n);
+    return marker ? marker.getLatLng() : null;
+  }
+
+  return { map, render, renderGap, showUsa, highlightStop, reframe, invalidate: frame, markStop, clearMarks, stopLatLng };
 }

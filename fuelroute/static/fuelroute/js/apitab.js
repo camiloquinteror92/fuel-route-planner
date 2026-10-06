@@ -3,7 +3,7 @@
 // /api/about (parameters, endpoints) and the error catalog with live "Try it".
 
 import { el, fmt, plural, replace, present } from './format.js';
-import { absolute, routeUrl } from './api.js';
+import { absolute, routeUrl, tripBody } from './api.js';
 import { CASE_FOR_ERROR } from './cases.js';
 
 const COLLAPSE_OVER = 20;
@@ -65,7 +65,7 @@ export function renderRequest(container, state, { routeBase, toast, onPost }) {
   }
   const getUrl = absolute(routeUrl(routeBase, state.params));
   const curl = `curl "${getUrl}"`;
-  const post = JSON.stringify({ start: state.params.start, finish: state.params.finish, start_tank: state.params.start_tank === 'full' ? 'full' : 'empty' }, null, 2);
+  const post = JSON.stringify(tripBody(state.params), null, 2);
   const about = state.about || {};
   const build = about.build || {};
   const ref = build.linked_commit || (build.commit ? null : 'main');

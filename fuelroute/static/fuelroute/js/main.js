@@ -1,9 +1,10 @@
 // Entry point of the planner page. The server only renders the shell; this module
 // calls the public JSON API (the same GET /api/route that Postman uses), keeps
-// the trip in the URL (?start&finish&start_tank, #tab) and renders every part of
-// the page from the answer, /api/about, /api/stats and the browser's timings.
+// the trip in the URL (?start&finish&start_tank and the what-if settings, #tab) and
+// renders every part of the page from the answer, /api/about, /api/stats, /api/tests
+// and the browser's timings.
 
-import { createClient, onLog, session, clearSession, routeUrl } from './api.js';
+import { createClient, onLog, session, clearSession, routeUrl, tripQuery } from './api.js';
 import { bind, derive, el, fmt, flattenErrors, plural, replace, present } from './format.js';
 import { runChecks, planTrace, priceBlindTrace, summarize } from './checks.js';
 import { createMap } from './map.js';
@@ -13,12 +14,19 @@ import * as requirements from './requirements.js';
 import * as perf from './performance.js';
 import * as how from './how.js';
 import * as apitab from './apitab.js';
+import * as scale from './scale.js';
 import { createCases } from './cases.js';
+import { SETTING_NAMES, onlyChanged, sameSettings, settingsFromQuery } from './settings.js';
+import { createWhatIf, answerText, changeSummary, isDefaultTrip, questionOf, renderSettingsLine, tripKey } from './whatif.js';
+import { createPlayer } from './player.js';
+import { createCombobox } from './places.js';
+import { createTestRunner } from './testrunner.js';
 
 const CLIENT_TIMEOUT_MS = 40000;
 const TOAST_MS = 2600;
-const TABS = ['plan', 'requirements', 'performance', 'how', 'api'];
+const TABS = ['plan', 'requirements', 'tests', 'performance', 'scale', 'how', 'api'];
 const DERIVE_HELPERS = { planTrace, priceBlindTrace, summarize };
+const FIELD_NAMES = ['start', 'finish', 'start_tank', ...SETTING_NAMES];
 
 const $ = (selector) => document.querySelector(selector);
 const config = JSON.parse($('#page-config').textContent);
@@ -27,11 +35,13 @@ const routeBase = config.api.route;
 
 const state = {
   route: null, // last /api/route result: {ok, status, body, headers, client, ...}
-  params: null, // {start, finish, start_tank} of that result
+  params: null, // {start, finish, start_tank, settings} of that result
   stats: null,
   about: config.about || {},
   session,
   checks: [],
+  baselines: new Map(), // trip -> its plan with the assignment defaults, to compare a what-if
+  answers: new Map(), // "trip|question" -> the answer's body
 };
 
 // --- elements ---------------------------------------------------------------------------
@@ -47,9 +57,11 @@ const staleNote = $('#stale');
 const hero = $('#empty');
 const results = $('#results');
 const profileCard = $('#profile-card');
+const whatifCard = $('#whatif');
 const toasts = $('#toasts');
 const boxes = {
   warnings: $('#warnings'),
+  settingsLine: $('#settings-line'),
   stops: $('#stops-table'),
   compare: $('#comparison-table'),
   actions: $('#plan-actions'),
@@ -70,6 +82,9 @@ const boxes = {
   apiResponse: $('#api-response'),
   apiReference: $('#api-reference'),
   apiErrors: $('#api-errors'),
+  scaleBench: $('#scale-bench'),
+  scaleCosts: $('#scale-costs'),
+  scalePanel: $('#panel-scale'),
 };
 
 function toast(message, kind = 'ok') {
@@ -78,23 +93,27 @@ function toast(message, kind = 'ok') {
   setTimeout(() => node.remove(), TOAST_MS);
 }
 
+function announce(text) {
+  live.textContent = text;
+}
+
 function reducedMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
 // --- form and URL ---------------------------------------------------------------------------
 
+// The trip of the form: start and finish from the header, the rest from "What if…".
 function readForm() {
-  const tank = form.querySelector('input[name="start_tank"]:checked');
-  return { start: inputs.start.value.trim(), finish: inputs.finish.value.trim(), start_tank: tank && tank.value === 'full' ? 'full' : 'empty' };
+  return { start: inputs.start.value.trim(), finish: inputs.finish.value.trim(), ...whatif.read() };
 }
 
 function setForm(params) {
   inputs.start.value = params.start || '';
   inputs.finish.value = params.finish || '';
-  const tank = form.querySelector(`input[name="start_tank"][value="${params.start_tank === 'full' ? 'full' : 'empty'}"]`);
-  if (tank) tank.checked = true;
+  whatif.write({ start_tank: params.start_tank, settings: params.settings || {} });
   updateButton();
+  updateSettingsSummary();
 }
 
 function paramsFromUrl() {
@@ -102,17 +121,24 @@ function paramsFromUrl() {
   const start = (q.get('start') || '').trim();
   const finish = (q.get('finish') || '').trim();
   if (!start || !finish) return null;
-  return { start, finish, start_tank: q.get('start_tank') === 'full' ? 'full' : 'empty' };
+  return { start, finish, start_tank: q.get('start_tank') === 'full' ? 'full' : 'empty', settings: settingsFromQuery(q, whatif.defaults()) };
 }
 
 function sameParams(a, b) {
   if (!a || !b) return !a && !b;
-  return a.start === b.start && a.finish === b.finish && a.start_tank === b.start_tank;
+  return a.start === b.start && a.finish === b.finish && a.start_tank === b.start_tank && sameSettings(a.settings, b.settings);
 }
 
 function pageUrl(params) {
-  const q = new URLSearchParams({ start: params.start, finish: params.finish, start_tank: params.start_tank });
-  return `${window.location.pathname}?${q}${window.location.hash}`;
+  return `${window.location.pathname}?${tripQuery(params)}${window.location.hash}`;
+}
+
+// The header's link to "What if…" says what differs from the assignment defaults.
+function updateSettingsSummary() {
+  const text = changeSummary(whatif.read());
+  $('#settings-summary').textContent = text ? `What if: ${text}` : 'What if… (assignment defaults)';
+  $('#settings-link').classList.toggle('is-changed', Boolean(text));
+  whatifCard.classList.toggle('has-changes', Boolean(text));
 }
 
 const COORDS = /^\s*-?\d+(\.\d+)?\s*[, ]\s*-?\d+(\.\d+)?\s*$/;
@@ -143,24 +169,29 @@ function updateButton() {
   }
 }
 
-// Results that no longer match the form (edited, swapped, other tank) are marked,
-// not replanned: a new trip costs a routing call, so only "Plan route" sends one.
+// Results that no longer match the form (edited, swapped, other settings) are marked,
+// not replanned: only "Plan route" or "Replan" send a request.
 function markStale() {
   const stale = Boolean(state.params) && !sameParams(readForm(), state.params);
   staleNote.hidden = !stale;
   results.classList.toggle('is-stale', stale);
   profileCard.classList.toggle('is-stale', stale);
+  whatifCard.classList.toggle('is-stale', stale);
+  updateSettingsSummary();
+}
+
+function fieldInput(name) {
+  return inputs[name] || $(`#set-${name}`);
 }
 
 function clearFieldErrors() {
-  for (const name of ['start', 'finish', 'start_tank']) {
+  for (const name of FIELD_NAMES) {
     const node = $(`#${name}-error`);
     if (!node) continue;
     node.textContent = '';
     node.hidden = true;
+    fieldInput(name)?.removeAttribute('aria-invalid');
   }
-  for (const input of Object.values(inputs)) input.removeAttribute('aria-invalid');
-  form.querySelector('.segmented')?.classList.remove('is-invalid');
 }
 
 function showFieldError(name, message) {
@@ -170,8 +201,7 @@ function showFieldError(name, message) {
   node.hidden = false;
   const hint = $(`#${name}-hint`);
   if (hint) hint.hidden = true; // the server's message says it better
-  if (inputs[name]) inputs[name].setAttribute('aria-invalid', 'true');
-  if (name === 'start_tank') form.querySelector('.segmented')?.classList.add('is-invalid');
+  fieldInput(name)?.setAttribute('aria-invalid', 'true');
   return true;
 }
 
@@ -191,7 +221,7 @@ function setLoading(on, params) {
       loadingFrame = requestAnimationFrame(tick);
     };
     tick();
-    live.textContent = `Planning ${params.start} → ${params.finish}`;
+    announce(`Planning ${params.start} → ${params.finish}`);
   } else {
     planLabel.hidden = false;
     planTimer.hidden = true;
@@ -212,11 +242,13 @@ async function planTrip(params, { history = 'push', origin = 'user', method = 'G
   const current = new AbortController();
   controller = current;
   const timeout = setTimeout(() => current.abort('timeout'), CLIENT_TIMEOUT_MS);
+  params = { ...params, settings: params.settings || {} };
   clearFieldErrors();
   setForm(params);
   if (history === 'push' && !sameParams(params, paramsFromUrl())) window.history.pushState({ params }, '', pageUrl(params));
   else if (history !== 'none') window.history.replaceState({ params }, '', pageUrl(params));
   setLoading(true, params);
+  scheduleRender();
   let result;
   try {
     result = method === 'POST'
@@ -235,10 +267,11 @@ async function planTrip(params, { history = 'push', origin = 'user', method = 'G
   markStale();
   if (result.ok && result.body) {
     state.checks = runChecks(result.body, state.about);
+    rememberWhatIf(params, result.body);
     renderPlan();
     const s = result.body.summary;
     document.title = `${result.body.start.label} → ${result.body.finish.label} · Fuel Route Planner`;
-    live.textContent = `Planned ${result.body.start.label} → ${result.body.finish.label}: ${plural(s.number_of_stops, 'stop')}, ${fmt.money(s.total_fuel_cost)}.`;
+    announce(`Planned ${result.body.start.label} → ${result.body.finish.label}: ${plural(s.number_of_stops, 'stop')}, ${fmt.money(s.total_fuel_cost)}.`);
   } else {
     state.checks = [];
     document.title = `${params.start} → ${params.finish} · Fuel Route Planner`;
@@ -250,6 +283,40 @@ async function planTrip(params, { history = 'push', origin = 'user', method = 'G
   if ((origin === 'user' || origin === 'retry') && window.matchMedia('(max-width: 759.98px)').matches) {
     (result.ok ? results : errorBox).scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
   }
+}
+
+// What-if bookkeeping: the default plan of each trip (to compare with) and the answer
+// of each interview question.
+function rememberWhatIf(params, body) {
+  const key = tripKey(params);
+  if (isDefaultTrip(params)) state.baselines.set(key, { status: 'ok', body });
+  else ensureBaseline(params);
+  const question = questionOf(params);
+  if (question) state.answers.set(`${key}|${question.id}`, body);
+}
+
+// The same trip with the assignment defaults: it reuses the route the what-if just
+// cached, so it costs no external call.
+async function ensureBaseline(params) {
+  const key = tripKey(params);
+  const known = state.baselines.get(key);
+  if (known && known.status !== 'error') return;
+  state.baselines.set(key, { status: 'loading' });
+  const base = { start: params.start, finish: params.finish, start_tank: 'empty', settings: {} };
+  const r = await client.plan(base, { origin: 'what-if (defaults, to compare)' });
+  state.baselines.set(key, r.ok && r.body
+    ? { status: 'ok', body: r.body }
+    : { status: 'error', error: r.body?.error || (r.status ? `HTTP ${r.status}` : r.failure) });
+  scheduleRender();
+}
+
+function answerFor(question) {
+  if (!state.params) return null;
+  const key = tripKey(state.params);
+  const body = state.answers.get(`${key}|${question.id}`);
+  if (!body) return null;
+  const base = state.baselines.get(key);
+  return answerText(body, base?.status === 'ok' ? base.body : null);
 }
 
 async function refreshStats() {
@@ -264,6 +331,7 @@ async function refreshAbout() {
   const r = await client.about();
   if (r && r.ok) {
     state.about = r.body;
+    whatif.setAbout();
     if (state.route?.ok) state.checks = runChecks(state.route.body, state.about);
     renderAll({ api: true });
     toast('Refreshed from /api/about');
@@ -304,11 +372,13 @@ function renderPlan() {
   results.hidden = false;
   profileCard.hidden = false;
   plan.renderWarnings(boxes.warnings, body);
+  renderSettingsLine(boxes.settingsLine, body, state.params, state.about);
   plan.renderStops(boxes.stops, body, state.about, { onStop: selectStop });
   plan.renderComparison(boxes.compare, body);
   plan.updateActionLinks(boxes.actions, state.params, routeBase);
   mapCtl.render(body, { about: state.about });
   profile.render(body, { about: state.about });
+  player.load(body);
   const calls = body.meta?.external_api_calls ?? 0;
   const badge = $('[data-perf-badge]');
   badge.classList.toggle('is-zero', calls === 0);
@@ -364,11 +434,19 @@ function retryControls(seconds) {
   return el('p', { class: 'error-actions' }, button, ' ', label);
 }
 
+function backToDefaults() {
+  return el('button', {
+    type: 'button', class: 'btn',
+    onclick: () => planTrip({ start: state.params.start, finish: state.params.finish, start_tank: 'empty', settings: {} }),
+  }, 'Plan it with the assignment defaults');
+}
+
 function renderError(result) {
   hero.hidden = true;
   results.hidden = true;
   profileCard.hidden = true;
   profile.clear();
+  player.unload();
   const body = result.body && typeof result.body === 'object' ? result.body : {};
   const code = result.failure || body.error || (result.status ? `http_${result.status}` : 'error');
   const meta = body.meta;
@@ -378,9 +456,13 @@ function renderError(result) {
       ? [`No answer within ${fmt.int(CLIENT_TIMEOUT_MS / 1000)} s.`]
       : flattenErrors(body.detail ?? result.text);
   const extra = [];
-  const maxRange = state.about?.vehicle?.max_range_miles;
+  // The range the request asked for, less the safety reserve it asked to keep.
+  const asked = { ...whatif.defaults(), ...(state.params?.settings || {}) };
+  const maxRange = present(asked.max_range_miles) ? asked.max_range_miles - (Number(asked.safety_reserve_gal) || 0) * (Number(asked.mpg) || 0) : null;
+  const rangeWord = Number(asked.safety_reserve_gal) > 0 ? 'usable range (the range less the safety reserve)' : 'range';
+  const whatIf = state.params && !isDefaultTrip(state.params);
 
-  // Inline errors under the inputs.
+  // Inline errors under the inputs (the what-if settings included).
   if (code === 'invalid_request' && body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) {
     for (const [field, messages] of Object.entries(body.detail)) showFieldError(field, flattenErrors(messages).join(' '));
   }
@@ -392,7 +474,7 @@ function renderError(result) {
 
   if (code === 'no_reachable_fuel_station' && body.gap_end) {
     mapCtl.renderGap(body, { maxRange });
-    extra.push(el('p', {}, `No station between mile ${fmt.dec1(body.from_mile)} and mile ${fmt.dec1(body.gap_end.mile)} (${fmt.miles(body.gap_miles)}), more than the ${fmt.miles_round(maxRange)} range. The map shows the stretch.`));
+    extra.push(el('p', {}, `No station between mile ${fmt.dec1(body.from_mile)} and mile ${fmt.dec1(body.gap_end.mile)} (${fmt.miles(body.gap_miles)}), more than the ${fmt.miles_round(maxRange)} ${rangeWord}. The map shows the stretch.`));
   } else {
     mapCtl.showUsa();
   }
@@ -401,12 +483,18 @@ function renderError(result) {
     extra.push(el('p', {}, `This trip is ${fmt.miles(body.route_distance_miles)}, within the ${fmt.miles_round(maxRange)} range: a full tank needs no stop. `,
       el('button', { type: 'button', class: 'btn', onclick: () => planTrip({ ...state.params, start_tank: 'full' }) }, 'Try with a full tank')));
   }
+  // An older server that does not know the what-if parameters yet.
+  if (code === 'invalid_request' && whatIf && lines.some((l) => /unknown parameter/i.test(l))) {
+    extra.push(el('p', {}, 'This server does not accept the what-if settings yet. ', backToDefaults()));
+  } else if (whatIf && result.status === 422) {
+    extra.push(el('p', {}, 'These what-if settings make this trip impossible on this route. ', backToDefaults()));
+  }
   const retryAfter = Number(result.headers.retryAfter);
   if ([429, 503].includes(result.status) && result.headers.retryAfter) extra.push(retryControls(Number.isFinite(retryAfter) ? retryAfter : 0));
   else if (result.status === 502 || result.failure) extra.push(retryControls(0));
 
-  const title = ERROR_TITLES[code] || 'Could not plan this route';
-  live.textContent = `Could not plan: ${title}.`;
+  const title = ERROR_TITLES[code] || (whatIf && result.status === 422 ? 'No plan with these settings' : 'Could not plan this route');
+  announce(`Could not plan: ${title}.`);
   replace(errorBox,
     el('div', { class: 'error-card', role: 'alert' },
       el('h2', {}, title),
@@ -427,6 +515,7 @@ function renderEmpty() {
   errorBox.hidden = true;
   profileCard.hidden = true;
   profile.clear();
+  player.unload();
   mapCtl.showUsa();
 }
 
@@ -447,6 +536,12 @@ function renderAll({ api = false } = {}) {
   how.renderStates(boxes.states, state.about);
   how.renderTimeline(boxes.timeline, state.about, boxes.historySummary);
   how.renderTestInventory(boxes.inventory, state.about);
+  scale.renderBench(boxes.scaleBench, state, { onRefresh: refreshStats });
+  scale.renderCosts(boxes.scaleCosts, state);
+  scale.fillLadder(boxes.scalePanel, state);
+  const key = state.params ? tripKey(state.params) : null;
+  whatif.renderEffect(state, key ? state.baselines.get(key) : null);
+  whatif.renderQuestions(state, answerFor);
   const checksBadge = $('[data-checks-badge]');
   checksBadge.classList.toggle('is-bad', (ctx.derived.checks_failed || 0) > 0);
   if (api) {
@@ -473,6 +568,37 @@ async function tryCase(id) {
   toast(`HTTP ${r.status}${body.error ? ` ${body.error}` : ''}${present(calls) ? ` · ${plural(calls, 'external call')}` : ''}`, r.ok || r.status < 500 ? 'ok' : 'bad');
 }
 
+// --- what if ------------------------------------------------------------------------------------
+
+// Plan the trip of the form with the panel's settings ("Plan route" and "Replan").
+function submitTrip() {
+  const params = readForm();
+  if (!params.start || !params.finish) {
+    clearFieldErrors();
+    if (!params.start) showFieldError('start', 'Required.');
+    if (!params.finish) showFieldError('finish', 'Required.');
+    (params.start ? inputs.finish : inputs.start).focus();
+    return;
+  }
+  planTrip(params, { history: 'push' });
+}
+
+// An interview question: its one change on top of the defaults, on the trip in the form
+// (or the last one planned; or the first example when there is none yet).
+function ask(question) {
+  let trip = { start: inputs.start.value.trim(), finish: inputs.finish.value.trim() };
+  if (!trip.start || !trip.finish) {
+    if (state.params) trip = { start: state.params.start, finish: state.params.finish };
+    else {
+      const chip = document.querySelector('.chip[data-start]');
+      trip = { start: chip.dataset.start, finish: chip.dataset.finish };
+      toast(`Asked on ${trip.start} → ${trip.finish}`);
+    }
+  }
+  const { start_tank: tank = 'empty', ...rest } = question.set;
+  planTrip({ ...trip, start_tank: tank, settings: onlyChanged(rest, whatif.defaults()) }, { history: 'push', origin: 'interview question' });
+}
+
 // --- tabs ------------------------------------------------------------------------------------
 
 const tablist = $('[role="tablist"]');
@@ -490,7 +616,8 @@ function selectTab(name, { focus = false, scroll = false, updateHash = true } = 
   if (focus) $(`#tab-${name}`).focus();
   if (updateHash) window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}#${name}`);
   if (scroll) tablist.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
-  if (name === 'performance' && previous !== 'performance') refreshStats();
+  if ((name === 'performance' || name === 'scale') && previous !== name) refreshStats();
+  if (name === 'tests') testRunner.ensureLoaded();
   if (name !== 'plan') mapCtl.invalidate();
 }
 
@@ -522,18 +649,62 @@ window.addEventListener('hashchange', () => {
   if (TABS.includes(name)) selectTab(name, { scroll: true, updateHash: false });
 });
 
+// --- start: the parts that the events below use ------------------------------------------------------
+
+// The map library comes from a CDN: if it did not load, the page still works as tables.
+function noMap(container) {
+  replace(container, el('p', { class: 'map-missing' }, 'The map library could not be loaded (no network to its CDN?). The plan, the profile and every table below still work.'));
+  const nothing = () => {};
+  return {
+    map: null, render: nothing, renderGap: nothing, showUsa: nothing, highlightStop: nothing, reframe: nothing, invalidate: nothing,
+    markStop: nothing, clearMarks: nothing, stopLatLng: () => null,
+  };
+}
+const why = (stop, body) => plan.whyText(stop, body, state.about);
+const mapCtl = window.L ? createMap($('#map'), { onStop: selectStop, why }) : noMap($('#map'));
+const profile = createProfile($('#profile'), $('#profile-tip'), { onStop: selectStop, why });
+const player = createPlayer($('#player'), {
+  getMap: () => mapCtl.map,
+  markStop: (n, kind) => mapCtl.markStop(n, kind),
+  clearMarks: () => mapCtl.clearMarks(),
+  stopLatLng: (n) => mapCtl.stopLatLng(n),
+  onStop: (n) => {
+    plan.highlightRow(boxes.stops, n);
+    profile.highlightStop(n);
+  },
+  onMile: (mile) => profile.showMile(mile),
+  announce,
+  reframe: () => mapCtl.reframe(),
+});
+const whatif = createWhatIf({
+  root: whatifCard,
+  effectRoot: $('#whatif-effect'),
+  questionsRoot: $('#whatif-questions'),
+  getAbout: () => state.about,
+  onChange: markStale,
+  onApply: submitTrip,
+  onReset: () => {
+    markStale();
+    if (state.params) planTrip({ start: state.params.start, finish: state.params.finish, start_tank: 'empty', settings: {} });
+  },
+  onAsk: ask,
+});
+const testRunner = createTestRunner($('#tests-root'), { client, getAbout: () => state.about, toast, onDone: () => refreshAbout() });
+for (const name of ['start', 'finish']) {
+  createCombobox(inputs[name], $(`#${name}-listbox`), {
+    fetchPlaces: (q, options) => client.places(q, options),
+    announce,
+    onPick: () => {
+      if (name === 'start' && !inputs.finish.value.trim()) inputs.finish.focus();
+    },
+  });
+}
+
 // --- events ------------------------------------------------------------------------------------
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
-  const params = readForm();
-  if (!params.start || !params.finish) {
-    clearFieldErrors();
-    if (!params.start) showFieldError('start', 'Required.');
-    if (!params.finish) showFieldError('finish', 'Required.');
-    return;
-  }
-  planTrip(params, { history: 'push' });
+  submitTrip();
 });
 for (const input of Object.values(inputs)) {
   input.addEventListener('input', () => {
@@ -544,7 +715,6 @@ for (const input of Object.values(inputs)) {
     markStale();
   });
 }
-for (const radio of form.querySelectorAll('input[name="start_tank"]')) radio.addEventListener('change', markStale);
 // Swap only swaps: the reversed trip is a new trip (a routing call), sent by "Plan route".
 $('#swap').addEventListener('click', () => {
   const start = inputs.start.value;
@@ -552,11 +722,11 @@ $('#swap').addEventListener('click', () => {
   inputs.finish.value = start;
   updateButton();
   markStale();
-  if (state.params) live.textContent = 'Start and finish swapped. Press Plan route to plan the reversed trip.';
+  if (state.params) announce('Start and finish swapped. Press Plan route to plan the reversed trip.');
 });
 for (const chip of document.querySelectorAll('.chip[data-start]')) {
   chip.addEventListener('click', () => {
-    planTrip({ start: chip.dataset.start, finish: chip.dataset.finish, start_tank: chip.dataset.tank === 'full' ? 'full' : 'empty' }, { history: 'push' });
+    planTrip({ start: chip.dataset.start, finish: chip.dataset.finish, start_tank: chip.dataset.tank === 'full' ? 'full' : 'empty', settings: whatif.read().settings }, { history: 'push' });
   });
 }
 $('#send-again').addEventListener('click', () => {
@@ -574,7 +744,7 @@ window.addEventListener('popstate', () => {
     state.route = null;
     state.params = null;
     state.checks = [];
-    setForm({ start: '', finish: '', start_tank: 'empty' });
+    setForm({ start: '', finish: '', start_tank: 'empty', settings: {} });
     renderEmpty();
     renderAll({ api: true });
     return;
@@ -582,24 +752,13 @@ window.addEventListener('popstate', () => {
   planTrip(params, { history: 'none', origin: 'history' });
 });
 
-// --- start ---------------------------------------------------------------------------------------
-
-// The map library comes from a CDN: if it did not load, the page still works as tables.
-function noMap(container) {
-  replace(container, el('p', { class: 'map-missing' }, 'The map library could not be loaded (no network to its CDN?). The plan, the profile and every table below still work.'));
-  const nothing = () => {};
-  return { render: nothing, renderGap: nothing, showUsa: nothing, highlightStop: nothing, reframe: nothing, invalidate: nothing };
-}
-const why = (stop, body) => plan.whyText(stop, body, state.about);
-const mapCtl = window.L ? createMap($('#map'), { onStop: selectStop, why }) : noMap($('#map'));
-const profile = createProfile($('#profile'), $('#profile-tip'), { onStop: selectStop, why });
 let casesWereRunning = false;
 const cases = createCases({
   routeBase,
   getAbout: () => state.about,
   onOpen: (params) => {
     selectTab('plan');
-    planTrip(params, { history: 'push' });
+    planTrip({ ...params, settings: {} }, { history: 'push' });
   },
   onChange: () => {
     const running = cases.isRunning();
@@ -618,11 +777,12 @@ plan.setupActions(boxes.actions, { getState: () => state, routeBase, toast });
 onLog(scheduleRender);
 
 const hashTab = window.location.hash.slice(1);
-selectTab(TABS.includes(hashTab) ? hashTab : 'plan', { updateHash: false });
-setForm(config.initial || {});
-setupTabsOverflow();
 const initial = paramsFromUrl();
+setForm(initial || { ...(config.initial || {}), settings: settingsFromQuery(new URLSearchParams(window.location.search), whatif.defaults()) });
+selectTab(TABS.includes(hashTab) ? hashTab : 'plan', { updateHash: false });
+setupTabsOverflow();
 renderEmpty();
 renderAll({ api: true });
 document.documentElement.classList.add('js-ready');
 if (initial) planTrip(initial, { history: 'replace', origin: 'page load' });
+else refreshStats();

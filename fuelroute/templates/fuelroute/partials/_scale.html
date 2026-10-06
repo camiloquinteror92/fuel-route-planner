@@ -1,0 +1,72 @@
+{% comment %}
+  "How it scales" tab (static/fuelroute/js/scale.js). The measurements are those of
+  `python manage.py benchmark` (data/benchmark.json, served in /api/stats as
+  "benchmark") and of this server since it started (/api/stats). The ladder is prose
+  without numbers; each <span data-scale="..."> is filled from those measurements.
+{% endcomment %}
+<section id="panel-scale" class="panel" role="tabpanel" aria-labelledby="tab-scale" tabindex="0" hidden>
+  <h3>Measured, not guessed</h3>
+  <p class="muted"><code>python manage.py benchmark</code> plans a coast-to-coast trip inside one process, without network, many
+    times, and saves what it measured in <code>data/benchmark.json</code>; <code>/api/stats</code> serves it with the machine it ran on.</p>
+  <div id="scale-bench"></div>
+
+  <h3>Where the time goes</h3>
+  <p class="muted">What each kind of request costs on this server. The slow part of a new trip is not our code: it is the one call
+    to the public routing server.</p>
+  <div id="scale-costs"></div>
+
+  <h3>How it would grow</h3>
+  <p class="muted">Each step solves one problem. None is needed today; take a step when its problem shows up, in this order.</p>
+  <ol class="ladder">
+    <li class="rung">
+      <h4>Share the caches in Redis</h4>
+      <p><strong>Solves:</strong> each server process keeps its own caches and counters in memory. With several processes the same
+        trip can call the routing server once per process, a what-if is only free on the process that has the route, and the
+        rate limit counts per process.</p>
+      <p><strong>Needed when:</strong> more than one process or machine serves the API.</p>
+      <p><strong>Here:</strong> one setting, <code>CACHES</code> to <code>RedisCache</code>; the plan cache, the route cache and
+        the rate limit then work across processes.</p>
+    </li>
+    <li class="rung">
+      <h4>Run our own OSRM</h4>
+      <p><strong>Solves:</strong> the public demo server has no service guarantee, asks for about one request per second and only
+        knows cars. Every new trip waits for it: here a call takes <span data-scale="osrm">—</span>, while all our planning takes
+        <span data-scale="full">—</span>.</p>
+      <p><strong>Needed when:</strong> new trips arrive faster than that, or the plan needs a truck profile (height, weight,
+        hazardous loads) or a latency promise.</p>
+      <p><strong>Here:</strong> the <code>OSRM_URL</code> environment variable; the code does not change.</p>
+    </li>
+    <li class="rung">
+      <h4>Stations in PostGIS</h4>
+      <p><strong>Solves:</strong> numpy checks every station inside the route's box. That is fast for the
+        <span data-scale="stations">—</span> stations of the price file, but it grows with the number of stations.</p>
+      <p><strong>Needed when:</strong> the station list grows a lot (a national feed) or prices change many times a day.</p>
+      <p><strong>Here:</strong> stations in PostgreSQL with a spatial index; “stations near this line” becomes one indexed query and
+        a price change is a row update.</p>
+    </li>
+    <li class="rung">
+      <h4>Several instances behind a load balancer</h4>
+      <p><strong>Solves:</strong> one process answers a limited number of requests: about
+        <span data-scale="cached_rps">—</span> plans from the cache per second, or <span data-scale="whatif_rps">—</span> what-if
+        replans per second, and holds <span data-scale="rss">—</span> of memory (measured above).</p>
+      <p><strong>Needed when:</strong> steady traffic gets close to that.</p>
+      <p><strong>Here:</strong> the API keeps no state besides its caches (shared in Redis, first step) and the station data is
+        read-only, so more instances give more throughput.</p>
+    </li>
+    <li class="rung">
+      <h4>A queue for batches</h4>
+      <p><strong>Solves:</strong> planning many trips at once (tomorrow's dispatch) would hold connections open and send bursts to
+        the routing server.</p>
+      <p><strong>Needed when:</strong> clients send trips in batches, or plans are wanted ahead of time.</p>
+      <p><strong>Here:</strong> accept the batch and return a job id; workers plan at the pace the routing server allows and say
+        when it is done.</p>
+    </li>
+    <li class="rung">
+      <h4>Precompute frequent corridors</h4>
+      <p><strong>Solves:</strong> the slow part of a new trip is the routing call, and fleets drive the same lanes every day.</p>
+      <p><strong>Needed when:</strong> a few lanes carry most of the traffic.</p>
+      <p><strong>Here:</strong> route those lanes ahead of time (and again when prices change); every request is then a cache hit
+        or a what-if: <span data-scale="whatif">—</span> of our code, no external call.</p>
+    </li>
+  </ol>
+</section>

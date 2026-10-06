@@ -40,9 +40,13 @@
 
       <form id="trip-form" class="trip-form" method="get" action="{% url 'route-map' %}" novalidate>
         <div class="field field-start">
-          <label for="start">Start</label>
-          <input id="start" name="start" value="{{ form.start }}" placeholder="City, ST or lat,lon"
-                 autocomplete="off" spellcheck="false" required aria-describedby="start-error start-hint">
+          <label for="start" id="start-label">Start</label>
+          <div class="combo">
+            <input id="start" name="start" value="{{ form.start }}" placeholder="City, ST or lat,lon"
+                   autocomplete="off" spellcheck="false" required aria-describedby="start-error start-hint"
+                   role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="start-listbox">
+            <ul id="start-listbox" class="combo-list" role="listbox" aria-labelledby="start-label" hidden></ul>
+          </div>
           <p class="field-error" id="start-error" hidden></p>
           <p class="field-hint" id="start-hint" hidden></p>
         </div>
@@ -50,24 +54,21 @@
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M7 7h11l-3-3M17 17H6l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <div class="field field-finish">
-          <label for="finish">Finish</label>
-          <input id="finish" name="finish" value="{{ form.finish }}" placeholder="City, ST or lat,lon"
-                 autocomplete="off" spellcheck="false" required aria-describedby="finish-error finish-hint">
+          <label for="finish" id="finish-label">Finish</label>
+          <div class="combo">
+            <input id="finish" name="finish" value="{{ form.finish }}" placeholder="City, ST or lat,lon"
+                   autocomplete="off" spellcheck="false" required aria-describedby="finish-error finish-hint"
+                   role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="finish-listbox">
+            <ul id="finish-listbox" class="combo-list" role="listbox" aria-labelledby="finish-label" hidden></ul>
+          </div>
           <p class="field-error" id="finish-error" hidden></p>
           <p class="field-hint" id="finish-hint" hidden></p>
         </div>
-        <fieldset class="segmented">
-          <legend>Start tank</legend>
-          <div class="segmented-options">
-            <label><input type="radio" name="start_tank" value="empty"{% if form.start_tank != "full" %} checked{% endif %}><span>Empty (pay every mile)</span></label>
-            <label><input type="radio" name="start_tank" value="full"{% if form.start_tank == "full" %} checked{% endif %}><span>Full</span></label>
-          </div>
-          <p class="field-error" id="start_tank-error" hidden></p>
-        </fieldset>
         <button type="submit" id="plan-btn" class="btn btn-primary">
           <span class="btn-label">Plan route</span>
           <span class="btn-timer" data-timer hidden></span>
         </button>
+        <a class="form-settings" href="#whatif" id="settings-link"><span class="gear" aria-hidden="true"></span><span id="settings-summary">What if… (assignment defaults)</span></a>
       </form>
 
       <div class="chips" role="group" aria-label="Example trips">
@@ -78,7 +79,7 @@
           <button type="button" class="chip" data-start="Los Angeles, CA" data-finish="New York, NY" data-tank="empty">Los Angeles → New York (data gap)</button>
           <button type="button" class="chip" data-start="Dallas, TX" data-finish="Austin, TX" data-tank="full">Dallas → Austin (full tank)</button>
         </div>
-        <span class="chips-hint">Try a trip, then press <em>Send again</em> in <a href="#performance">Performance</a>.</span>
+        <span class="chips-hint">Plan a trip, press <em>Play trip</em> under the map, then try a question in <a href="#whatif">What if…</a></span>
       </div>
     </div>
   </header>
@@ -95,8 +96,9 @@
     <section id="empty" class="hero" aria-labelledby="hero-title">
       <div class="hero-text">
         <h2 id="hero-title">Plan the cheapest fuel stops for a truck trip in the USA</h2>
-        <p>Type a start and a finish, or pick an example. The page calls the same <code>GET /api/route</code> that Postman uses
-          and draws its answer: the route, where to stop, how much to buy, why there, and the total cost.</p>
+        <p>Type a start and a finish (suggestions come from the server's offline index of US places), or pick an example. The page
+          calls the same <code>GET /api/route</code> that Postman uses and draws its answer: the route, where to stop, how much to buy,
+          why there, and the total cost. Then replay the trip on the map, or change the truck in <a href="#whatif">What if…</a></p>
         <p>Opening this page makes no routing or geocoding call: the server calls nothing to render it. Your browser loads the
           map tiles from OpenStreetMap and the map library from its CDN. <a href="#how">How it works</a></p>
       </div>
@@ -116,15 +118,17 @@
 
     <section id="results" class="results" hidden aria-labelledby="trip-title">
       <p id="stale" class="banner banner-info" role="status" hidden><span class="banner-icon" aria-hidden="true"></span>
-        <span>The inputs changed: these results are for the previous trip. Press <strong>Plan route</strong> to update them.</span></p>
+        <span>The inputs changed: these results are for the previous trip or settings. Press <strong>Plan route</strong> or
+          <strong>Replan</strong> to update them.</span></p>
       <h2 id="trip-title" class="trip-title">
         <span data-live="route.start.label">—</span> → <span data-live="route.finish.label">—</span>
       </h2>
+      <div id="settings-line" class="settings-line"></div>
       <div class="kpis">
         <article class="kpi">
           <h3>Total fuel cost</h3>
           <p class="kpi-value" data-live="route.summary.total_fuel_cost" data-format="money">—</p>
-          <p class="kpi-sub" data-live-if="derived.pays_every_mile">Every mile paid (start tank: empty)</p>
+          <p class="kpi-sub" data-live-if="derived.pays_every_mile">Every mile paid for</p>
           <p class="kpi-sub" data-live-if="derived.is_full">Fuel bought on the way (start tank: full; the <span data-live="derived.full_tank_gallons" data-format="gal">—</span> in the tank are not counted)</p>
           <p class="kpi-warn" data-live-if="derived.has_unpriced"><span data-live="route.summary.unpriced_fuel_gallons" data-format="gal">—</span> burned where the price file has no station: not priced (see the warnings)</p>
         </article>
@@ -193,9 +197,15 @@
       <p class="note" data-live="route.summary.note"></p>
     </section>
 
+    <div class="workspace">
     <section class="map-card" aria-label="Route map">
       <div id="map"></div>
+      <div id="player" class="player" role="group" aria-label="Play the trip on the map" hidden></div>
     </section>
+
+    <aside class="side" aria-label="Plan settings">
+      {% include "fuelroute/partials/_whatif.html" %}
+    </aside>
 
     <section id="profile-card" class="card profile-card" hidden aria-labelledby="profile-title">
       <div class="card-head">
@@ -226,15 +236,18 @@
           <span data-live-unless="derived.stretch_ok" class="mark mark-bad"><span class="mark-icon" aria-hidden="true"></span>longer than the range</span></li>
         <li data-live-if="derived.some_arrive_empty"><span data-live="derived.stops_arriving_empty" data-format="int">—</span> of
           <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank: the range is used
-          literally, with no safety margin (<a href="#how">known limits</a>).</li>
+          literally, with no safety margin: set one in <a href="#whatif">What if…</a></li>
       </ul>
     </section>
+    </div>
 
     <div class="tabs-wrap">
       <nav class="tabs" role="tablist" aria-label="Details of the plan">
         <button type="button" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="true">Plan</button>
         <button type="button" role="tab" id="tab-requirements" aria-controls="panel-requirements" aria-selected="false" tabindex="-1">Requirements</button>
+        <button type="button" role="tab" id="tab-tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1">Tests</button>
         <button type="button" role="tab" id="tab-performance" aria-controls="panel-performance" aria-selected="false" tabindex="-1">Performance</button>
+        <button type="button" role="tab" id="tab-scale" aria-controls="panel-scale" aria-selected="false" tabindex="-1">How it scales</button>
         <button type="button" role="tab" id="tab-how" aria-controls="panel-how" aria-selected="false" tabindex="-1">How it works</button>
         <button type="button" role="tab" id="tab-api" aria-controls="panel-api" aria-selected="false" tabindex="-1">API</button>
       </nav>
@@ -262,6 +275,8 @@
     </section>
 
     {% include "fuelroute/partials/_requirements.html" %}
+
+    {% include "fuelroute/partials/_tests.html" %}
 
     <section id="panel-performance" class="panel" role="tabpanel" aria-labelledby="tab-performance" tabindex="0" hidden>
       <h3>This request</h3>
@@ -292,12 +307,16 @@
         <li><strong>Two caches and single flight.</strong> The prepared route and the finished plan are cached
           (plan for <span data-live="about.planner.plan_cache_seconds" data-format="duration">—</span>, per server process); identical
           requests in flight share one routing call.</li>
+        <li><strong>A what-if costs no call.</strong> The route is cached apart from the plan, so a change of the truck or of the
+          rules in <a href="#whatif">What if…</a> is planned again on the cached route by our code alone.</li>
         <li><strong>Vectorised corridor search.</strong> numpy finds the stations near the route in three passes:
           <a href="#how">see the funnel in How it works</a>.</li>
         <li><strong>Gzip on the wire.</strong> The JSON of a long trip and this page compress to a fraction of their size; the
           “Response size” card above compares what travelled with what was decoded.</li>
       </ul>
     </section>
+
+    {% include "fuelroute/partials/_scale.html" %}
 
     {% include "fuelroute/partials/_how.html" %}
 

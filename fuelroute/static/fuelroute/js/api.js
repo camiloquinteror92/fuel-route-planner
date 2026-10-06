@@ -3,6 +3,8 @@
 // performance.now() fallback), its Server-Timing header is parsed, and it is
 // appended to this session's network log (kept in memory only).
 
+import { writeSettings } from './settings.js';
+
 export const session = [];
 const listeners = new Set();
 
@@ -57,6 +59,8 @@ function kindOf(pathname) {
   if (/\/api\/route\/?$/.test(pathname)) return 'route';
   if (/\/api\/stats\/?$/.test(pathname)) return 'stats';
   if (/\/api\/about\/?$/.test(pathname)) return 'about';
+  if (/\/api\/places\/?$/.test(pathname)) return 'places';
+  if (/\/api\/tests(\/run)?\/?$/.test(pathname)) return 'tests';
   return 'other';
 }
 
@@ -175,18 +179,32 @@ export async function request(method, url, options = {}) {
 }
 
 export function tripLabel(params) {
-  return `${params.start} → ${params.finish}${params.start_tank === 'full' ? ' (full tank)' : ''}`;
+  const changed = Object.keys(params.settings || {}).length;
+  return `${params.start} → ${params.finish}${params.start_tank === 'full' ? ' (full tank)' : ''}${changed ? ' (what if)' : ''}`;
 }
 
-// /api/route?start&finish&start_tank[&include]: the exact request Postman sends
-// (include only adds the map layer of nearby stations; it shares the plan cache).
-export function routeUrl(base, params, include = []) {
+// start, finish, start_tank and the what-if settings that differ from the defaults.
+export function tripQuery(params) {
   const query = new URLSearchParams();
   query.set('start', params.start);
   query.set('finish', params.finish);
   query.set('start_tank', params.start_tank === 'full' ? 'full' : 'empty');
+  return writeSettings(query, params.settings);
+}
+
+// /api/route?start&finish&start_tank[&settings][&include]: the exact request Postman
+// sends (include only adds the map layer of nearby stations; it shares the plan cache).
+export function routeUrl(base, params, include = []) {
+  const query = tripQuery(params);
   if (include.length) query.set('include', include.join(','));
   return `${base}?${query}`;
+}
+
+// The JSON body of the same request, for POST.
+export function tripBody(params) {
+  const body = { start: params.start, finish: params.finish, start_tank: params.start_tank === 'full' ? 'full' : 'empty' };
+  for (const [name, value] of Object.entries(params.settings || {})) body[name] = value;
+  return body;
 }
 
 export function absolute(url) {
@@ -201,14 +219,27 @@ export function createClient(config) {
       return request('GET', routeUrl(endpoints.route, params, include), { signal, origin, trip: tripLabel(params) });
     },
     planPost(params, { signal, origin = 'user' } = {}) {
-      const body = { start: params.start, finish: params.finish, start_tank: params.start_tank === 'full' ? 'full' : 'empty' };
-      return request('POST', endpoints.route, { body, signal, origin, trip: tripLabel(params) });
+      return request('POST', endpoints.route, { body: tripBody(params), signal, origin, trip: tripLabel(params) });
     },
     stats() {
       return endpoints.stats ? request('GET', endpoints.stats, { origin: 'page' }) : Promise.resolve(null);
     },
     about() {
       return endpoints.about ? request('GET', endpoints.about, { origin: 'page' }) : Promise.resolve(null);
+    },
+    // City suggestions from the server's offline index (0 external calls).
+    places(q, { limit, signal } = {}) {
+      if (!endpoints.places) return Promise.resolve(null);
+      const query = new URLSearchParams({ q });
+      if (limit) query.set('limit', String(limit));
+      return request('GET', `${endpoints.places}?${query}`, { signal, origin: 'autocomplete' });
+    },
+    // The test suite: the last run and the inventory; POST runs it (no parameters).
+    tests() {
+      return endpoints.tests ? request('GET', endpoints.tests, { origin: 'tests tab' }) : Promise.resolve(null);
+    },
+    runTests() {
+      return endpoints.tests_run ? request('POST', endpoints.tests_run, { origin: 'tests tab' }) : Promise.resolve(null);
     },
     // N sequential GETs of the same URL (no include: Postman's request). Stops at
     // the first answer that needed an external call or was rate limited.

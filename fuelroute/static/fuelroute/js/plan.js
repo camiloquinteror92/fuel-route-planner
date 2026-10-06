@@ -272,7 +272,7 @@ export function stopsCsv(body) {
 }
 
 export function driverInstructions(body) {
-  const lines = [`${body.start.label} → ${body.finish.label}: ${fmt.miles(body.route.distance_miles)}, start tank ${body.vehicle.start_tank}`];
+  const lines = [`${body.start.label} → ${body.finish.label}: ${fmt.miles(body.route.distance_miles)}, ${body.vehicle.start_tank_label || `start tank ${body.vehicle.start_tank}`}`];
   for (const s of body.fuel_stops) {
     lines.push(`Stop ${s.stop} · mile ${fmt.dec1(s.mile_marker)} · ${s.name}, ${[s.address, `${s.city}, ${s.state}`].filter(Boolean).join(', ')} · buy ${fmt.gal(s.gallons)} @ ${fmt.price(s.price_per_gallon)} = ${fmt.money(s.cost)}`);
   }

@@ -1,10 +1,12 @@
 """The browser page at ``/api/route/map``: a client of the public JSON API.
 
 * ``planner_page`` renders only the shell: the form (pre-filled from the query
-  string), the page configuration and ``/api/about`` embedded as JSON. It never
-  plans and never calls an external service; the page's JavaScript calls the same
-  ``GET /api/route`` that Postman uses and draws what it returns, so everything the
-  page shows comes from the API (or from measurements taken in the browser).
+  string, what-if settings included), the page configuration and ``/api/about``
+  embedded as JSON. It never plans and never calls an external service; the page's
+  JavaScript calls the same ``GET /api/route`` that Postman uses and draws what it
+  returns, so everything the page shows comes from the API (or from measurements
+  taken in the browser). City suggestions come from ``/api/places`` and the Tests
+  tab uses ``/api/tests``; the page degrades gracefully when a server lacks them.
 * ``static_file`` serves ``fuelroute/static/`` so the page works with the
   documented ``runserver`` (``DEBUG`` off, no ``collectstatic``). In production a
   reverse proxy or a CDN serves these files instead.
@@ -37,6 +39,25 @@ def _url(name: str) -> str | None:
         return None
 
 
+def _endpoint(names: tuple[str, ...], path: str) -> str:
+    """The first of ``names`` that reverses, else the path fixed by the API contract.
+
+    The page asks the contract's path even when this server does not route it yet:
+    the answer is then the API's JSON 404 and the page leaves that feature out.
+    """
+    for name in names:
+        url = _url(name)
+        if url:
+            return url
+    return path
+
+
+# Optional what-if parameters of /api/route (the API validates them; the page only
+# carries what the URL says, so a shared link opens the same plan).
+# fuelroute/tests/test_web.py checks it is the serializer's list.
+WHAT_IF_PARAMS = ("mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal")
+
+
 def _about() -> dict:
     """``/api/about`` (versions, data, requirements, tests...), or {} if unavailable."""
     try:
@@ -60,14 +81,23 @@ def planner_page(request):
         "finish": request.GET.get("finish", ""),
         "start_tank": "full" if request.GET.get("start_tank") == "full" else "empty",
     }
+    # What-if settings present in the address, as written (the API validates them).
+    initial = dict(form)
+    for name in WHAT_IF_PARAMS:
+        value = request.GET.get(name, "").strip()[:20]
+        if value:
+            initial[name] = value
     page_config = {
         "api": {
             "route": _url("route-plan"),
             "stats": _url("api-stats"),
             "about": _url("api-about"),
             "page": _url("route-map"),
+            "places": _endpoint(("api-places", "places"), "/api/places"),
+            "tests": _endpoint(("api-tests", "tests"), "/api/tests"),
+            "tests_run": _endpoint(("api-tests-run", "tests-run"), "/api/tests/run"),
         },
-        "initial": form,
+        "initial": initial,
         "about": _about(),
     }
     context = {"form": form, "page_config": page_config, "asset_version": asset_version()}

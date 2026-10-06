@@ -252,6 +252,23 @@ export function createProfile(svgNode, tipNode, { onStop, why } = {}) {
     for (const g of svgNode.querySelectorAll('.pf-stop')) g.classList.toggle('is-active', g.dataset.stop === String(n));
   }
 
+  // Play trip: the crosshair follows the truck (null hides it); no tooltip.
+  function showMile(mile) {
+    if (!current) return;
+    if (mile === null || mile === undefined) {
+      current.cross.setAttribute('visibility', 'hidden');
+      current.dot.setAttribute('visibility', 'hidden');
+      return;
+    }
+    const cx = current.x(mile);
+    current.cross.setAttribute('x1', cx);
+    current.cross.setAttribute('x2', cx);
+    current.cross.setAttribute('visibility', 'visible');
+    current.dot.setAttribute('cx', cx);
+    current.dot.setAttribute('cy', current.yTank(Math.max(0, fuelAt(current.trace, mile))));
+    current.dot.setAttribute('visibility', 'visible');
+  }
+
   function clearAll() {
     clear(svgNode);
     current = null;
@@ -260,5 +277,5 @@ export function createProfile(svgNode, tipNode, { onStop, why } = {}) {
     tipNode.hidden = true;
   }
 
-  return { render: draw, highlightStop, clear: clearAll };
+  return { render: draw, highlightStop, showMile, clear: clearAll };
 }

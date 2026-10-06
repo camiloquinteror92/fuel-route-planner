@@ -1,0 +1,129 @@
+{% comment %}
+  "What if…" panel and the interview questions (static/fuelroute/js/whatif.js).
+  The inputs are named like the optional parameters of /api/route. Their defaults
+  (data-default) and limits come from /api/about at run time, so the visible text
+  has no digits: the server is the source of every value and validates them again.
+  The start tank radios belong to the trip form (form="trip-form").
+{% endcomment %}
+<section id="whatif" class="card whatif" aria-labelledby="whatif-title">
+  <div class="card-head">
+    <h2 id="whatif-title">What if…</h2>
+    <span id="whatif-count" class="whatif-count">Assignment defaults</span>
+  </div>
+  <p class="muted small whatif-intro">Change the truck or the rules, then replan. A trip already planned is planned again on
+    its cached route: no external call.</p>
+
+  <div id="whatif-effect" class="whatif-effect" aria-live="polite"></div>
+
+  <fieldset class="setting setting-tank" data-setting="start_tank">
+    <legend>Start tank</legend>
+    <label class="option">
+      <input type="radio" name="start_tank" value="empty" form="trip-form"{% if form.start_tank != "full" %} checked{% endif %}>
+      <span><strong>Pay for every mile</strong> <small class="muted">(default)</small>
+        <small class="option-help">The cost covers all the fuel the trip burns: the truck borrows a small reserve at the start and gives it back at the end.</small></span>
+    </label>
+    <label class="option">
+      <input type="radio" name="start_tank" value="full" form="trip-form"{% if form.start_tank == "full" %} checked{% endif %}>
+      <span><strong>Start with a full tank</strong>
+        <small class="option-help">The truck leaves full and that fuel is free: only what is bought on the way is counted.</small></span>
+    </label>
+    <p class="field-error" id="start_tank-error" hidden></p>
+  </fieldset>
+
+  <div class="setting" data-setting="mpg">
+    <div class="setting-head">
+      <label for="set-mpg">Fuel economy</label>
+      <span class="setting-default">default <span data-default="mpg">—</span></span>
+    </div>
+    <div class="setting-input">
+      <label for="set-mpg-range" class="sr-only">Fuel economy, slider</label>
+      <input type="range" id="set-mpg-range" tabindex="-1">
+      <input type="number" id="set-mpg" inputmode="decimal" aria-describedby="mpg-help mpg-error">
+      <span class="unit">mpg</span>
+    </div>
+    <p class="setting-help" id="mpg-help">Miles driven on one gallon. Fewer miles per gallon means more gallons for the same trip.</p>
+    <p class="field-error" id="mpg-error" hidden></p>
+  </div>
+
+  <div class="setting" data-setting="max_range_miles">
+    <div class="setting-head">
+      <label for="set-max_range_miles">Range on a full tank</label>
+      <span class="setting-default">default <span data-default="max_range_miles">—</span></span>
+    </div>
+    <div class="setting-input">
+      <label for="set-max_range_miles-range" class="sr-only">Range on a full tank, slider</label>
+      <input type="range" id="set-max_range_miles-range" tabindex="-1">
+      <input type="number" id="set-max_range_miles" inputmode="decimal" aria-describedby="max_range_miles-help max_range_miles-error">
+      <span class="unit">mi</span>
+    </div>
+    <p class="setting-help" id="max_range_miles-help">How far a full tank goes. With the fuel economy it sets the tank:
+      <output id="set-tank" class="strong">—</output> (range ÷ mpg).</p>
+    <p class="field-error" id="max_range_miles-error" hidden></p>
+  </div>
+
+  <div class="setting" data-setting="corridor_miles">
+    <div class="setting-head">
+      <label for="set-corridor_miles">Stations near the route</label>
+      <span class="setting-default">default <span data-default="corridor_miles">—</span></span>
+    </div>
+    <div class="setting-input">
+      <label for="set-corridor_miles-range" class="sr-only">Stations near the route, slider</label>
+      <input type="range" id="set-corridor_miles-range" tabindex="-1">
+      <input type="number" id="set-corridor_miles" inputmode="decimal" aria-describedby="corridor_miles-help corridor_miles-error">
+      <span class="unit">mi</span>
+    </div>
+    <p class="setting-help" id="corridor_miles-help">How far from the road a station may be. Wider: more stations to choose from,
+      and longer detours (the detour is not priced).</p>
+    <p class="field-error" id="corridor_miles-error" hidden></p>
+  </div>
+
+  <div class="setting" data-setting="safety_reserve_gal">
+    <div class="setting-head">
+      <label for="set-safety_reserve_gal">Safety reserve</label>
+      <span class="setting-default">default <span data-default="safety_reserve_gal">—</span></span>
+    </div>
+    <div class="setting-input">
+      <label for="set-safety_reserve_gal-range" class="sr-only">Safety reserve, slider</label>
+      <input type="range" id="set-safety_reserve_gal-range" tabindex="-1">
+      <input type="number" id="set-safety_reserve_gal" inputmode="decimal" aria-describedby="safety_reserve_gal-help safety_reserve_gal-error">
+      <span class="unit">gal</span>
+    </div>
+    <p class="setting-help" id="safety_reserve_gal-help">Fuel that must still be in the tank when the truck reaches any stop and
+      the destination. None by default: the range is used to the last drop.</p>
+    <p class="field-error" id="safety_reserve_gal-error" hidden></p>
+  </div>
+
+  <fieldset class="setting" data-setting="price_policy" aria-describedby="price_policy-help">
+    <legend>Price of a station quoted several times</legend>
+    <div class="pills">
+      <label><input type="radio" name="price_policy" value="median" checked><span>Median</span></label>
+      <label><input type="radio" name="price_policy" value="min"><span>Lowest</span></label>
+      <label><input type="radio" name="price_policy" value="max"><span>Highest</span></label>
+    </div>
+    <p class="setting-help" id="price_policy-help">The price file lists some stations more than once, with different prices. Median
+      (default) ignores one odd quote; lowest and highest are the best and the worst case.</p>
+    <p class="field-error" id="price_policy-error" hidden></p>
+  </fieldset>
+
+  <div class="setting setting-check" data-setting="consolidate">
+    <input type="checkbox" id="set-consolidate" checked aria-describedby="consolidate-help">
+    <label for="set-consolidate">Merge tiny stops <small class="muted">(default on)</small></label>
+    <p class="setting-help" id="consolidate-help">A stop that buys less than
+      <span data-live="about.vehicle.min_stop_gallons" data-format="gal">—</span> is merged with a neighbour when that costs at most
+      <span data-live="about.vehicle.max_consolidation_cost" data-format="money">—</span> more. Off: the pure cheapest plan, tiny stops included.</p>
+    <p class="field-error" id="consolidate-error" hidden></p>
+  </div>
+
+  <div class="whatif-actions">
+    <button type="button" id="whatif-apply" class="btn">Replan with these settings</button>
+    <button type="button" id="whatif-reset" class="btn btn-ghost">Reset to assignment defaults</button>
+  </div>
+  <p class="muted small">The settings are in the page address: copy it to share this exact plan.</p>
+</section>
+
+<section class="card questions" aria-labelledby="questions-title">
+  <h2 id="questions-title">Interview questions you can answer here</h2>
+  <p class="muted small">Each question changes one thing from the assignment defaults on the trip above and replans; the answer
+    appears under it, compared with the defaults.</p>
+  <ol id="whatif-questions" class="question-list"></ol>
+</section>

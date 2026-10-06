@@ -7,7 +7,7 @@
 //   this session  - every request this page made;
 //   since start   - /api/stats, the server's own per-process counters.
 
-import { el, fmt, mark, plural, replace, present, sum, percentile, codeLink, svg, serverTimingDur, MIN_SAMPLES_FOR_P95 } from './format.js';
+import { el, fmt, mark, plural, replace, present, sum, percentile, median, codeLink, svg, serverTimingDur, MIN_SAMPLES_FOR_P95 } from './format.js';
 
 const GROUP_LABEL = { ext: 'external service', cache: 'cache', ours: 'our code', skipped: 'other' };
 let zoomOurs = false;
@@ -227,15 +227,20 @@ export function createBenchmark(container, { getState, client, routeUrlFor, onDo
 // --- session log ------------------------------------------------------------------------
 
 export function renderSession(container, state, { onClear } = {}) {
-  const log = state.session || [];
+  const all = state.session || [];
+  // City suggestions are one request per pause in typing: counted, not listed.
+  const lookups = all.filter((r) => r.kind === 'places');
+  const log = all.filter((r) => r.kind !== 'places');
+  const lookupMs = lookups.map((r) => r.serverMs).filter(present);
   const routeRows = log.filter((r) => r.kind === 'route');
   const newTrips = routeRows.filter((r) => r.osrmCalls > 0 || r.routeCache === 'miss').length;
   const osrm = routeRows.reduce((t, r) => t + (r.osrmCalls || 0), 0);
   const head = el('div', { class: 'session-head' },
     el('p', {}, el('strong', {}, `New trips: ${fmt.int(newTrips)} · OSRM calls: ${fmt.int(osrm)}`),
       newTrips ? el('span', { class: 'muted' }, ` (${fmt.num(osrm / newTrips)} per new trip)`) : null,
-      el('span', { class: 'muted' }, ` · ${fmt.int(log.length)} requests from this page, kept in memory only.`)),
-    el('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: onClear, disabled: !log.length }, 'Clear'));
+      el('span', { class: 'muted' }, ` · ${fmt.int(log.length)} requests from this page, kept in memory only.`),
+      lookups.length ? el('span', { class: 'muted' }, ` Plus ${plural(lookups.length, 'city suggestion lookup')} to /api/places (not listed${lookupMs.length ? `; server median ${fmt.ms(median(lookupMs))}` : ''}, 0 external calls).`) : null),
+    el('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: onClear, disabled: !all.length }, 'Clear'));
   if (!log.length) {
     replace(container, head, el('p', { class: 'muted' }, 'No request yet.'));
     return;

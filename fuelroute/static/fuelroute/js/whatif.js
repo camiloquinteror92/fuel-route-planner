@@ -112,7 +112,8 @@ function delta(value, base, format, { goodWhenLower = true } = {}) {
   const diff = value - base;
   if (Math.abs(diff) < 0.005) return el('span', { class: 'delta' }, 'same');
   const better = goodWhenLower ? diff < 0 : diff > 0;
-  const pct = base ? ` (${diff > 0 ? '+' : '−'}${fmt.pct(Math.abs(diff / base) * 100)})` : '';
+  const share = base ? Math.abs(diff / base) * 100 : 0;
+  const pct = share >= 0.05 ? ` (${diff > 0 ? '+' : '−'}${fmt.pct(share)})` : '';
   return el('span', { class: `delta ${better ? 'is-better' : 'is-worse'}` }, `${diff > 0 ? '+' : '−'}${format(Math.abs(diff))}${pct}`);
 }
 

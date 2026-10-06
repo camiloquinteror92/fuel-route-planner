@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Route Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; }
+    body { display: flex; flex-direction: column; }
+    header { padding: 10px 16px; background: #10243e; color: #fff; }
+    header h1 { margin: 0 0 4px; font-size: 18px; }
+    header p { margin: 0; font-size: 14px; opacity: .9; }
+    #map { flex: 1; }
+    .error { padding: 24px; color: #8a1f11; }
+    table { border-collapse: collapse; font-size: 13px; }
+    td { padding: 2px 6px; }
+  </style>
+</head>
+<body>
+{% if error %}
+  <div class="error"><h1>Could not plan this route</h1><pre>{{ error }}</pre></div>
+{% else %}
+  <header>
+    <h1>{{ result.start.label }} &rarr; {{ result.finish.label }}</h1>
+    <p>
+      {{ result.route.distance_miles }} miles &middot; {{ result.summary.number_of_stops }} fuel stop(s)
+      &middot; {{ result.summary.total_gallons_purchased }} gal &middot;
+      <strong>${{ result.summary.total_fuel_cost }}</strong> total fuel cost
+      (start tank: {{ result.vehicle.start_tank }})
+    </p>
+  </header>
+  <div id="map"></div>
+  {{ geojson|json_script:"route-data" }}
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const data = JSON.parse(document.getElementById("route-data").textContent);
+    const map = L.map("map");
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+
+    const colors = { start: "#1a7f37", finish: "#cf222e", fuel_stop: "#0969da" };
+    const layer = L.geoJSON(data, {
+      style: { color: "#0969da", weight: 4, opacity: 0.8 },
+      pointToLayer: (feature, latlng) => {
+        const p = feature.properties;
+        if (p.kind === "fuel_stop") {
+          return L.marker(latlng, {
+            icon: L.divIcon({
+              className: "",
+              html: `<div style="background:${colors.fuel_stop};color:#fff;border-radius:50%;width:24px;height:24px;line-height:24px;text-align:center;font-weight:700;border:2px solid #fff">${p.stop}</div>`,
+            }),
+          });
+        }
+        return L.circleMarker(latlng, { radius: 8, color: "#fff", weight: 2, fillColor: colors[p.kind], fillOpacity: 1 });
+      },
+      onEachFeature: (feature, l) => {
+        const p = feature.properties;
+        if (p.kind === "fuel_stop") {
+          l.bindPopup(`<b>Stop ${p.stop}: ${p.name}</b><br>${p.city}<table>
+            <tr><td>Mile</td><td>${p.mile_marker}</td></tr>
+            <tr><td>Price</td><td>$${p.price_per_gallon}/gal</td></tr>
+            <tr><td>Buy</td><td>${p.gallons} gal</td></tr>
+            <tr><td>Cost</td><td>$${p.cost}</td></tr></table>`);
+        } else if (p.kind !== "route") {
+          l.bindPopup(`<b>${p.kind}</b>: ${p.label}`);
+        }
+      },
+    }).addTo(map);
+    map.fitBounds(layer.getBounds(), { padding: [20, 20] });
+  </script>
+{% endif %}
+</body>
+</html>

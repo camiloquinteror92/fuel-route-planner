@@ -1,0 +1,302 @@
+"""The planner page (``fuelroute/web.py``): a shell that never plans, its static
+files, and the guards behind its rules.
+
+* Rendering the page costs 0 external calls; the browser calls ``/api/route``.
+* CSS and ES modules are served with the right types (DEBUG off, no collectstatic).
+* "No number is written by hand": visible text has no digits unless it is a live
+  value (``data-live``) or a fixed literal (``data-literal``), and the JavaScript
+  has no hard-coded measurements.
+* The page and the API agree: every live path, format, code link, test id and
+  requirement the page uses exists on the server side.
+"""
+
+import ast
+import json
+import re
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
+
+import django
+import pytest
+
+from fuelroute import web
+from fuelroute.services.about import build_about
+
+from .test_api import FINISH, OK_ROUTE, START, get, stations  # noqa: F401  (stations is a fixture)
+
+PAGE = "/api/route/map"
+JS_DIR = web.STATIC_DIR / "fuelroute" / "js"
+TEMPLATES = Path(web.__file__).resolve().parent / "templates" / "fuelroute"
+REPO = Path(web.__file__).resolve().parent.parent
+ALLOWED_ROOTS = {"route", "stats", "about", "client", "derived"}
+VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+
+class Page(HTMLParser):
+    """Elements (tag, attrs) plus visible text that is not a live value or a literal."""
+
+    SKIP_TAGS = {"script", "style", "code", "pre", "kbd"}
+
+    def __init__(self, html: str):
+        super().__init__(convert_charrefs=True)
+        self.elements: list[tuple[str, dict]] = []
+        self.free_text: list[str] = []
+        self._stack: list[tuple[str, bool]] = []
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        self.elements.append((tag, attrs))
+        if tag in VOID:
+            return
+        parent_skips = self._stack[-1][1] if self._stack else False
+        skip = parent_skips or tag in self.SKIP_TAGS or "data-live" in attrs or "data-literal" in attrs
+        self._stack.append((tag, skip))
+
+    def handle_startendtag(self, tag, attrs):
+        self.elements.append((tag, dict(attrs)))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                del self._stack[i:]
+                return
+
+    def handle_data(self, data):
+        skip = self._stack[-1][1] if self._stack else False
+        if not skip and data.strip():
+            self.free_text.append(data.strip())
+
+    def find(self, **attrs) -> list[dict]:
+        return [a for _, a in self.elements if all(a.get(k) == v for k, v in attrs.items())]
+
+
+def page_config(html: str) -> dict:
+    match = re.search(r'<script id="page-config" type="application/json">(.*?)</script>', html, re.S)
+    assert match, "page-config is missing"
+    return json.loads(match.group(1))
+
+
+def js_sources() -> dict[str, str]:
+    return {path.name: path.read_text(encoding="utf-8") for path in sorted(JS_DIR.glob("*.js"))}
+
+
+def template_sources() -> str:
+    """The page templates without their {% comment %} blocks."""
+    text = "\n".join(p.read_text(encoding="utf-8") for p in sorted(TEMPLATES.rglob("*.html")))
+    return re.sub(r"\{% comment %\}.*?\{% endcomment %\}", "", text, flags=re.S)
+
+
+# --- the shell --------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_page_without_inputs_renders_the_shell_without_external_calls(client, upstream):
+    response = client.get(PAGE)
+    assert response.status_code == 200
+    assert response["Content-Type"].startswith("text/html")
+    html = response.content.decode()
+    assert 'id="trip-form"' in html and 'id="map"' in html and 'id="profile"' in html
+    assert page_config(html)["initial"] == {"start": "", "finish": "", "start_tank": "empty"}
+    assert client.get(PAGE + "/").status_code == 200  # trailing slash, same page
+    assert client.post(PAGE).status_code == 405
+    assert upstream.calls == []
+
+
+@pytest.mark.django_db
+def test_page_with_inputs_prefills_the_form_and_makes_no_external_call(client, upstream):
+    hostile = '"><script>alert(1)</script>'
+    response = client.get(PAGE, {"start": hostile, "finish": FINISH, "start_tank": "full"})
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "<script>alert(1)</script>" not in html
+    assert 'value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"' in html
+    assert f'value="{FINISH}"' in html
+    full = Page(html).find(type="radio", value="full")[0]
+    assert "checked" in full
+    assert page_config(html)["initial"] == {"start": hostile, "finish": FINISH, "start_tank": "full"}
+    # Anything but "full" is the default.
+    odd = page_config(client.get(PAGE, {"start": START, "finish": FINISH, "start_tank": "half"}).content.decode())
+    assert odd["initial"]["start_tank"] == "empty"
+    assert upstream.calls == []
+
+
+@pytest.mark.django_db
+def test_page_embeds_about_as_json(client):
+    config = page_config(client.get(PAGE).content.decode())
+    assert config["api"] == {"route": "/api/route", "stats": "/api/stats", "about": "/api/about", "page": PAGE}
+    about = config["about"]
+    assert about["versions"]["django"] == django.get_version()
+    assert about["service"] == build_about()["service"]
+    assert {"vehicle", "planner", "data", "requirements", "errors", "test_index", "code_links"} <= about.keys()
+
+
+@pytest.mark.django_db
+def test_map_url_of_an_api_response_opens_the_page_without_another_call(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    body = get(client).json()
+    map_url = body["map"]["map_url"]
+    page = client.get(map_url)
+    assert page.status_code == 200
+    assert len(upstream.calls) == 1
+
+    # What the page's JavaScript then asks: the same trip plus the map layer. It is
+    # a plan cache hit, so opening map_url right after Postman costs no call.
+    params = dict(parse_qsl(urlsplit(map_url).query))
+    assert page_config(page.content.decode())["initial"] == params
+    again = client.get("/api/route", {**params, "include": "candidates"}).json()
+    assert again["meta"]["plan_cache"] == "hit"
+    assert again["meta"]["external_api_calls"] == 0
+    assert len(again["candidates"]["rows"]) == again["summary"]["candidate_stations_on_route"]
+    assert len(upstream.calls) == 1
+
+
+# --- static files ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_static_assets_are_served_with_the_right_content_type(client, settings):
+    settings.DEBUG = False
+    html = client.get(PAGE).content.decode()
+    own = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
+    assert any(u.split("?")[0].endswith(".css") for u in own) and any(u.split("?")[0].endswith(".js") for u in own)
+    expected = {".js": "text/javascript", ".css": "text/css"}
+    module_urls = [f"/static/fuelroute/js/{name}" for name in js_sources()]
+    for url in own + module_urls:
+        response = client.get(url)
+        try:
+            assert response.status_code == 200, url
+            assert response["Content-Type"].startswith(expected[Path(url.split("?")[0]).suffix]), url
+            # Versioned URLs (?v=<mtime>) can be cached for good; the rest revalidate.
+            assert ("immutable" in response["Cache-Control"]) == ("?v=" in url), url
+        finally:
+            response.close()
+    assert f"?v={web.asset_version()}" in html
+    assert client.get("/static/fuelroute/js/missing.js").status_code == 404
+    assert client.get("/static/../../config/settings.py").status_code in (400, 404)
+
+
+def test_every_js_import_points_to_an_existing_file():
+    sources = js_sources()
+    import_re = re.compile(r"""import\s+(?:\{([^}]*)\}|\*\s+as\s+\w+)\s+from\s+['"](\.{1,2}/[^'"]+)['"]""")
+    reachable, todo = set(), ["main.js"]
+    while todo:
+        name = todo.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        for names, target in import_re.findall(sources[name]):
+            path = (JS_DIR / target).resolve()
+            assert path.is_file(), f"{name} imports missing {target}"
+            # Named imports must be exported (no bundler would catch a typo).
+            text = sources[path.name]
+            for item in filter(None, (n.strip() for n in names.split(","))):
+                exported = item.split(" as ")[0].strip()
+                assert re.search(
+                    rf"export\s+(?:async\s+)?(?:function|const|let|class)\s+{exported}\b", text
+                ), f"{name} imports {exported} from {target}, which does not export it"
+            todo.append(path.name)
+    assert reachable == set(sources), f"modules never imported: {set(sources) - reachable}"
+
+
+# --- accessibility ----------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_tabs_are_accessible(client):
+    page = Page(client.get(PAGE).content.decode())
+    by_id = {a["id"]: (tag, a) for tag, a in page.elements if "id" in a}
+    tabs = page.find(role="tab")
+    assert len(tabs) == 5
+    assert [t["aria-selected"] for t in tabs].count("true") == 1
+    for tab in tabs:
+        tag, panel = by_id[tab["aria-controls"]]
+        assert panel.get("role") == "tabpanel"
+        assert panel.get("aria-labelledby") == tab["id"]
+        assert tab.get("tabindex", "0") == ("0" if tab["aria-selected"] == "true" else "-1")
+    assert page.find(role="tablist")
+    labelled = {a.get("for") for tag, a in page.elements if tag == "label"}
+    for tag, attrs in page.elements:
+        if tag == "input" and attrs.get("type") not in ("radio", "hidden"):
+            assert attrs["id"] in labelled, f"input {attrs['id']} has no label"
+    assert page.find(id="live").pop()["aria-live"] == "polite"
+
+
+# --- "no number is written by hand" ---------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_page_has_no_hand_written_numbers(client):
+    for params in ({}, {"start": START, "finish": FINISH, "start_tank": "full"}):
+        page = Page(client.get(PAGE, params).content.decode())
+        with_digits = [text for text in page.free_text if re.search(r"\d", text)]
+        assert with_digits == [], f"visible text with digits (use data-live or data-literal): {with_digits}"
+
+
+def test_js_has_no_hand_written_measurements():
+    measurement = re.compile(r"\d\s*(?:ms|mi|miles|gal|gallons|calls|stations|tests)\b|\d\s*%|\$\d")
+    found = []
+    for name, text in js_sources().items():
+        for number, line in enumerate(text.splitlines(), start=1):
+            if measurement.search(line):
+                found.append(f"{name}:{number}: {line.strip()}")
+    assert found == [], "hard-coded measurements in the JavaScript:\n" + "\n".join(found)
+
+
+@pytest.mark.django_db
+def test_data_live_paths_use_allowed_roots(client):
+    page = Page(client.get(PAGE).content.decode())
+    format_js = js_sources()["format.js"]
+    roots = re.search(r"ROOTS = new Set\(\[([^\]]+)\]\)", format_js).group(1)
+    assert {r.strip(" '\"") for r in roots.split(",")} == ALLOWED_ROOTS
+    formats = set(re.findall(r"^  (\w+): \(", format_js.split("export const fmt = {")[1].split("\n};")[0], re.M))
+    paths = 0
+    for _, attrs in page.elements:
+        for key in ("data-live", "data-live-if", "data-live-unless", "data-href"):
+            if key in attrs:
+                paths += 1
+                assert attrs[key].split(".")[0] in ALLOWED_ROOTS, f"{key}={attrs[key]}"
+        if "data-format" in attrs:
+            assert attrs["data-format"] in formats, f"unknown data-format {attrs['data-format']}"
+    assert paths > 50
+
+
+# --- the page and the API agree ----------------------------------------------------------------
+
+
+def _functions(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+
+
+@pytest.mark.django_db
+def test_edge_cases_link_to_existing_tests():
+    about = build_about()
+    cases_js = js_sources()["cases.js"]
+    prefix = re.search(r"const T = '([^']+)';", cases_js).group(1)
+    test_ids = [prefix + name for name in re.findall(r"test_id: `\$\{T\}(\w+)`", cases_js)]
+    test_ids += re.findall(r'data-test="([^"]+)"', template_sources())
+    assert len(test_ids) > 15
+    for test_id in test_ids:
+        path, func = test_id.split("::")
+        assert func in _functions(REPO / path), f"{test_id} does not exist"
+        assert test_id in about["test_index"], f"{test_id} is not in /api/about test_index"
+
+    # Every error code with a live case is in the catalog the API publishes.
+    codes = {e["code"] for e in about["errors"]}
+    mapped = re.search(r"CASE_FOR_ERROR = \{(.*?)\};", cases_js, re.S).group(1)
+    for code in re.findall(r"^\s*(\w+):", mapped, re.M):
+        assert code in codes, f"{code} is not in /api/about errors"
+
+
+@pytest.mark.django_db
+def test_page_code_links_and_requirements_exist_on_the_server():
+    about = build_about()
+    keys = set(re.findall(r'data-code="([^"]+)"', template_sources()))
+    keys |= set(re.findall(r"'([a-z_]+\.[a-z_]+)'\)", js_sources()["performance.js"]))
+    assert keys, "no code links found"
+    assert keys <= about["code_links"].keys(), f"unknown code links: {keys - about['code_links'].keys()}"
+    # The Requirements tab shows live evidence for every requirement the API lists.
+    handled = set(re.findall(r"case '(\w+)':", js_sources()["requirements.js"]))
+    assert {r["id"] for r in about["requirements"]} <= handled

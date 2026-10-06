@@ -7,7 +7,10 @@ files, and the guards behind its rules.
   value (``data-live``) or a fixed literal (``data-literal``), and the JavaScript
   has no hard-coded measurements.
 * The page and the API agree: every live path, format, code link, test id and
-  requirement the page uses exists on the server side.
+  requirement the page uses exists on the server side, and every what-if control,
+  interview question and start-tank label is one the API accepts.
+* The interactive parts (city suggestions, "What if…", "Play trip", the Tests and
+  "How it scales" tabs) are accessible and only show numbers from the API.
 """
 
 import ast
@@ -21,6 +24,7 @@ import django
 import pytest
 
 from fuelroute import web
+from fuelroute.serializers import WHAT_IF_PARAMS
 from fuelroute.services.about import build_about
 
 from .test_api import FINISH, OK_ROUTE, START, get, stations  # noqa: F401  (stations is a fixture)
@@ -125,7 +129,10 @@ def test_page_with_inputs_prefills_the_form_and_makes_no_external_call(client, u
 @pytest.mark.django_db
 def test_page_embeds_about_as_json(client):
     config = page_config(client.get(PAGE).content.decode())
-    assert config["api"] == {"route": "/api/route", "stats": "/api/stats", "about": "/api/about", "page": PAGE}
+    assert config["api"] == {
+        "route": "/api/route", "stats": "/api/stats", "about": "/api/about", "page": PAGE,
+        "places": "/api/places", "tests": "/api/tests", "tests_run": "/api/tests/run",
+    }
     about = config["about"]
     assert about["versions"]["django"] == django.get_version()
     assert about["service"] == build_about()["service"]
@@ -208,7 +215,11 @@ def test_tabs_are_accessible(client):
     page = Page(client.get(PAGE).content.decode())
     by_id = {a["id"]: (tag, a) for tag, a in page.elements if "id" in a}
     tabs = page.find(role="tab")
-    assert len(tabs) == 5
+    assert [t["id"] for t in tabs] == [
+        "tab-plan", "tab-requirements", "tab-tests", "tab-performance", "tab-scale", "tab-how", "tab-api",
+    ]
+    main = js_sources()["main.js"]
+    assert "const TABS = ['plan', 'requirements', 'tests', 'performance', 'scale', 'how', 'api'];" in main
     assert [t["aria-selected"] for t in tabs].count("true") == 1
     for tab in tabs:
         tag, panel = by_id[tab["aria-controls"]]
@@ -330,3 +341,154 @@ def test_the_map_keeps_the_trip_framed_until_the_user_moves_it():
     map_js = js_sources()["map.js"]
     assert "new ResizeObserver(frame)" in map_js
     assert "if (!lastBounds || userMoved) return;" in map_js
+
+
+# --- what if… ------------------------------------------------------------------------------------
+
+
+def _questions() -> list[dict]:
+    """The interview questions of whatif.js: [{"id", "set": {param: value}}]."""
+    source = js_sources()["whatif.js"]
+    block = source.split("export const QUESTIONS = [", 1)[1].split("\n];", 1)[0]
+    found = []
+    for qid, settings in re.findall(r"id: '(\w+)', set: \{ ([^}]*) \}", block):
+        values = {}
+        for key, raw in re.findall(r"(\w+): ('[^']*'|true|false|[\d.]+)", settings):
+            values[key] = raw.strip("'") if raw.startswith("'") else raw
+        found.append({"id": qid, "set": values})
+    return found
+
+
+@pytest.mark.django_db
+def test_what_if_settings_travel_in_the_page_address(client, upstream):
+    """A shared link with what-if settings opens the same plan: the page carries them, escaped."""
+    response = client.get(PAGE, {
+        "start": START, "finish": FINISH, "mpg": "8", "consolidate": "false",
+        "price_policy": "</script><script>alert(1)</script>", "bogus": "1",
+    })
+    html = response.content.decode()
+    initial = page_config(html)["initial"]
+    assert initial["mpg"] == "8" and initial["consolidate"] == "false"
+    assert "bogus" not in initial
+    assert "</script><script>alert(1)" not in html  # json_script escapes it
+    assert upstream.calls == []
+    # Only the API's own what-if parameters are carried.
+    assert set(initial) - {"start", "finish", "start_tank"} <= set(web.WHAT_IF_PARAMS)
+
+
+@pytest.mark.django_db
+def test_map_url_of_a_what_if_opens_the_page_with_the_same_settings(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    body = get(client, mpg="8", safety_reserve_gal="2").json()
+    map_url = body["map"]["map_url"]
+    params = dict(parse_qsl(urlsplit(map_url).query))
+    assert params["mpg"] == "8"
+    assert page_config(client.get(map_url).content.decode())["initial"] == params
+    # What the page then asks is the same plan, from the cache.
+    again = client.get("/api/route", {**params, "include": "candidates"}).json()
+    assert again["meta"]["plan_cache"] == "hit" and again["meta"]["external_api_calls"] == 0
+    assert len(upstream.calls) == 1
+
+
+@pytest.mark.django_db
+def test_what_if_panel_has_a_control_for_every_api_setting(client):
+    page = Page(client.get(PAGE).content.decode())
+    settings_js = js_sources()["settings.js"]
+    js_names = re.findall(r"^    name: '(\w+)'", settings_js, re.M)
+    assert sorted(js_names) == sorted(web.WHAT_IF_PARAMS)
+    assert web.WHAT_IF_PARAMS == WHAT_IF_PARAMS  # the API's own list
+    ids = {a.get("id") for _, a in page.elements}
+    for name in web.WHAT_IF_PARAMS:
+        control = f"set-{name}" in ids or bool(page.find(type="radio", name=name))
+        assert control, f"no control for {name}"
+        assert f"{name}-error" in ids, f"no place for the API's message about {name}"
+    for value in ("median", "min", "max"):
+        assert page.find(type="radio", name="price_policy", value=value)
+    # The start tank belongs to the trip form (also submitted without JavaScript).
+    for value in ("empty", "full"):
+        assert page.find(type="radio", name="start_tank", value=value)[0]["form"] == "trip-form"
+    assert {"whatif-apply", "whatif-reset", "whatif-effect", "whatif-questions"} <= ids
+
+
+@pytest.mark.django_db
+def test_start_tank_labels_are_the_apis(client):
+    """The page and the API name the two modes the same way."""
+    from fuelroute.services.planner import START_TANK_LABELS
+
+    html = client.get(PAGE).content.decode()
+    settings_js = js_sources()["settings.js"]
+    for value, label in START_TANK_LABELS.items():
+        assert f"<strong>{label}</strong>" in html
+        assert f"value: '{value}',\n    label: '{label}'," in settings_js
+
+
+@pytest.mark.django_db
+def test_every_interview_question_is_answered_without_an_external_call(client, upstream, stations):
+    """Each question changes one API setting; after the trip is routed once, each answer
+    is planned on the cached route: 0 external calls, and the API names what changed."""
+    questions = _questions()
+    assert 6 <= len(questions) <= 8
+    upstream.respond(OK_ROUTE)
+    assert get(client).status_code == 200
+    for question in questions:
+        ((name, value),) = question["set"].items()
+        assert name in (*web.WHAT_IF_PARAMS, "start_tank"), question
+        response = get(client, **{name: value})
+        body = response.json()
+        assert body["meta"]["external_api_calls"] == 0, question
+        if response.status_code == 200:
+            assert body["meta"]["settings_changed"] == [name], question
+        else:
+            assert response.status_code == 422, (question, body)
+    assert len(upstream.calls) == 1
+
+
+# --- city suggestions, play trip, tests, scale ---------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_city_fields_are_accessible_comboboxes(client):
+    page = Page(client.get(PAGE).content.decode())
+    by_id = {a["id"]: (tag, a) for tag, a in page.elements if "id" in a}
+    for name in ("start", "finish"):
+        _, field = by_id[name]
+        assert field["role"] == "combobox"
+        assert field["aria-autocomplete"] == "list" and field["aria-expanded"] == "false"
+        _, listbox = by_id[field["aria-controls"]]
+        assert listbox["role"] == "listbox" and "hidden" in listbox
+        assert by_id[listbox["aria-labelledby"]][0] == "label"
+    places = js_sources()["places.js"]
+    for key in ("ArrowDown", "ArrowUp", "Enter", "Escape", "aria-activedescendant", "aria-selected"):
+        assert key in places, key
+
+
+def test_play_trip_replays_the_apis_numbers():
+    """The animation reads the answer (no number of its own) and respects reduced motion."""
+    player = js_sources()["player.js"]
+    for field in ("mile_marker", "fuel_on_arrival_gallons", "gallons", "cost", "total_fuel_cost", "start_fuel_gallons"):
+        assert field in player, field
+    assert "prefers-reduced-motion: reduce" in player and "jumpToEnd()" in player
+    # The cost counter adds integer cents and ends on the API's total, saying whether they match.
+    assert "s.exact = s.costCents === trip.totalCents;" in player
+    assert "s.costCents = trip.totalCents;" in player
+
+
+def test_the_page_never_sends_arguments_to_the_test_runner():
+    api = js_sources()["api.js"]
+    run = api.split("runTests() {", 1)[1].split("},", 1)[0]
+    assert "request('POST', endpoints.tests_run, { origin: 'tests tab' })" in run
+
+
+@pytest.mark.django_db
+def test_every_live_number_of_the_scale_tab_is_filled_from_data(client):
+    html = client.get(PAGE).content.decode()
+    slots = set(re.findall(r'data-scale="(\w+)"', html))
+    scale_js = js_sources()["scale.js"]
+    values = scale_js.split("const values = {", 1)[1].split("};", 1)[0]
+    filled = set(re.findall(r"^    (\w+):", values, re.M))
+    assert slots and slots <= filled, f"slots without a value: {slots - filled}"
+
+
+def test_the_javascript_never_parses_html_strings():
+    for name, text in js_sources().items():
+        assert "innerHTML" not in text and "insertAdjacentHTML" not in text, name

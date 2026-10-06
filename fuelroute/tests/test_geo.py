@@ -114,3 +114,47 @@ def test_corridor_drops_stations_seen_only_from_outside_the_usa():
     every = stations_along_route(samples, miles, 10.0, stations)
     assert found and len(found) < len(every)
     assert all(s.mile < miles[-1] / 2 for s in found)
+
+
+def test_corridor_search_reports_its_funnel():
+    samples, miles = _wiggly_route()
+    stations = _random_stations()
+    inside = miles < miles[-1] / 2
+    funnel = {}
+    found = stations_along_route(samples, miles, 10.0, stations, sample_in_usa=inside, stats=funnel)
+
+    assert funnel["stations_searched"] == len(stations)
+    assert (
+        funnel["stations_searched"]
+        >= funnel["in_bounding_box"]
+        >= funnel["after_coarse_pass"]
+        >= funnel["within_corridor"]
+        >= funnel["candidates"]
+    )
+    assert funnel["in_bounding_box"] < funnel["stations_searched"]  # the box drops part of the map
+    assert funnel["candidates"] == len(found)
+    assert funnel["within_corridor"] - funnel["dropped_outside_usa"] == funnel["candidates"]
+    assert funnel["dropped_outside_usa"] > 0
+    # Each station keeps its own coordinates.
+    position = {int(i): k for k, i in enumerate(stations.opis_ids)}
+    assert all((s.lat, s.lon) == (stations.lat[position[s.opis_id]], stations.lon[position[s.opis_id]]) for s in found)
+
+    everywhere = {}
+    every = stations_along_route(samples, miles, 10.0, stations, stats=everywhere)
+    assert everywhere["dropped_outside_usa"] == 0
+    assert everywhere["within_corridor"] == everywhere["candidates"] == len(every) == funnel["within_corridor"]
+
+
+def test_corridor_funnel_is_filled_when_nothing_is_near():
+    samples, miles = _wiggly_route()
+    far = StationArrays(opis_ids=np.arange(3), lat=np.full(3, 60.0), lon=np.full(3, -150.0), price=np.full(3, 3.0))
+    funnel = {}
+    assert stations_along_route(samples, miles, 10.0, far, stats=funnel) == []
+    assert funnel == {
+        "stations_searched": 3,
+        "in_bounding_box": 0,
+        "after_coarse_pass": 0,
+        "within_corridor": 0,
+        "dropped_outside_usa": 0,
+        "candidates": 0,
+    }

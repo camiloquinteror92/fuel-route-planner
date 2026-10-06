@@ -6,18 +6,21 @@ about 680 road miles, 1 degree of longitude ~ 56.7 miles.
 
 import threading
 import time
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
 import urllib3
+from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
 
 from fuelroute.models import FuelStation
+from fuelroute.renderers import TimedJSONRenderer
 from fuelroute.services.geocoding import Location
 from fuelroute.services.http import ExternalApiClient
 from fuelroute.services.osrm import get_route
 
-from .conftest import osrm_answer
+from .conftest import encode_polyline, osrm_answer
 
 START = "35.0,-100.0"
 FINISH = "35.0,-88.0"
@@ -115,11 +118,10 @@ def test_stop_costs_add_up_to_the_total_to_the_cent(client, upstream):
 
 
 @pytest.mark.django_db
-def test_second_request_and_map_page_use_the_cache(client, upstream, stations):
+def test_second_request_uses_the_plan_cache(client, upstream, stations):
     upstream.respond(OK_ROUTE)
-    first = get(client).json()
+    get(client)
     second = client.get("/api/route", {"start": " 35.0 , -100.0 ", "finish": FINISH}).json()
-    page = client.get(first["map"]["map_url"])
 
     assert len(upstream.calls) == 1
     assert second["meta"]["external_api_calls"] == 0
@@ -127,8 +129,237 @@ def test_second_request_and_map_page_use_the_cache(client, upstream, stations):
     # A cache hit answers with the text of THIS request, not the first one.
     assert second["start"]["query"] == "35.0 , -100.0"
     assert "35.0+%2C+-100.0" in second["map"]["map_url"]
-    assert page.status_code == 200
-    assert b"leaflet" in page.content and b"route-data" in page.content
+
+
+# --- explaining the plan: decisions, comparison, pipeline, candidates, timings ----------------
+
+
+def _dec(value) -> Decimal:
+    return Decimal(str(value))
+
+
+def _server_timing(response) -> dict:
+    """Parse the Server-Timing header: {name: {"dur": float, "desc": str}}, in order."""
+    entries = {}
+    for item in response["Server-Timing"].split(", "):
+        name, *params = item.split(";")
+        values = dict(param.split("=", 1) for param in params)
+        entries[name] = {"dur": float(values["dur"]), "desc": values.get("desc", "").strip('"')}
+    return entries
+
+
+@pytest.mark.django_db
+def test_response_explains_the_pipeline_and_compares_strategies(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    body = get(client).json()
+    summary, stops = body["summary"], body["fuel_stops"]
+
+    # Every stop says why it is there: the first one buys just enough to reach the cheap one.
+    assert all(s["decision"]["rule"] in ("reach_cheaper", "fill_up", "finish") for s in stops)
+    assert stops[0]["decision"]["rule"] == "reach_cheaper"
+    assert stops[0]["decision"]["cheaper_station_mile"] == stops[1]["mile_marker"]
+    assert any(s["decision"]["consolidated"] for s in stops)  # this trip has stops under the minimum
+
+    comparison = summary["comparison"]
+    optimized = comparison["optimized"]
+    assert "stops" not in optimized  # the plan's stops are fuel_stops
+    assert _dec(optimized["total_fuel_cost"]) == _dec(summary["total_fuel_cost"])
+    assert optimized["total_gallons_purchased"] == summary["total_gallons_purchased"]
+    assert optimized["number_of_stops"] == summary["number_of_stops"]
+
+    for key in ("optimum_before_consolidation", "price_blind", "quarter_tank"):
+        strategy = comparison[key]
+        assert strategy["label"] and strategy["rule"]
+        assert strategy["number_of_stops"] == len(strategy["stops"])
+        assert sum(_dec(s["cost"]) for s in strategy["stops"]) == _dec(strategy["total_fuel_cost"])
+        for stop in strategy["stops"]:
+            assert _dec(stop["cost"]) == (_dec(stop["gallons"]) * _dec(stop["price_per_gallon"])).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        # Same stations, same start / end fuel: the same gallons (up to each stop's rounding).
+        assert strategy["total_gallons_purchased"] == pytest.approx(
+            summary["total_gallons_purchased"], abs=0.005 * (len(strategy["stops"]) + len(stops)) + 1e-9
+        )
+    before, blind = comparison["optimum_before_consolidation"], comparison["price_blind"]
+    assert _dec(before["total_fuel_cost"]) <= _dec(blind["total_fuel_cost"])  # the optimum is optimal
+    assert before["stops"][0]["opis_id"] == 1 and (before["stops"][0]["lat"], before["stops"][0]["lon"]) == (35.02, -99.3)
+
+    savings = comparison["savings_vs_price_blind"]
+    amount = _dec(blind["total_fuel_cost"]) - _dec(summary["total_fuel_cost"])
+    assert _dec(savings["amount"]) == amount > 0
+    assert _dec(savings["percent"]) == (amount / _dec(blind["total_fuel_cost"]) * 100).quantize(
+        Decimal("0.1"), rounding=ROUND_HALF_UP
+    )
+    assert savings["extra_stops"] == summary["number_of_stops"] - blind["number_of_stops"]
+
+    average = comparison["corridor_average"]
+    prices = [Decimal(p) for p in ("3.50", "2.90", "3.60", "3.10", "3.30")]  # station 6 is off the corridor
+    assert _dec(average["price_per_gallon"]) == sum(prices) / len(prices)
+    assert average["stations"] == summary["candidate_stations_on_route"] == len(prices)
+    assert _dec(average["total_fuel_cost"]) == (
+        _dec(summary["total_gallons_purchased"]) * _dec(average["price_per_gallon"])
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    assert _dec(comparison["savings_vs_corridor_average"]["amount"]) == (
+        _dec(average["total_fuel_cost"]) - _dec(summary["total_fuel_cost"])
+    )
+
+    pipeline = body["pipeline"]
+    assert pipeline["external_api_calls"] == 1 and pipeline["external_api_services"] == ["osrm"]
+    routing = pipeline["routing"]
+    assert routing["polyline_chars"] == len(encode_polyline(LINE))
+    assert routing["geometry_points"] == len(LINE)
+    assert routing["samples"] > routing["map_points"] >= 2
+    assert routing["sample_spacing_miles"] == pytest.approx(1.0, abs=0.01)
+    assert routing["from_route_cache"] is False
+    corridor = pipeline["corridor"]
+    assert corridor["stations_searched"] == 6
+    assert corridor["candidates"] == summary["candidate_stations_on_route"]
+    assert corridor["within_corridor"] - corridor["dropped_outside_usa"] == corridor["candidates"]
+    assert corridor["price_per_gallon"] == {"min": 2.9, "median": 3.3, "max": 3.6, "mean": 3.28}
+    assert pipeline["tank"] == {
+        "start_fuel_gallons": 5.0, "required_end_fuel_gallons": 5.0, "reason": "reserve", "arrival_capped": False,
+    }
+    optimizer = pipeline["optimizer"]
+    assert optimizer["candidates"] == corridor["candidates"]
+    assert optimizer["stops"] == summary["number_of_stops"]
+    assert optimizer["stops_before_consolidation"] == before["number_of_stops"]
+    assert _dec(optimizer["cost_before_consolidation"]) == _dec(before["total_fuel_cost"])
+    assert _dec(optimizer["consolidation_extra_cost"]) == _dec(summary["total_fuel_cost"]) - _dec(
+        before["total_fuel_cost"]
+    )
+    assert optimizer["consolidation_extra_cost"] >= 0
+
+
+@pytest.mark.django_db
+def test_candidates_are_opt_in_and_share_the_plan_cache(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    plain = get(client).json()
+    assert "candidates" not in plain and "_candidates" not in plain
+
+    body = get(client, include="candidates").json()
+    assert len(upstream.calls) == 1  # the same plan, from the cache
+    assert body["meta"]["plan_cache"] == "hit" and body["meta"]["external_api_calls"] == 0
+    assert "_candidates" not in body
+    candidates = body["candidates"]
+    assert candidates["fields"] == [
+        "opis_id", "name", "city", "state", "lat", "lon",
+        "mile_marker", "distance_from_route_miles", "price_per_gallon", "stop",
+    ]
+    rows = [dict(zip(candidates["fields"], row)) for row in candidates["rows"]]
+    assert len(rows) == body["summary"]["candidate_stations_on_route"] == 5
+    assert [(r["mile_marker"], r["opis_id"]) for r in rows] == sorted((r["mile_marker"], r["opis_id"]) for r in rows)
+    assert 6 not in [r["opis_id"] for r in rows]  # 40 miles off the route
+    assert {r["opis_id"]: r["stop"] for r in rows if r["stop"] is not None} == {
+        s["opis_id"]: s["stop"] for s in body["fuel_stops"]
+    }
+    first = rows[0]
+    assert (first["opis_id"], first["name"], first["city"], first["state"]) == (1, "STOP 1", "Town", "OK")
+    assert (first["lat"], first["lon"], first["price_per_gallon"]) == (35.02, -99.3, 3.5)
+    assert first["distance_from_route_miles"] == pytest.approx(1.4, abs=0.1)
+    # The plan is the same with or without the extra block.
+    assert {k: v for k, v in body.items() if k not in ("candidates", "meta")} == {
+        k: v for k, v in plain.items() if k != "meta"
+    }
+
+    # A plan computed with include (here on the cached route) has it too.
+    full = get(client, start_tank="full", include="candidates").json()
+    assert full["meta"]["plan_cache"] == "miss" and full["meta"]["route_cache"] == "hit"
+    assert len(full["candidates"]["rows"]) == 5
+    assert len(upstream.calls) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("value", "unknown"), [("foo", "foo"), ("candidates, foo", "foo"), ("CANDIDATES", "CANDIDATES")])
+def test_unknown_include_value_is_400(client, upstream, stations, value, unknown):
+    response = get(client, include=value)
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "invalid_request"
+    assert body["detail"] == {"include": [f"Unknown value(s): {unknown}. Allowed: candidates."]}
+    assert body["meta"]["external_api_calls"] == 0
+    assert upstream.calls == []
+
+
+@pytest.mark.django_db
+def test_include_does_not_change_map_url(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    with_include = get(client, include="candidates").json()
+    without = get(client).json()
+    assert with_include["map"]["map_url"] == without["map"]["map_url"]
+    assert "include" not in with_include["map"]["map_url"]
+    assert without["meta"]["plan_cache"] == "hit"  # include is not part of the plan cache key
+
+
+@pytest.mark.django_db
+def test_server_timing_header_breaks_down_the_request(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    first = get(client)
+    timing = _server_timing(first)
+    assert list(timing) == [
+        "geocoding", "plan-cache", "routing", "osrm", "corridor", "optimizer", "build", "comparison", "render", "total",
+    ]
+    meta = first.json()["meta"]
+    assert timing["osrm"]["desc"] == "1 call"
+    assert timing["osrm"]["dur"] == pytest.approx(meta["external_api_ms"], abs=0.051)
+    assert timing["routing"]["dur"] == meta["timings_ms"]["routing_ms"]
+    assert timing["render"]["desc"] == "JSON render"
+    assert timing["total"] == {"dur": float(first["X-Response-Time-ms"]), "desc": "Server total"}
+    # The timed renderer writes exactly what DRF's JSONRenderer writes.
+    assert TimedJSONRenderer().render(first.json()) == JSONRenderer().render(first.json())
+
+    hit = get(client, include="candidates")
+    assert list(_server_timing(hit)) == ["geocoding", "plan-cache", "candidates", "render", "total"]
+
+    invalid = client.get("/api/route", {"finish": FINISH})
+    assert list(_server_timing(invalid)) == ["render", "total"]
+
+    upstream.respond(urllib3.exceptions.ProtocolError("boom"))
+    failed = client.get("/api/route", {"start": START, "finish": "35.0,-90.0"})
+    assert failed.status_code == 502
+    timing = _server_timing(failed)  # the steps completed before the error, and the calls
+    assert list(timing) == ["geocoding", "plan-cache", "osrm", "render", "total"]
+    assert timing["osrm"]["desc"] == "2 calls"  # first try + one retry
+    assert set(failed.json()) == {"error", "detail", "meta"}  # the error body is unchanged
+
+    upstream.respond(OK_ROUTE)
+    FuelStation.objects.filter(opis_id__gte=2).delete()  # leaves a gap longer than the range
+    gap = client.get("/api/route", {"start": START, "finish": "35.0,-89.0"})
+    assert gap.status_code == 422
+    assert list(_server_timing(gap)) == ["geocoding", "plan-cache", "routing", "osrm", "corridor", "render", "total"]
+
+
+LEGACY_TIMINGS = {"geocoding_ms", "routing_ms", "corridor_ms", "optimizer_ms", "response_build_ms"}
+
+
+@pytest.mark.django_db
+def test_timings_keep_the_legacy_keys(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    miss = get(client).json()["meta"]["timings_ms"]
+    assert set(miss) == LEGACY_TIMINGS | {"plan_cache_ms", "comparison_ms"}
+    assert all(isinstance(value, float) and value >= 0 for value in miss.values())
+    assert set(get(client).json()["meta"]["timings_ms"]) == {"geocoding_ms", "plan_cache_ms"}
+    with_candidates = get(client, include="candidates").json()["meta"]["timings_ms"]
+    assert set(with_candidates) == {"geocoding_ms", "plan_cache_ms", "candidates_ms"}
+
+
+@pytest.mark.django_db
+def test_cache_hit_keeps_the_pipeline_of_the_first_computation(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    first = get(client).json()
+    second = get(client).json()
+    assert second["meta"]["plan_cache"] == "hit" and second["meta"]["external_api_calls"] == 0
+    assert second["pipeline"] == first["pipeline"]
+    assert second["pipeline"]["external_api_calls"] == 1  # what the first computation cost
+    assert second["pipeline"]["timings_ms"] == first["meta"]["timings_ms"]
+    assert datetime.fromisoformat(first["pipeline"]["computed_at"]).tzinfo is not None
+
+    other = get(client, start_tank="full").json()  # the other tank mode: same route, new plan
+    assert other["meta"]["route_cache"] == "hit" and other["meta"]["plan_cache"] == "miss"
+    assert other["pipeline"]["external_api_calls"] == 0
+    assert other["pipeline"]["routing"]["from_route_cache"] is True
+    assert other["pipeline"]["routing"]["polyline_chars"] == first["pipeline"]["routing"]["polyline_chars"]
+    assert other["pipeline"]["tank"]["reason"] == "full_tank"
+    assert other["pipeline"]["computed_at"] >= first["pipeline"]["computed_at"]
 
 
 @pytest.mark.django_db
@@ -149,6 +380,8 @@ def test_short_trip_with_full_tank_has_no_stops(client, upstream, stations):
     body = client.get("/api/route", {"start": START, "finish": "35.0,-98.0", "start_tank": "full"}).json()
     assert body["fuel_stops"] == []
     assert body["summary"]["total_fuel_cost"] == 0
+    assert body["summary"]["comparison"] is None  # nothing bought: nothing to compare
+    assert body["pipeline"]["optimizer"]["stops"] == 0
 
 
 @pytest.mark.django_db
@@ -181,6 +414,8 @@ def test_first_station_beyond_the_reserve_is_planned_not_rejected(client, upstre
     # Every mile is still paid for.
     assert body["summary"]["total_gallons_purchased"] == pytest.approx(ROUTE_MILES / 10, abs=0.05)
     assert any("first station" in w for w in body["warnings"])
+    assert body["pipeline"]["tank"]["reason"] == "first_station_beyond_reserve"
+    assert body["pipeline"]["tank"]["arrival_capped"] is False
 
 
 @pytest.mark.django_db
@@ -195,6 +430,8 @@ def test_short_trip_with_no_station_on_the_route(client, upstream):
     assert body["fuel_stops"] == []
     assert body["summary"]["unpriced_fuel_gallons"] == pytest.approx(2.7)
     assert any("not priced" in w for w in body["warnings"])
+    assert body["pipeline"]["tank"]["reason"] == "no_station_on_route"
+    assert body["pipeline"]["corridor"]["candidates"] == 0 and body["pipeline"]["corridor"]["price_per_gallon"] is None
 
 
 @pytest.mark.django_db
@@ -219,6 +456,9 @@ def test_last_stretch_too_long_for_the_reserve_arrives_with_less(client, upstrea
     summary = response.json()["summary"]
     assert summary["end_fuel_gallons"] == pytest.approx((500 - (ROUTE_MILES - mile_of(-96.5))) / 10, abs=0.1)
     assert summary["unpriced_fuel_gallons"] > 0
+    tank = response.json()["pipeline"]["tank"]
+    assert tank["arrival_capped"] is True
+    assert tank["required_end_fuel_gallons"] == pytest.approx(summary["end_fuel_gallons"], abs=0.01)
 
 
 @pytest.mark.django_db
@@ -413,28 +653,7 @@ def test_own_rate_limit_answers_429(client, upstream, stations, settings, monkey
     assert statuses[2] == 429
 
 
-# --- map page, data reloads, concurrency --------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_map_page_without_inputs_shows_only_the_form(client, upstream):
-    page = client.get("/api/route/map")
-    assert page.status_code == 200
-    assert b'<form method="get"' in page.content and b'name="start"' in page.content
-    assert b"route-data" not in page.content  # nothing planned
-    assert upstream.calls == []
-
-
-@pytest.mark.django_db
-def test_map_page_keeps_the_inputs_in_the_form_and_links_to_the_json(client, upstream, stations):
-    upstream.respond(OK_ROUTE)
-    page = client.get("/api/route/map", {"start": START, "finish": FINISH, "start_tank": "full"})
-    assert page.status_code == 200
-    html = page.content.decode()
-    assert f'name="start" value="{START}"' in html
-    assert '<option value="full" selected>' in html
-    assert "/api/route?start=" in html  # "See this plan as API JSON"
-    assert "Fuel stops" in html
+# --- root, data reloads, concurrency ------------------------------------------------------
 
 
 @pytest.mark.django_db
@@ -443,14 +662,6 @@ def test_root_sends_browsers_to_the_planner_page_and_api_clients_get_json(client
     assert browser.status_code == 302 and browser["Location"].endswith("/api/route/map")
     api = client.get("/", HTTP_ACCEPT="*/*")
     assert api.status_code == 200 and "endpoints" in api.json()
-
-
-@pytest.mark.django_db
-def test_map_page_shows_readable_errors(client):
-    page = client.get("/api/route/map", {"finish": "Austin, TX"})
-    assert page.status_code == 400
-    assert b"start: This field is required." in page.content
-    assert b"ErrorDetail" not in page.content
 
 
 @pytest.mark.django_db

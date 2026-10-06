@@ -1,11 +1,19 @@
-"""The optimizer: hand-checked cases, consolidation, and an exact DP comparison."""
+"""The optimizer: hand-checked cases, consolidation, an exact DP comparison, the
+per-stop decisions and the baselines it is compared with."""
 
+import hashlib
 import math
 import random
 
 import pytest
 
-from fuelroute.services.optimizer import Candidate, UnreachableError, plan_fuel_stops
+from fuelroute.services.optimizer import (
+    Candidate,
+    UnreachableError,
+    plan_fuel_stops,
+    plan_price_blind,
+    plan_quarter_tank,
+)
 
 RANGE, MPG = 500.0, 10.0
 
@@ -243,3 +251,191 @@ def test_invalid_parameters_are_rejected():
         plan(100, [], initial=600)
     with pytest.raises(ValueError):
         plan_fuel_stops(100, [], max_range_miles=0, miles_per_gallon=10, initial_fuel_miles=0)
+    with pytest.raises(ValueError):
+        plan_price_blind(100, [], max_range_miles=RANGE, miles_per_gallon=MPG, initial_fuel_miles=600)
+    with pytest.raises(ValueError):
+        plan_quarter_tank(
+            100, [], max_range_miles=RANGE, miles_per_gallon=MPG, initial_fuel_miles=0, refuel_below_fraction=2
+        )
+
+
+# --- per-stop decisions, the snapshot before consolidation and the baselines ---------------
+
+
+def _random_instance(seed):
+    """The instances of test_consolidated_plan_is_feasible_and_close_to_optimal."""
+    rng = random.Random(seed)
+    route = 3000.0
+    return route, [(rng.uniform(1, route - 1), round(rng.uniform(2.8, 3.6), 3)) for _ in range(120)]
+
+
+def _small_instance(seed, mode):
+    """The instances of test_greedy_matches_exact_dp."""
+    rng = random.Random(seed * 7 + len(mode))
+    capacity, route = 30, 100
+    miles = sorted(rng.choice([0, route]) if rng.random() < 0.15 else rng.randint(0, route) for _ in range(9))
+    stations = [(m, round(rng.uniform(2.5, 4.0), 2)) for m in miles]
+    if mode == "reserve":
+        initial = final = rng.randint(3, 12)
+    elif mode == "full":
+        initial, final = capacity, 0
+    else:
+        initial, final = rng.randint(0, capacity), rng.randint(0, 10)
+    return route, stations, capacity, initial, final
+
+
+def _baseline(function, route, stations, initial, final, capacity=RANGE, **extra):
+    return function(
+        route,
+        [Candidate(mile=m, price=p, ref=f"S{m}") for m, p in stations],
+        max_range_miles=capacity,
+        miles_per_gallon=MPG,
+        initial_fuel_miles=initial,
+        final_fuel_miles=final,
+        **extra,
+    )
+
+
+@pytest.mark.parametrize("mode", ["reserve", "full", "random"])
+@pytest.mark.parametrize("seed", range(30))
+def test_price_blind_driver_buys_the_same_gallons_and_never_beats_the_optimum(seed, mode):
+    route, stations, capacity, initial, final = _small_instance(seed, mode)
+    try:
+        optimum = plan(route, stations, initial=initial, final=final, capacity=capacity)  # not consolidated
+    except UnreachableError:
+        with pytest.raises(UnreachableError):
+            _baseline(plan_price_blind, route, stations, initial, final, capacity)
+        return
+    blind = _baseline(plan_price_blind, route, stations, initial, final, capacity)
+    assert blind.total_gallons == pytest.approx(optimum.total_gallons, abs=1e-6)
+    assert blind.total_cost >= optimum.total_cost - 1e-9
+    assert drive(blind, route, initial, capacity) >= final - 1e-6
+    assert all(stop.rule == "baseline" for stop in blind.stops)
+
+
+@pytest.mark.parametrize("mode", ["reserve", "full", "random"])
+@pytest.mark.parametrize("seed", range(30))
+def test_quarter_tank_driver_is_feasible_iff_greedy_is(seed, mode):
+    route, stations, capacity, initial, final = _small_instance(seed, mode)
+    try:
+        optimum = plan(route, stations, initial=initial, final=final, capacity=capacity)
+    except UnreachableError:
+        with pytest.raises(UnreachableError):
+            _baseline(plan_quarter_tank, route, stations, initial, final, capacity, refuel_below_fraction=0.25)
+        return
+    quarter = _baseline(plan_quarter_tank, route, stations, initial, final, capacity, refuel_below_fraction=0.25)
+    assert quarter.total_gallons == pytest.approx(optimum.total_gallons, abs=1e-6)
+    assert quarter.total_cost >= optimum.total_cost - 1e-9
+    assert drive(quarter, route, initial, capacity) >= final - 1e-6
+
+
+def test_baselines_refuel_by_habit_not_by_price():
+    stations = [(100, 2.0), (200, 4.0), (650, 3.0)]
+    # Mile 100 is the cheapest, but with fuel to reach mile 200 the price-blind driver
+    # drives on, fills up at mile 200 ($4.00) and then has enough to finish.
+    blind = _baseline(plan_price_blind, 700, stations, 250, 0)
+    assert [(s.candidate.mile, s.gallons) for s in blind.stops] == [(200, pytest.approx(45.0))]
+    # A "refuel at half a tank" driver stops at mile 100 (150 miles left): full tank.
+    half = _baseline(plan_quarter_tank, 700, stations, 250, 0, refuel_below_fraction=0.5)
+    assert [(s.candidate.mile, s.gallons) for s in half.stops] == [(100, pytest.approx(35.0)), (200, pytest.approx(10.0))]
+    optimum = plan(700, stations, initial=250)
+    assert optimum.total_cost < half.total_cost < blind.total_cost
+    assert optimum.total_gallons == pytest.approx(blind.total_gallons) == pytest.approx(half.total_gallons)
+
+
+def test_baselines_do_not_pick_a_station_by_price_in_a_town():
+    # Two stations in one town (same mile: coordinates are city-level). The driver
+    # stops at the first one in the caller's order, whichever is cheaper.
+    for order in ([(300, 4.0), (300, 2.0)], [(300, 2.0), (300, 4.0)]):
+        result = _baseline(plan_price_blind, 600, order, 300, 0)
+        assert [s.candidate.price for s in result.stops] == [order[0][1]]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_decisions_explain_each_purchase(seed):
+    route, stations = _random_instance(seed)
+    price_at = dict(stations)
+    try:
+        result = plan(route, stations, initial=50, final=50)
+    except UnreachableError:
+        return
+    assert result.stops
+    for stop in result.stops:
+        mile, price = stop.candidate.mile, stop.candidate.price
+        leaving = (stop.fuel_on_arrival_gallons + stop.gallons) * MPG  # miles in the tank
+        assert stop.rule in ("reach_cheaper", "fill_up", "finish")
+        assert not stop.consolidated
+        if stop.rule == "reach_cheaper":
+            target = stop.cheaper_station_mile
+            assert price_at[target] < price
+            assert 0 < target - mile <= RANGE + 1e-6
+            assert leaving == pytest.approx(target - mile)  # just enough to reach it
+        else:
+            assert stop.cheaper_station_mile is None
+        if stop.rule == "fill_up":
+            assert leaving == pytest.approx(RANGE)
+        if stop.rule == "finish":
+            assert leaving == pytest.approx(route - mile + 50)  # arrives with the required 50
+    assert result.stops[-1].rule == "finish"
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_plan_reports_the_stops_before_consolidation(seed):
+    route, stations = _random_instance(seed)
+    try:
+        exact = plan(route, stations, initial=50, final=50)
+    except UnreachableError:
+        return
+    assert exact.before_consolidation == exact.stops  # consolidation off: the same stops
+    merged = plan(route, stations, initial=50, final=50, min_stop=10)
+    # The snapshot is the plain optimum: _consolidate (which works in place) did not touch it.
+    assert [(s.candidate, s.gallons) for s in merged.before_consolidation] == [
+        (s.candidate, s.gallons) for s in exact.stops
+    ]
+    before = {s.candidate: s for s in merged.before_consolidation}
+    for stop in merged.stops:
+        original = before[stop.candidate]  # consolidation only moves fuel between existing stops
+        assert stop.consolidated == (abs(stop.gallons - original.gallons) * MPG > 1e-9)
+        assert stop.rule == original.rule
+
+
+def test_consolidated_stops_are_flagged():
+    stations = [(10, 3.00), (20, 2.99), (480, 2.98), (490, 2.97), (900, 3.5)]
+    merged = plan(1000, stations, initial=10, min_stop=10)
+    assert [s.candidate.mile for s in merged.before_consolidation] == [10, 20, 480, 490, 900]
+    # The 1-gallon stop at mile 480 moves back into mile 20, and mile 20's 47 gal into
+    # mile 10: only mile 10 changed; 490 and the last stop are the greedy's.
+    assert [(s.candidate.mile, s.consolidated) for s in merged.stops] == [(10, True), (490, False), (900, False)]
+    assert merged.stops[0].gallons == pytest.approx(48.0)
+
+
+# Fingerprint of plan_fuel_stops on the 40 random instances above, with and without
+# consolidation, computed with the optimizer as it was before the decisions, the
+# snapshot and the baselines were added (commit ad124b0). Explaining the plan must
+# not change a single stop, gallon or cent of it.
+_RESULTS_BEFORE_TRACING = "4500b5953208f1afcf9ebe41abeac92d6eb6907b392c5a8e6c64398fea69c00d"
+
+
+def test_trace_does_not_change_results():
+    lines = []
+    for seed in range(40):
+        for min_stop in (0.0, 10.0):
+            route, stations = _random_instance(seed)
+            try:
+                result = plan_fuel_stops(
+                    route,
+                    [Candidate(mile, price) for mile, price in stations],
+                    max_range_miles=RANGE,
+                    miles_per_gallon=MPG,
+                    initial_fuel_miles=50,
+                    final_fuel_miles=50,
+                    min_stop_gallons=min_stop,
+                )
+            except UnreachableError as error:
+                lines.append(f"{seed}:{min_stop}:unreachable:{error.from_mile:.6f}")
+                continue
+            stops = ";".join(
+                f"{s.candidate.mile:.6f}/{s.gallons:.6f}/{s.fuel_on_arrival_gallons:.6f}" for s in result.stops
+            )
+            lines.append(f"{seed}:{min_stop}:{result.total_cost:.6f}:{result.final_fuel_gallons:.6f}:{stops}")
+    assert hashlib.sha256("\n".join(lines).encode()).hexdigest() == _RESULTS_BEFORE_TRACING

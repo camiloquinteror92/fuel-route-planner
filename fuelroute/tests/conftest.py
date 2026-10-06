@@ -5,7 +5,7 @@ that need an external service ask for ``upstream``, a fake that records every ca
 import json
 
 import pytest
-from django.core.cache import cache
+from django.core.cache import caches
 
 from fuelroute.services import http
 from fuelroute.services.stations import reset_station_arrays
@@ -76,14 +76,19 @@ def _no_network(url, params, timeout):
     raise AssertionError(f"a test tried to reach the network: {url} (ask for the upstream fixture)")
 
 
+def _clear_caches():
+    for alias in caches:  # plans and the rest ("default") and the prepared routes ("routes")
+        caches[alias].clear()
+
+
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch, settings):
     monkeypatch.setattr(http, "send", _no_network)  # ``upstream`` replaces it with a fake
-    cache.clear()
+    _clear_caches()
     reset_station_arrays()
     http._next_turn.clear()
     monkeypatch.setattr(http, "_RETRY_DELAY_SECONDS", 0.0)
     monkeypatch.setitem(settings.FUEL_PLANNER, "NOMINATIM_MIN_INTERVAL_SECONDS", 0.0)
     yield
-    cache.clear()
+    _clear_caches()
     reset_station_arrays()

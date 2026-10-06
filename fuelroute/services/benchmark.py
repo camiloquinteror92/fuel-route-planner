@@ -44,12 +44,13 @@ from pathlib import Path
 import django
 import numpy as np
 from django.conf import settings
-from django.core.cache import cache
 
 from . import http
 from .geocoding import geocode
 from .http import ExternalApiClient
-from .osrm import METERS_PER_MILE, ROUTE_PARAMS, decode_polyline, prepare_route, route_cache_key, route_from_payload
+from .osrm import (
+    METERS_PER_MILE, ROUTE_PARAMS, decode_polyline, prepare_route, route_cache, route_cache_key, route_from_payload,
+)
 from .stations import get_station_arrays, stations_along_route
 
 START, FINISH = "New York, NY", "Los Angeles, CA"
@@ -276,7 +277,7 @@ def run_benchmark(iterations: int = 300, replans: int = 100, refresh_route: bool
     http.send = _no_network
     app_logger.setLevel(logging.WARNING)  # one log line per request would flood the console
     try:
-        cache.set(route_cache_key(origin, destination), route)
+        route_cache().set(route_cache_key(origin, destination), route)
         client = Client(HTTP_HOST="127.0.0.1", HTTP_ACCEPT_ENCODING="gzip")
         params = {"start": START, "finish": FINISH}
         calls = {"total": 0}

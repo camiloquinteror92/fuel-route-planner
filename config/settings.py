@@ -65,17 +65,25 @@ DATABASES = {
     }
 }
 
-# In-process cache: prepared routes (~100 KB for coast to coast), finished plans
-# (~60 KB), Nominatim answers and rate-limit counters. Each process has its own;
-# with several workers use Redis (django.core.cache.backends.redis.RedisCache) so
-# they share it.
+# In-process caches. "default": finished plans (~60 KB each), Nominatim answers and
+# rate-limit counters. "routes": prepared routes (~100 KB for coast to coast), apart
+# so that many what-ifs (one plan each) cannot evict the route they are planned on,
+# and kept longer (a road does not change in a day). Each process has its own; with
+# several workers use Redis (django.core.cache.backends.redis.RedisCache, plus
+# `pip install redis`) so they share them.
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "fuel-route",
-        "TIMEOUT": int(_env("ROUTE_CACHE_SECONDS", "3600")),
+        "TIMEOUT": int(_env("PLAN_CACHE_SECONDS", "3600")),
         "OPTIONS": {"MAX_ENTRIES": int(_env("CACHE_MAX_ENTRIES", "500"))},
-    }
+    },
+    "routes": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "fuel-route-routes",
+        "TIMEOUT": int(_env("ROUTE_CACHE_SECONDS", "86400")),
+        "OPTIONS": {"MAX_ENTRIES": int(_env("ROUTE_CACHE_MAX_ENTRIES", "200"))},
+    },
 }
 
 LANGUAGE_CODE = "en-us"

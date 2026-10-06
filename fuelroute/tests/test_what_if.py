@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from django.core.cache import caches
 
 from fuelroute.models import FuelStation
 from fuelroute.services.errors import PlannerError
@@ -429,3 +430,16 @@ def test_almost_no_usable_range_is_said_with_a_decimal(client, upstream, station
     assert "0.1-mile usable range" in response.json()["detail"]
     assert response.json()["meta"]["external_api_calls"] == 0
 
+
+@pytest.mark.django_db
+def test_a_flood_of_plans_does_not_evict_the_route(client, upstream, stations):
+    """Plans and routes live in separate caches: what-ifs (one plan each) can fill the plan
+    cache without evicting the route they are planned on, so a what-if stays free."""
+    upstream.respond(OK_ROUTE)
+    _ok(get(client))
+    plans = caches["default"]
+    for i in range(plans._max_entries * 2):
+        plans.set(f"filler:{i}", i)
+    body = _ok(get(client, mpg="9.1"))
+    assert body["meta"]["route_cache"] == "hit" and body["meta"]["external_api_calls"] == 0
+    assert len(upstream.calls) == 1

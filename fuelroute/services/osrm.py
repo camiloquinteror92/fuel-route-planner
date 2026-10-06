@@ -13,7 +13,9 @@ decodes it and prepares everything the planner needs from the geometry:
   (``waypoints[].distance``), so a point in the sea or the desert can be rejected.
 
 Only that prepared route is cached (~100 KB for coast to coast, instead of the
-~560 KB raw 35k-vertex geometry), keyed by the rounded coordinates. A per-key lock
+~560 KB raw 35k-vertex geometry), keyed by the rounded coordinates, in its own cache
+(``CACHES["routes"]``): the plans live in the default cache, so a burst of what-ifs
+(one plan each) never evicts the route they are planned on. A per-key lock
 makes concurrent identical requests wait for the first one instead of all calling
 OSRM ("single flight").
 """
@@ -27,7 +29,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from django.conf import settings
-from django.core.cache import cache
+from django.core.cache import caches
 
 from .errors import ExternalServiceError, NoRouteFound
 from .geo import cumulative_miles, resample, simplify
@@ -126,18 +128,24 @@ def _cache_key(start: Location, finish: Location) -> str:
     return f"route:v3:{step}:{start.latitude:.5f},{start.longitude:.5f};{finish.latitude:.5f},{finish.longitude:.5f}"
 
 
+def route_cache():
+    """The cache of prepared routes (``CACHES["routes"]``), apart from the plans'."""
+    return caches["routes"]
+
+
 def get_route(start: Location, finish: Location, client: ExternalApiClient) -> tuple[Route, bool]:
     """Return (route, from_cache). At most one OSRM call per (start, finish) per process."""
     key = _cache_key(start, finish)
-    cached = cache.get(key)
+    routes = route_cache()
+    cached = routes.get(key)
     if cached is not None:
         return cached, True
     with _LOCKS[zlib.crc32(key.encode()) % len(_LOCKS)]:
-        cached = cache.get(key)  # another request may have fetched it while we waited
+        cached = routes.get(key)  # another request may have fetched it while we waited
         if cached is not None:
             return cached, True
         route = _fetch(start, finish, client)
-        cache.set(key, route)
+        routes.set(key, route)
         return route, False
 
 

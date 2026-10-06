@@ -8,7 +8,7 @@ A Django REST API that takes a start and a finish location in the USA and return
 
 It makes **one call to a free routing API per new trip** (OSRM, no API key) and **zero** for a trip it has already planned. A new coast-to-coast trip takes about 0.8-1.4 s (almost all of it is the routing API); a repeated one about 5 ms.
 
-Open `http://127.0.0.1:8000/` in a browser for [the web page](#the-web-page): a client of the same API that shows the plan, why each stop was chosen, what it saves against a price-blind driver, the live evidence for every requirement of the brief and the measured performance of each request.
+Open `http://127.0.0.1:8000/` in a browser for [the web UI](#web-ui): a client of the same API that shows the plan, why each stop was chosen, what it saves against a price-blind driver, the live evidence for every requirement of the brief, how it was built and the measured performance of each request.
 
 ---
 
@@ -33,7 +33,7 @@ curl "http://127.0.0.1:8000/api/route?start=New%20York,%20NY&finish=Los%20Angele
 
 Then open the `map.map_url` of the response in a browser: the planner page draws the same trip (from the cache, 0 external calls).
 
-- Tests: `pytest` (565 tests, about 5 seconds, no network).
+- Tests: `pytest` (643 tests, about 6 seconds, no network: a test that tried would fail).
 - Postman: import `postman/collection.json` (variable `baseUrl` = `http://127.0.0.1:8000`).
 - `DEBUG` is off by default. For Django's debug pages use `DJANGO_DEBUG=true`.
 - Port 8000 busy? `python manage.py runserver 8010` and change `baseUrl`.
@@ -46,7 +46,7 @@ Then open the `map.map_url` of the response in a browser: the planner page draws
 
 | Parameter    | Required | Example                          | Notes |
 |--------------|----------|----------------------------------|-------|
-| `start`      | yes      | `New York, NY` or `40.71,-74.00` | "City, ST", "City, State", "City ST", "Albany New York", "Washington, D.C." or "lat,lon" / "lat lon" |
+| `start`      | yes      | `New York, NY` or `40.71,-74.00` | "City, ST", "City, State", "City ST", "Albany New York", "Washington, D.C." or "lat,lon" / "lat lon"; "City, XX" with a Canadian province or a Mexican state is rejected as outside the USA, with no call |
 | `finish`     | yes      | `Los Angeles, CA`                | same formats |
 | `start_tank` | no       | `empty` (default) or `full`      | see [Assumptions](#assumptions); blank = default |
 | `include`    | no       | `candidates`                     | optional extra block, see below; does not change the plan |
@@ -71,7 +71,7 @@ Response (trimmed; `POST {"start": "Chicago, IL", "finish": "Houston, TX"}`, rea
     "number_of_stops": 5,
     "average_price_paid": 2.9781,
     "candidate_stations_on_route": 179,
-    "note": "Every mile driven is paid for: the truck leaves with 5.0 gal (the reserve) and must arrive with the same amount, so the fuel bought equals the fuel burned."
+    "note": "Every mile driven is paid for: the truck leaves with 5.0 gal (the reserve) and must arrive with the same amount, so the fuel bought equals the fuel burned. That fuel is borrowed at the start and returned at the end; it is not a safety margin."
   },
   "warnings": [],
   "fuel_stops": [
@@ -97,14 +97,22 @@ Response (trimmed; `POST {"start": "Chicago, IL", "finish": "Houston, TX"}`, rea
 
 - Money is computed in `Decimal`: each stop's `cost` is `gallons x price_per_gallon` rounded to the cent (prices keep the 4 decimals of the file), and `total_fuel_cost` / `total_gallons_purchased` are the sums of the stops, so they add up by hand.
 - `price_quotes`: the file lists some stations several times with different prices; this shows how many quotes and their spread (see [The station data](#the-station-data-load_stations)).
-- `warnings`: anything the user should know about this plan (first station beyond the reserve, route crossing Canada, unpriced fuel). Empty for normal trips.
+- `warnings`: anything the user should know about this plan (first station beyond the reserve, route crossing Canada, unpriced fuel, a place found by free-text search and what it matched). Empty for normal trips.
 - Every response has an `X-Response-Time-ms` header and a `Server-Timing` header (below).
 
 The answer also explains itself. These fields were added without changing any existing one (same real request, trimmed):
 
 ```json
 {
-  "fuel_stops": [{"stop": 3, "...": "...", "decision": {"rule": "reach_cheaper", "cheaper_station_mile": 449.0, "consolidated": false}}],
+  "fuel_stops": [
+    {"stop": 1, "mile_marker": 18.0, "...": "...", "decision": {
+      "rule": "reach_cheaper", "cheaper_station_mile": 82.0, "consolidated": true, "greedy_gallons": 3.2,
+      "moved_in": [{"mile": 82.0, "gallons": 12.4, "from_stop": null}], "moved_out": [],
+      "consolidation_extra_cost": 0.25, "reaches": {"stop": 2, "mile": 206.0}, "fills_tank": false}},
+    {"stop": 3, "mile_marker": 313.0, "...": "...", "decision": {
+      "rule": "reach_cheaper", "cheaper_station_mile": 449.0, "consolidated": false, "greedy_gallons": 13.6,
+      "moved_in": [], "moved_out": [], "consolidation_extra_cost": 0.0, "reaches": {"stop": 4, "mile": 449.0}, "fills_tank": false}}
+  ],
   "summary": {
     "comparison": {
       "optimized":                    {"total_fuel_cost": 322.56, "number_of_stops": 5, "rule": "Buys each mile of fuel at the cheapest station that can supply it, then fixes stops under 10 gal when the fix costs at most $1.00."},
@@ -128,7 +136,7 @@ The answer also explains itself. These fields were added without changing any ex
 }
 ```
 
-- `fuel_stops[].decision`: why the optimizer bought there. `reach_cheaper` = a cheaper station was within one tank, so it bought just enough to reach it (`cheaper_station_mile`); `fill_up` = none was, so it filled the tank; `finish` = the destination was within reach. `consolidated` = the consolidation step changed the gallons of that stop.
+- `fuel_stops[].decision`: why the stop exists and what it buys **in the final plan**. `rule` is the greedy branch that created it: `reach_cheaper` = a cheaper station was within one tank, so the greedy bought just enough to reach it (`cheaper_station_mile`); `fill_up` = none was, so it filled the tank; `finish` = the destination was within reach. Consolidation can then remove that cheaper station's stop, so the rest says what really happened: `greedy_gallons` (what the greedy bought here), `moved_in` (fuel the greedy had planned at another station, now bought here; `from_stop` null = that stop was removed), `moved_out` (fuel of this station moved to another stop), `consolidation_extra_cost` (what that fuel costs more at this price; summed over the stops it is the consolidation's cost), `reaches` (the next stop, or `stop: null` = the destination) and `fills_tank`. Above, stop 1 is there because a cheaper station was at mile 82, but that 12.4-gallon stop was merged into it (+$0.25), so it buys enough to reach stop 2 at mile 206.
 - `summary.comparison` (null when the trip needs no purchase): the same route, stations, start fuel and end fuel planned other ways. `price_blind` drives until the next station is out of reach and then fills up; `quarter_tank` refuels at a quarter tank; `corridor_average` prices the same gallons at the average of the corridor. All of them buy the same gallons; savings can be negative and are shown as they are. `extra_stops` is honest about the trade-off: the cheapest plan often stops more.
 - `pipeline`: how THIS plan was computed. It is cached with the plan, so a cache hit (0 calls, a few ms) still shows what the first computation cost.
 - `include=candidates` adds `candidates` (`fields` + `rows`): every station within the corridor with its mile marker, distance to the route, price and the plan stop it became, if any. It does not change the plan and shares the plan cache, so after a normal request for the same trip it costs **0 external calls**. The web page uses it for the map layer and the price profile.
@@ -143,54 +151,51 @@ Both make no external call, are exempt from the rate limit and answer in a few m
 
 ### `GET /api/route/map?start=...&finish=...[&start_tank=...]`
 
-The web page below. `map.map_url` of every answer points to it with the same inputs.
+The [web UI](#web-ui) below. `map.map_url` of every answer points to it with the same inputs.
 
 ### Errors
 
-Every error has the same body: `{"error": "<code>", "detail": ..., "meta": {"external_api_calls": n, ...}}` (`meta` says what was spent before the error; extra fields per error below).
+Every error has the same body: `{"error": "<code>", "detail": ..., "meta": {"external_api_calls": n, ...}}` (`meta` says what was spent before the error; extra fields per error below). That includes the framework's own errors (bad JSON, 405, 406, 415), the JSON 404 and the 429; a test walks the whole catalog.
 
 | Status | `error`                     | When |
 |--------|-----------------------------|------|
 | 400    | `invalid_request`           | missing / unknown parameter, bad format, coordinates outside the USA (`detail` is per field) |
 | 400    | `parse_error`, 405 `method_not_allowed`, 415 `unsupported_media_type` | malformed JSON, wrong method, wrong Content-Type |
-| 400    | `location_not_found`        | a place name that cannot be geocoded (`field` says which) |
-| 400    | `location_outside_usa`      | a place name that geocodes outside the USA |
+| 400    | `location_not_found`        | a place name that cannot be geocoded, a state code that does not exist ("Austin, TZ", no call) or free text that only matched a street (`field` says which) |
+| 400    | `location_outside_usa`      | "City, XX" with a Canadian province or a Mexican state ("Toronto, ON", "Monterrey, NL"; no call), or free text found abroad |
 | 400    | `same_location`             | start and finish are the same place, even written differently ("Austin, TX" / "Austin, Texas") |
 | 404    | `not_found`                 | unknown path under `/api/` |
-| 422    | `no_fuel_data_in_region`    | start or finish in Alaska / Hawaii: the price file has no stations there (checked before routing) |
+| 422    | `no_fuel_data_in_region`    | start or finish in Alaska, Hawaii or a US territory ("San Juan, PR"): the price file has no stations there (checked before routing) |
 | 422    | `location_not_near_road`    | the router had to move the point more than 5 miles to reach a road (sea, lake, wilderness); `snap_miles` |
 | 422    | `no_route`                  | OSRM finds no drivable route |
 | 422    | `no_fuel_data_on_route`     | the trip needs fuel and no station of the file is within 10 miles of the route |
 | 422    | `no_reachable_fuel_station` | a stretch without stations longer than 500 miles; `gap_start` / `gap_end` give mile and lat/lon |
-| 429    | `rate_limited`              | more than 60 requests per minute from one IP (`Retry-After`) |
+| 429    | `rate_limited`              | more than 60 requests per minute from one IP to `/api/route` (`Retry-After`; the page itself is not counted) |
 | 502    | `upstream_unavailable`      | the routing / geocoding service failed (after one retry) |
 | 503    | `upstream_busy`             | the routing / geocoding service rate limited us (`Retry-After`) |
 | 503    | `station_data_not_loaded`   | `load_stations` was never run (checked before routing) |
 
 ---
 
-## The web page
+## Web UI
 
-`http://127.0.0.1:8000/` in a browser (or any `map.map_url`) opens a page that is a **client of the same public API**. The server renders only the shell: the form pre-filled from the URL and the page configuration, with `/api/about` embedded. It plans nothing and makes **no external call**. The JavaScript then calls `GET /api/route` with exactly the inputs Postman sends, plus `include=candidates` for the map layer: right after a Postman request that is a plan cache hit, 0 calls.
+Open **`http://127.0.0.1:8000/`** in a browser (or any `map.map_url` of an answer). It is a client of the same public API: the server renders only the shell (no planning, no external call) and the page calls `GET /api/route` with exactly the inputs Postman sends, plus `include=candidates` for the map layer, which shares the plan cache (0 calls right after a Postman request). Every number on it comes from an API answer, `/api/stats`, `/api/about` or the browser's own measurements; a test fails if the template or the JavaScript writes one by hand.
 
-No build step: Django templates, plain ES modules and CSS in `fuelroute/static/`, served by the app itself (`/static/`, also with `DEBUG` off and without `collectstatic`); only Leaflet comes from a CDN, with Subresource Integrity. The trip and the tab live in the URL (`?start&finish&start_tank#tab`), so a link reproduces the view and back / forward work. It is usable on a phone (one column at 375 px; tables become cards) and with the keyboard.
+![The planner page: inputs, KPIs, performance badge and the route with its stops](docs/web-ui-plan.jpg)
 
-Always visible:
+What it shows:
 
-- **KPIs**: total fuel cost, what the plan saves against a price-blind driver (and how many more stops it makes), distance and driving time, stops and gallons (= miles ÷ mpg, checked), the price range of the stations near this route.
-- **Performance badge** of this answer: server time, external calls and services, plan / route cache, browser round trip. Green with 0 calls, blue with 1, amber with more.
-- **Map**: the route, the numbered stops (popup with the reason for the purchase), every station within the corridor coloured by price tercile of this trip (legend in dollars), the price-blind driver's stops, and for a `no_reachable_fuel_station` error the stretch without stations.
-- **Fuel profile**: price of every candidate station by mile, and the fuel in the tank recomputed in the browser from the stops (the plan solid, the price-blind driver dashed). A crosshair reads both; clicking a stop syncs the map and the table. Below it: "the tank stays between 0 and 50 gal" and "longest stretch between purchases" with a check.
+- **The trip**: total cost (and whether every mile was paid or part of it had no station to buy from), what the plan saves against a price-blind driver (or what it costs more), distance, stops and gallons (= miles ÷ mpg, checked), the price range near the route; a badge with the server time, external calls, caches and browser round trip.
+- **Map and fuel profile**: the route, the numbered stops, every station within the corridor coloured by price, the price-blind driver's stops; below, prices mile by mile and the tank recomputed in the browser from the stops (it stays framed when the window is resized; legend folded on phones).
+- **Plan**: each stop with *why* it is there in the final plan (the greedy rule, what consolidation moved and what it cost, how far the fuel takes the truck), totals checked to the cent, the strategy comparison and exports (link, curl, JSON, GeoJSON, CSV, driver instructions, print).
+- **Requirements**: every requirement of the brief, asked and between the lines, with how it is met, live evidence, links to the code on GitHub and the result of its tests in the last `pytest` run; nine contract checks recomputed in the browser; 21 edge cases run live against the server (Toronto, ON, Alaska, a gap longer than the range, broken JSON...).
+- **Performance**: this request (server, external, our code, round trip, gzip transfer vs decoded size) and where the server time went (`Server-Timing`), the cache demo, a benchmark, the session log and `/api/stats` (OSRM calls per routing request, latency by outcome; p95 only from 20 samples).
+- **How it works**: the pipeline of this answer with its numbers, the algorithm, the data, design decisions, known limits (with the live figures behind them) and how it was built (narrative, commit timeline from git, test inventory).
+- **API**: the exact request (GET, curl, POST), the raw answer with headers, the parameters and the error catalog, each error with "Try it".
 
-Tabs:
+![Fuel profile and the stops table with the reason of each stop](docs/web-ui-profile.jpg)
 
-- **Plan**: the stops (mile, leg, distance off the route, price with its quote spread, fuel on arrival, gallons, cost and *why*), totals checked to the cent; the strategy comparison; exports: copy link, copy curl, open JSON, GeoJSON, stops CSV, driver instructions, a printable trip sheet.
-- **Requirements**: every requirement of the brief (asked, and between the lines) with how it is met, live evidence from the answers this page received, links to the code and the result of each test in the last `pytest` run; nine **contract checks** recomputed in the browser in integer cents (costs add up, each cost = gallons × price rounded, fuel balance, tank bounds, call budget, optimum ≤ price-blind...); and **edge cases run live** against the server (19 requests: outside the USA, Alaska, same place, gaps, typos, broken JSON, wrong method...), spaced to respect the public router and stopping on a 429.
-- **Performance**: this request (server, external, our code, browser round trip, TTFB, size) and a bar of where the server time went (from `Server-Timing`), the cached computation ("computed in X ms with 1 call, now Y ms with 0"), a cache demo (send again / other tank mode), a sequential benchmark, this session's network log and `/api/stats`.
-- **How it works**: the pipeline of this answer with its numbers (the corridor funnel, the tank rule, the consolidation), the algorithm, the data (per state), the design decisions with live evidence, the known limits, and how it was built (commit timeline and test inventory from `/api/about`).
-- **API**: the exact request (GET, curl, POST body, "Send as POST"), the raw answer (status, headers, collapsible JSON), the parameters, endpoints and error catalog published by `/api/about`, each error with a "Try it".
-
-Where every number comes from: the `/api/route` answer, `/api/stats`, `/api/about`, the browser's own measurements (Resource Timing, `performance.now()`), or arithmetic on those in the browser. No number is written by hand: the template's visible text has no digits (values are `data-live` placeholders) and `fuelroute/tests/test_web.py` fails if one appears, or if the JavaScript hard-codes a measurement.
+No build step: Django templates, plain ES modules and CSS in `fuelroute/static/`, served by the app itself (also with `DEBUG` off, no `collectstatic`); only Leaflet comes from a CDN, with Subresource Integrity, and if it cannot load the page still works without the map. The trip and the tab live in the URL (`?start&finish&start_tank#tab`). Usable on a phone (375 px: the form compacts, tables become cards) and with the keyboard and a screen reader (labelled tabs, errors announced). Links to the code point to the newest commit GitHub has, with that commit's line numbers; what is not pushed yet says so instead of linking to a 404.
 
 ---
 
@@ -204,7 +209,7 @@ Where every number comes from: the `/api/route` answer, `/api/stats`, `/api/abou
 ```
 
 1. **Validate** (`serializers.py`): formats, ranges, unknown parameters, and "is this point in the USA?" for coordinates. No lookup, under 1 ms, 0 external calls.
-2. **Geocode** (`services/geocoding.py`): "lat,lon" is used as is. "City, ST" is looked up in an offline table of ~190k US places (Census Gazetteer + GeoNames, see below), 0 external calls. Only other free text (a street address, a landmark) goes to Nominatim, once, cached, at most 1 request per second. Every point is checked against the Census outline of the USA (`services/usa.py`).
+2. **Geocode** (`services/geocoding.py`): "lat,lon" is used as is. "City, ST" is looked up in an offline table of ~190k US places (Census Gazetteer + GeoNames, see below), 0 external calls. "City, XX" where XX is a Canadian province, a Mexican state, a US territory or no state at all is answered at once (outside the USA / no data / not found), also with 0 calls: Nominatim is restricted to the USA, so it would otherwise match the first US street named like the place ("Toronto, ON" became "Toronto Court" in Indianapolis). Only other free text (a street address, a landmark) goes to Nominatim, once, cached, at most 1 request per second; a hit that is only a street is rejected, and an accepted one is named in a warning. Every point is checked against the Census outline of the USA (`services/usa.py`).
 3. **Cheap checks before routing** (`services/planner.py`): same place written two ways, Alaska / Hawaii (no price data), station table empty. These never spend the routing call.
 4. **Plan cache**: the finished plan is cached by (station data version, coordinates, `start_tank`). A repeated trip returns in ~5 ms with 0 external calls.
 5. **Routing** (`services/osrm.py`, the one external call): `/route/v1/driving/{lon,lat};{lon,lat}?overview=full&geometries=polyline6`. The geometry (35k points coast to coast) is decoded with numpy, resampled every mile with its mile marker (scaled to OSRM's road distance), checked against the US outline, and simplified to ~50 m for the map (35k -> 2.6k points). Only this prepared route is cached (~100 KB). The connection to OSRM is pooled and reused between requests, and identical concurrent requests wait for one call ("single flight").
@@ -219,7 +224,8 @@ Where every number comes from: the `/api/route` answer, `/api/stats`, `/api/abou
    - else, if the destination is within one tank, buy just enough to finish;
    - else, **fill the tank** and go to the cheapest station within one tank.
    Every mile is driven on fuel bought at the cheapest station that could have supplied it. A test checks it against an exact dynamic-programming solution on 90 random routes (with a final reserve, a full tank and random tanks, stations in the start and destination cities).
-   Then a **consolidation** step fixes stops that buy less than 10 gallons, with a neighbour stop: first by removing a stop (merge it into a neighbour, or move the neighbour's purchase into it), else by topping it up to 10 gallons; the cheapest move wins and a move may cost at most $1. On New York -> Los Angeles this takes the plan from about 18 to 12 stops for about $1.50 more (0.2%).
+   Then a **consolidation** step fixes stops that buy less than 10 gallons, with a neighbour stop: first by removing a stop (merge it into a neighbour, or move the neighbour's purchase into it), else by topping it up to 10 gallons; the cheapest move wins and a move may cost at most $1. On New York -> Los Angeles this takes the plan from about 18 to 12 stops for about $1.50 more (0.2%). Each final stop records where its fuel was planned by the greedy, so the response explains the final plan; a test checks that no gallon is lost or invented and that the per-stop costs add up to the consolidation's cost.
+   Complexity: O(n log n + n·k), with n the candidate stations and k those within one tank (about 2 ms coast to coast).
 9. **Response**: stops with exact money and the reason for each purchase, summary with the strategy comparison, warnings, GeoJSON FeatureCollection, `pipeline` (how the plan was computed, cached with it), `meta` with the external calls and timings of this request, and the `Server-Timing` header.
 
 ### The station data (`load_stations`)
@@ -267,6 +273,7 @@ Why not geocode each address with an API? 6.6k calls to a free geocoder take hou
     - If the **last station** is so far from the destination that arriving with that fuel is impossible (last stretch over 450 miles), the truck arrives with what it can; the difference is reported as `unpriced_fuel_gallons` with a warning.
     - A short trip with **no station** on the route at all is planned with 0 stops (the reserve covers it) and the burned fuel is reported as unpriced; a longer one answers 422 `no_fuel_data_on_route`.
   - `full`: the truck leaves with a full tank and arrives with whatever is left. Only the fuel bought on the way is counted (`unpriced_fuel_gallons` = the free tank). A trip under 500 miles has no stops and costs $0.
+  - The reserve of `empty` is an accounting device, not a safety margin: borrowed at the start and returned at the end so that the fuel bought equals the fuel burned. That is why `empty` arrives with 5 gal and `full` may arrive with 0: neither keeps a margin between stops (next point).
 - **Price:** the station's retail price from the file; the median of its quotes when it is listed several times.
 - **"Optimal"** means the lowest fuel cost, then the consolidation step trades at most $1 per fix for fewer tiny stops. Time and detour are not priced.
 - **Range check:** distances between stops use the mile markers on the route. The detour to a station (`distance_from_route_miles`, at most 10 miles, measured from a city centroid) is not deducted from the range, and there is no safety margin, so the plan often arrives at a stop with 0.0 gallons. That is the 500-mile range taken literally; set `MAX_RANGE_MILES=450` for a 50-mile margin.
@@ -288,6 +295,9 @@ Why not geocode each address with an API? 6.6k calls to a free geocoder take hou
 | Cents must add up | `sum(cost) == total`, `gallons x price == cost` | `test_api::test_stop_costs_add_up_to_the_total_to_the_cent` |
 | Same place written differently / as coordinates | 400 `same_location`, no routing call | `test_api::test_same_place_written_differently_is_400_without_routing` |
 | Point outside the USA (Toronto, Monterrey, Whitehorse, Gulf, Atlantic, Paris) | 400, no external call | `test_api::test_points_outside_the_usa_are_400_without_calls`, `test_geo::test_us_mask` |
+| A place written with a region that is not a US state ("Toronto, ON", "Vancouver BC", "Monterrey, Nuevo León", "San Juan, PR", "Austin, TZ") | 400 `location_outside_usa` / 422 `no_fuel_data_in_region` / 400 `location_not_found`, no external call (regression: "Toronto, ON" was planned as a street in Indianapolis) | `test_api::test_places_written_with_a_region_outside_the_states_are_rejected_without_calls`, `test_geocoding::test_regions_outside_the_states_are_rejected_without_a_lookup` |
+| Free text that only matches a street | 400 `location_not_found` naming the street; the rejection is cached | `test_api::test_a_street_matched_by_free_text_is_not_a_place` |
+| Free text matched by Nominatim | planned, with a warning that names what it matched | `test_api::test_free_text_match_is_planned_with_a_warning_that_names_it` |
 | Alaska / Hawaii | 422 `no_fuel_data_in_region`, no routing call | `test_api::test_alaska_and_hawaii_are_422_before_routing` |
 | Point far from any road | 422 `location_not_near_road` | `test_api::test_point_far_from_any_road_is_422` |
 | Route crossing Canada (Detroit -> Buffalo) | warning with the miles outside the USA; stations reachable only from Canada not used | `test_api::test_route_through_canada_warns_and_reports_the_miles`, `test_geo::test_corridor_drops_stations_seen_only_from_outside_the_usa` |
@@ -295,9 +305,9 @@ Why not geocode each address with an API? 6.6k calls to a free geocoder take hou
 | "City State" without comma, "Washington, D.C.", "Bronx" | resolved offline | `test_geocoding::test_split_city_state`, `test_offline_lookups` |
 | Free text | Nominatim once, cached, 1 request/second; a 403/400 is a 502 and is not cached | `test_geocoding::test_nominatim_*`, `test_free_text_*` |
 | Missing / unknown / blank parameters, "???" | 400 with the field, or the default for a blank `start_tank` | `test_api::test_invalid_input_returns_400`, `test_blank_start_tank_means_the_default` |
-| Malformed JSON, wrong method / Content-Type, trailing slash, unknown path | same JSON error format | `test_api::test_drf_errors_use_the_same_format`, `test_trailing_slash_and_unknown_paths` |
+| Malformed JSON, wrong method / Content-Type / Accept, trailing slash, unknown path, rate limit | same JSON error format, `meta` included | `test_api::test_every_error_code_of_the_catalog_has_the_same_body_with_meta`, `test_trailing_slash_and_unknown_paths` |
 | OSRM transient failure / down / rate limited | 1 retry; 502; 503 + Retry-After | `test_api::test_transient_failure_is_retried_once`, `test_routing_service_down_returns_502`, `test_rate_limited_upstream_returns_503_with_retry_after` |
-| Too many requests from one client | 429 + Retry-After | `test_api::test_own_rate_limit_answers_429` |
+| Too many requests from one client | 429 + Retry-After; reloading the page does not count | `test_api::test_own_rate_limit_answers_429`, `test_rate_limit_counts_the_endpoint_not_the_page` |
 | `load_stations` run while the server is up | new data used on the next request, no restart, no 500 | `test_api::test_new_station_data_is_used_without_restart`, `test_station_loader::test_reload_changes_the_data_version_*` |
 | `load_stations` never run | 503 `station_data_not_loaded`, no routing call | `test_api::test_no_station_data_loaded_is_503_without_calling_osrm` |
 | Identical concurrent requests | one routing call | `test_api::test_identical_concurrent_requests_make_one_routing_call` |
@@ -342,7 +352,7 @@ Why not geocode each address with an API? 6.6k calls to a free geocoder take hou
 | Planner page shell (`/api/route/map`, `/`) | **0** | never plans; its JavaScript calls `/api/route` |
 | The page's own request right after a plan (`include=candidates`) | **0** | plan cache (1 if the plan expired) |
 | `/api/stats`, `/api/about`                | **0** | the server's own data |
-| Invalid input, same place, Alaska / Hawaii, no station data | **0** | rejected before routing |
+| Invalid input, same place, Alaska / Hawaii / territories, "City, XX" outside the US states, no station data | **0** | rejected before routing (and before any geocoding call) |
 | Free text that is not "City, ST" (an address, "Dallas" without state) | +1 per new text | Nominatim (cached 24 h, misses 30 min, 1 request/second) |
 
 `meta.external_api_calls` in every response, including errors, reports the real number for that request.
@@ -372,6 +382,8 @@ Local machine (Windows 11, Python 3.14, `runserver`), real OSRM public server, 2
 - On start-up the server pre-loads the places index, the US mask, the station arrays and numpy (`fuelroute/warmup.py`, ~0.7 s), so the first request does not pay for that.
 - `polyline6` is ~5x smaller than GeoJSON uncompressed and ~2x smaller gzipped (OSRM answers gzipped): ~120 KB instead of ~250 KB on a coast-to-coast trip.
 - Times are for `Accept: application/json` (Postman, curl, browsers). The browsable HTML API is only enabled with `DJANGO_DEBUG=true`.
+- Responses are gzipped for clients that accept it (`GZipMiddleware`): the page's coast-to-coast answer (with `include=candidates`) measured 36.2 KB on the wire for 111.2 KB of JSON; the page's Performance tab shows both for every request.
+- Re-measured after gzip and the review fixes (2026-10-06, fresh `runserver` on port 8077, real OSRM): New York -> Los Angeles cold **1,529 ms** with 1 call (OSRM 1,441 ms, so ~88 ms of our own work), 25.5 KB on the wire for 74.9 KB of JSON, same 12 stops, $855.49 and 281.04 gal; the repeat **7.4 ms** with 0 calls (plan cache). The page shell: 25.1 KB gzipped for 116.5 KB, 17-27 ms.
 
 ---
 
@@ -436,15 +448,15 @@ Before a real deployment: `DJANGO_DEBUG=false python manage.py check --deploy`, 
 
 ## Tests
 
-`pytest` runs 565 tests in about 5 s, with no network access (the only function that does HTTP is replaced by a fake that records calls). It also writes `.reports/pytest.xml`, which `/api/about` and the page's Requirements tab read.
+`pytest` runs 643 tests in about 6 s, with no network access: an autouse fixture makes the only function that does HTTP fail, and tests that need an external service get a fake that records calls. It also writes `.reports/pytest.xml`, which `/api/about` and the page's Requirements tab read.
 
-- **Optimizer** (409): hand-checked cases (just enough to reach a cheaper station, fill up at the cheapest, unreachable gaps at the start / middle / end, stations in the destination city), consolidation (merge, absorb, top-up, cost cap), **90 random routes against an exact DP** (final reserve, full tank, random tanks, stations at mile 0 and at the destination), random consolidated plans driven mile by mile (the tank never goes below 0 or above 50 gallons), the per-stop decisions, and the baselines: the price-blind and quarter-tank drivers buy the same gallons and never beat the optimum.
-- **API** (54): exactly **1** external call for a new trip, **0** for the repeat, the other tank mode and `include=candidates`, cents add up, the strategy comparison and the pipeline (kept on a cache hit), `Server-Timing`, every tank edge case, every error code, retries, rate limits, data reload, concurrency.
-- **Geocoding** (34): coordinate formats, "City, ST" variants offline, homonyms, Nominatim once / cached / spaced / errors not cached, outside-USA rejection.
+- **Optimizer** (449): hand-checked cases (just enough to reach a cheaper station, fill up at the cheapest, unreachable gaps at the start / middle / end, stations in the destination city), consolidation (merge, absorb, top-up, cost cap), **90 random routes against an exact DP** (final reserve, full tank, random tanks, stations at mile 0 and at the destination), random consolidated plans driven mile by mile (the tank never goes below 0 or above 50 gallons), the per-stop decisions, where every gallon of a consolidated plan was planned (none lost, none invented, the costs add up), and the baselines: the price-blind and quarter-tank drivers buy the same gallons and never beat the optimum.
+- **API** (69): exactly **1** external call for a new trip, **0** for the repeat, the other tank mode and `include=candidates`, cents add up, the strategy comparison and the pipeline (kept on a cache hit), `Server-Timing`, every tank edge case, every error code with the same body, places in Canada / Mexico / territories rejected with no call, streets matched by free text, gzip, retries, rate limits (the page not counted), data reload, concurrency, the network guard.
+- **Geocoding** (52): coordinate formats, "City, ST" variants offline, homonyms, Nominatim once / cached / spaced / errors not cached, outside-USA rejection.
 - **Geometry** (28): polyline decoding (spec example, 5,000-point round trip, broken input), haversine, resampling, simplification, the US mask on border and sea points, the corridor search against brute force on 4,000 random stations, and its funnel counts.
 - **Data loading** (15): CSV parsing, quotes and price policy, invalid rows, Canadian rows, name normalisation, homonym resolution, idempotent reload, data version.
-- **Web page** (12): the shell plans nothing and costs 0 calls, inputs are escaped, `/api/about` is embedded, `map_url` opens it without another call, CSS and ES modules are served with the right types, every import resolves to an exported name, accessible tabs, **no hand-written number** in the page or the JavaScript, and every test, code link and requirement the page cites exists on the server.
-- **About / metrics** (13): versions and data counts match the database, every requirement points to existing code and tests, the test report is parsed and flagged stale, the error catalog is complete, no git is tolerated; `/api/stats` counts by outcome, is not rate limited and keeps no locations.
+- **Web page** (15): the shell plans nothing and costs 0 calls, inputs are escaped, `/api/about` is embedded, `map_url` opens it without another call, CSS and ES modules are served with the right types, every import resolves to an exported name, accessible tabs, **no hand-written number** in the page or the JavaScript, every test, code link and requirement the page cites exists on the server, and the regressions found by reviewing the page (the profile drawn in real pixels, Swap does not plan, the map keeps the trip framed).
+- **About / metrics** (15): versions and data counts match the database (lower 48 without DC), every requirement points to existing code and tests, GitHub links use the lines of the commit GitHub has and none points to what is not pushed, the test report is parsed and flagged stale, the error catalog is complete, no git is tolerated; `/api/stats` counts by outcome, keeps geocoding calls apart from the routing budget, is not rate limited and keeps no locations.
 
 ## Limitations
 

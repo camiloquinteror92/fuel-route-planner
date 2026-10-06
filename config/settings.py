@@ -84,7 +84,9 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
     # JSON only; the browsable HTML API (heavier, needs static files) only in DEBUG.
-    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"]
+    # TimedJSONRenderer = DRF's JSONRenderer (same bytes) that also measures itself
+    # for the Server-Timing header ("render").
+    "DEFAULT_RENDERER_CLASSES": ["fuelroute.renderers.TimedJSONRenderer"]
     + (["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []),
     "DEFAULT_AUTHENTICATION_CLASSES": [],
     "DEFAULT_PERMISSION_CLASSES": [],

@@ -1,48 +1,103 @@
-"""HTTP layer: validates the input, calls the planner, shapes the response.
+"""HTTP layer of the JSON API: validates the input, calls the planner, shapes the response.
 
-* ``GET|POST /api/route``  -> JSON plan (``RoutePlanView``)
-* ``GET /api/route/map``   -> browser page: form + HTML map of the same plan (``RouteMapView``)
-* ``GET /``                -> browsers: redirect to the page above; API clients: a small JSON index
+* ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``)
+* ``GET /api/stats``      -> requests, external calls and latency since start (``StatsView``)
+* ``GET /api/about``      -> versions, config, data, requirements, tests, errors (``AboutView``)
+* ``GET /``               -> browsers: redirect to the planner page; API clients: a small JSON index
 * anything else under ``/api/`` -> JSON 404
 
+The planner page (``/api/route/map``) is ``web.py``: a client of these endpoints.
+
 Every error has the body ``{"error": "<code>", "detail": ..., "meta": {...}}``
-where ``meta`` says how many external calls were made before the error.
+where ``meta`` says how many external calls were made before the error. Every
+``/api/route`` response, errors included, carries a ``Server-Timing`` header with
+the time of each step (``server_timing``).
 """
 
+from collections import defaultdict
+
 from django.http import JsonResponse
-from django.shortcuts import redirect, render
-from django.urls import reverse
-from django.views import View
+from django.shortcuts import redirect
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.views import exception_handler as drf_exception_handler
 
 from .serializers import RouteRequestSerializer
+from .services.about import build_about
 from .services.errors import PlannerError
 from .services.http import ExternalApiClient
+from .services.metrics import route_metrics
 from .services.planner import plan_trip
 
+# meta.timings_ms key -> Server-Timing metric name, in the order of the pipeline.
+# The external calls are listed right after "routing" (one entry per service).
+_TIMING_ENTRIES = (
+    ("geocoding_ms", "geocoding"),
+    ("plan_cache_ms", "plan-cache"),
+    ("routing_ms", "routing"),
+    ("corridor_ms", "corridor"),
+    ("optimizer_ms", "optimizer"),
+    ("response_build_ms", "build"),
+    ("comparison_ms", "comparison"),
+    ("candidates_ms", "candidates"),
+)
 
-def _plan_from(data) -> tuple[dict | None, dict | None, int, dict]:
-    """Validate ``data`` and plan the trip: (result, error_body, status, headers)."""
+
+def _calls_text(count: int) -> str:
+    return f"{count} call" if count == 1 else f"{count} calls"
+
+
+def _external_entries(meta: dict, calls: list[tuple[str, float]] | None) -> list[str]:
+    if calls is None:  # only the totals are known
+        count = int(meta.get("external_api_calls") or 0)
+        if not count:
+            return []
+        return [f'osrm;dur={float(meta.get("external_api_ms") or 0):.1f};desc="{_calls_text(count)}"']
+    per_service: dict[str, list[float]] = defaultdict(list)
+    for service, ms in calls:
+        per_service[service].append(ms)
+    return [
+        f'{service};dur={sum(times):.1f};desc="{_calls_text(len(times))}"' for service, times in per_service.items()
+    ]
+
+
+def server_timing(meta: dict, calls: list[tuple[str, float]] | None = None) -> str:
+    """``Server-Timing`` value from ``meta.timings_ms`` and the external calls.
+
+    e.g. ``geocoding;dur=0.4, plan-cache;dur=0.6, routing;dur=812.3, osrm;dur=790.1;desc="1 call", ...``
+    The middleware appends ``render`` and ``total``.
+    """
+    timings = meta.get("timings_ms") or {}
+    entries = []
+    for key, name in _TIMING_ENTRIES:
+        if key in timings:
+            entries.append(f"{name};dur={float(timings[key]):.1f}")
+        if key == "routing_ms":
+            entries += _external_entries(meta, calls)
+    return ", ".join(entries)
+
+
+def _plan_from(data) -> tuple[dict | None, dict | None, int, dict, ExternalApiClient | None]:
+    """Validate ``data`` and plan the trip: (result, error_body, status, headers, client)."""
     serializer = RouteRequestSerializer(data=data)
     if not serializer.is_valid():
         meta = {"external_api_calls": 0, "external_api_services": []}
-        return None, {"error": "invalid_request", "detail": serializer.errors, "meta": meta}, 400, {}
+        return None, {"error": "invalid_request", "detail": serializer.errors, "meta": meta}, 400, {}, None
     client = ExternalApiClient()
     try:
         result = plan_trip(**serializer.validated_data, client=client)
     except PlannerError as exc:
         body = exc.as_dict()
         body["meta"] = {"external_api_calls": client.call_count, "external_api_services": client.calls}
-        return None, body, exc.status_code, exc.headers
-    return result, None, 200, {}
+        body["_timings_ms"] = getattr(exc, "timings_ms", {})  # private: popped before sending
+        return None, body, exc.status_code, exc.headers, client
+    return result, None, 200, {}, client
 
 
 class RoutePlanView(APIView):
     """Plan a trip and its cheapest fuel stops.
 
-    GET  /api/route?start=New York, NY&finish=Los Angeles, CA[&start_tank=empty|full]
+    GET  /api/route?start=New York, NY&finish=Los Angeles, CA[&start_tank=empty|full][&include=candidates]
     POST /api/route  {"start": "...", "finish": "...", "start_tank": "empty"}
     """
 
@@ -53,54 +108,49 @@ class RoutePlanView(APIView):
         return self._respond(request.data)
 
     def _respond(self, data):
-        result, error, status, headers = _plan_from(data)
+        result, error, status, headers, client = _plan_from(data)
+        calls = list(client.call_log) if client else []
         if error:
-            return Response(error, status=status, headers=headers)
-        result["map"]["map_url"] = self.request.build_absolute_uri(result["map"]["map_url"])
-        return Response(result)
+            # The body keeps its {external_api_calls, external_api_services}; the header also
+            # gets the steps completed before the error and the time of the external calls.
+            meta = {
+                **error["meta"],
+                "external_api_ms": round(client.elapsed_ms, 1) if client else 0.0,
+                "timings_ms": error.pop("_timings_ms", {}),
+            }
+            response = Response(error, status=status, headers=headers)
+            response.fuel_error = error["error"]
+        else:
+            result["map"]["map_url"] = self.request.build_absolute_uri(result["map"]["map_url"])
+            response = Response(result)
+            meta = result["meta"]
+            response.fuel_error = None
+        timing = server_timing(meta, calls)
+        if timing:  # an invalid request has no step to report (the middleware adds the total)
+            response["Server-Timing"] = timing
+        # Read by ResponseTimeMiddleware for /api/stats (never sent to the client).
+        response.fuel_meta = meta
+        response.fuel_calls = calls
+        return response
 
 
-def _messages(detail) -> list[str]:
-    """Flatten a serializer error dict / list / string into readable lines."""
-    if isinstance(detail, dict):
-        lines = []
-        for field, value in detail.items():
-            prefix = "" if field == "non_field_errors" else f"{field}: "
-            lines += [prefix + line for line in _messages(value)]
-        return lines
-    if isinstance(detail, (list, tuple)):
-        return [line for item in detail for line in _messages(item)]
-    return [str(detail)]
+class StatsView(APIView):
+    """GET /api/stats: what this server process has answered on /api/route since it started.
 
-
-class RouteMapView(View):
-    """Browser page: a form plus the HTML map (Leaflet + OpenStreetMap tiles) of the plan.
-
-    * No ``start`` and no ``finish``: only the form is shown; nothing is planned.
-    * Otherwise the same inputs as ``/api/route`` are planned and drawn, with a
-      table of the stops. It uses the plan cache, so right after an API call it
-      makes no external call.
+    Request counts by status and outcome, external calls by service, latency
+    percentiles and the last requests (without locations). 0 external calls.
     """
 
     def get(self, request):
-        form = {
-            "start": request.GET.get("start", ""),
-            "finish": request.GET.get("finish", ""),
-            "start_tank": request.GET.get("start_tank", "empty"),
-        }
-        if not form["start"].strip() and not form["finish"].strip():
-            return render(request, "fuelroute/map.html", {"form": form})
-        result, error, status, headers = _plan_from(request.GET)
-        if error:
-            context = {"form": form, "error_code": error["error"], "error_lines": _messages(error["detail"])}
-            response = render(request, "fuelroute/map.html", context, status=status)
-        else:
-            api_url = reverse("route-plan") + "?" + request.GET.urlencode()
-            context = {"form": form, "result": result, "geojson": result["map"]["geojson"], "api_url": api_url}
-            response = render(request, "fuelroute/map.html", context)
-        for name, value in headers.items():
-            response[name] = value
-        return response
+        return Response(route_metrics.snapshot(), headers={"Cache-Control": "no-store"})
+
+
+class AboutView(APIView):
+    """GET /api/about: versions, configuration, loaded data, requirements -> code and tests,
+    the last pytest run and the error catalog (``services/about.py``). 0 external calls."""
+
+    def get(self, request):
+        return Response(build_about(), headers={"Cache-Control": "no-cache"})
 
 
 def index(request):
@@ -111,8 +161,12 @@ def index(request):
         {
             "service": "Spotter fuel route API",
             "endpoints": {
-                "GET|POST /api/route": "start, finish ('City, ST' or 'lat,lon'), start_tank (empty|full)",
-                "GET /api/route/map": "same parameters, HTML map",
+                "GET|POST /api/route": (
+                    "start, finish ('City, ST' or 'lat,lon'), start_tank (empty|full), include (candidates)"
+                ),
+                "GET /api/route/map": "same parameters, the planner page (HTML)",
+                "GET /api/stats": "requests, external calls and latency since the server started",
+                "GET /api/about": "versions, configuration, loaded data, requirements, tests and error codes",
             },
             "example": request.build_absolute_uri("/api/route?start=New+York,+NY&finish=Los+Angeles,+CA"),
         }
@@ -121,7 +175,10 @@ def index(request):
 
 def api_not_found(request, *args, **kwargs):
     return JsonResponse(
-        {"error": "not_found", "detail": f"No endpoint at {request.path}. Use /api/route or /api/route/map."},
+        {
+            "error": "not_found",
+            "detail": f"No endpoint at {request.path}. Use /api/route, /api/stats or /api/about.",
+        },
         status=404,
     )
 

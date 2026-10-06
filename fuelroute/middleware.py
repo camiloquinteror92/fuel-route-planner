@@ -6,12 +6,14 @@
   the browser's DevTools show the same breakdown), records every ``/api/route``
   request for ``/api/stats`` and logs one key=value line per request.
 * ``RateLimitMiddleware`` limits each client IP to ``RATE_LIMIT_PER_MINUTE``
-  requests per minute on ``/api/route`` (the endpoint and its page). The API
-  forwards new trips to free public services (OSRM demo server, Nominatim) whose
-  fair-use policies are about one request per second; this keeps a loop or a
-  Postman runner from getting the server's IP blocked. ``/api/stats`` and
-  ``/api/about`` never leave the server, so they are not limited. Fixed one-minute
-  window in the Django cache (per process with LocMemCache; shared with Redis).
+  requests per minute on ``/api/route`` (the endpoint only). The API forwards new
+  trips to free public services (OSRM demo server, Nominatim) whose fair-use
+  policies are about one request per second; this keeps a loop or a Postman runner
+  from getting the server's IP blocked. The planner page (``/api/route/map``),
+  ``/api/stats`` and ``/api/about`` never leave the server, so they are not
+  limited: reloading the page does not eat the quota of the trips it plans. Fixed
+  one-minute window in the Django cache (per process with LocMemCache; shared with
+  Redis). The 429 body has the API's error shape, ``meta`` included.
 """
 
 import logging
@@ -27,7 +29,6 @@ from .services.metrics import route_metrics
 logger = logging.getLogger("fuelroute.request")
 
 _ROUTE_ENDPOINT = re.compile(r"^/api/route/?$")
-_RATE_LIMITED_PREFIX = "/api/route"
 
 
 def _error_code(response) -> str | None:
@@ -83,7 +84,7 @@ class RateLimitMiddleware:
 
     def __call__(self, request):
         limit = settings.FUEL_PLANNER["RATE_LIMIT_PER_MINUTE"]
-        if limit > 0 and request.path.startswith(_RATE_LIMITED_PREFIX):
+        if limit > 0 and _ROUTE_ENDPOINT.match(request.path):
             window = int(time.time() // 60)
             key = f"ratelimit:{request.META.get('REMOTE_ADDR', '')}:{window}"
             cache.add(key, 0, timeout=61)
@@ -95,7 +96,11 @@ class RateLimitMiddleware:
             if count > limit:
                 retry_after = 60 - int(time.time()) % 60
                 response = JsonResponse(
-                    {"error": "rate_limited", "detail": f"More than {limit} requests per minute; retry in {retry_after} s."},
+                    {
+                        "error": "rate_limited",
+                        "detail": f"More than {limit} requests per minute; retry in {retry_after} s.",
+                        "meta": {"external_api_calls": 0, "external_api_services": []},
+                    },
                     status=429,
                 )
                 response["Retry-After"] = str(retry_after)

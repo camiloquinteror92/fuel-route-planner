@@ -4,9 +4,10 @@ import time
 
 import pytest
 
-from fuelroute.services.errors import ExternalServiceError, LocationNotFound, LocationOutsideUSA
+from fuelroute.services.errors import ExternalServiceError, LocationNotFound, LocationOutsideUSA, NoFuelDataInRegion
 from fuelroute.services.geocoding import geocode, parse_coordinates, split_city_state
 from fuelroute.services.http import ExternalApiClient
+from fuelroute.services.text import foreign_region
 
 
 class NoNetworkClient:
@@ -132,6 +133,50 @@ def test_coordinates_outside_usa_raise():
     for text in ("48.85,2.35", "43.6532,-79.3832", "25.6866,-100.3161"):  # Paris, Toronto, Monterrey
         with pytest.raises(LocationOutsideUSA):
             geocode(text, NoNetworkClient(), field="finish")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("ON", ("canada", "Ontario")),
+        ("bc", ("canada", "British Columbia")),
+        ("Quebec", ("canada", "Quebec")),
+        ("NL", ("canada", "Newfoundland and Labrador")),  # also Nuevo Leon: outside the USA either way
+        ("Nuevo León", ("mexico", "Nuevo Leon")),
+        ("CDMX", ("mexico", "Ciudad de Mexico")),
+        ("México", ("mexico", "Mexico")),
+        ("PR", ("us_territory", "Puerto Rico")),
+        ("TX", None),
+        ("MO", None),  # Missouri, never Morelos
+        ("Texas", None),
+        ("Springfield", None),
+    ],
+)
+def test_foreign_region(value, expected):
+    assert foreign_region(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        ("Toronto, ON", LocationOutsideUSA),
+        ("Calgary AB", LocationOutsideUSA),
+        ("Guadalajara, Jalisco", LocationOutsideUSA),
+        ("Ponce, PR", NoFuelDataInRegion),
+        ("Austin, TZ", LocationNotFound),
+    ],
+)
+def test_regions_outside_the_states_are_rejected_without_a_lookup(text, error):
+    with pytest.raises(error) as raised:
+        geocode(text, NoNetworkClient(), field="finish")
+    assert raised.value.details["field"] == "finish"
+
+
+def test_free_text_that_only_looks_foreign_still_reaches_the_geocoder():
+    # No comma and not an upper-case code: "Lake Ontario" is free text, not "Lake" in Ontario.
+    client = FakeNominatim([{"lat": "43.16", "lon": "-77.61", "category": "natural", "display_name": "Lake Ontario"}])
+    assert geocode("Lake Ontario", client, field="start").geocoder == "nominatim"
+    assert geocode("Mexico, MO", NoNetworkClient(), field="start").geocoder == "offline"  # Mexico, Missouri
 
 
 def test_nominatim_calls_are_spaced(upstream, settings, monkeypatch):

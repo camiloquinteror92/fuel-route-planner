@@ -90,10 +90,13 @@ def test_about_reports_running_versions_and_data_counts(stations):
         {"state": "AR", "stations": 1, "geocoded": 1},
         {"state": "TX", "stations": 1, "geocoded": 0},
     ]
-    # Lower 48 + DC without a station that can be planned with: TX has one, but without coordinates.
-    assert "TX" in data["states_without_stations"] and "DC" in data["states_without_stations"]
-    assert not {"OK", "AR", "AK", "HI"} & set(data["states_without_stations"])
-    assert len(data["states_without_stations"]) == 49 - 2
+    # Lower 48 without a station that can be planned with: TX has one, but without
+    # coordinates. Regression: DC (not a state) was listed as a "lower 48 state".
+    assert "TX" in data["states_without_stations"]
+    assert not {"OK", "AR", "AK", "HI", "DC"} & set(data["states_without_stations"])
+    assert len(data["states_without_stations"]) == 48 - 2
+    assert data["thinnest_states"] == [{"state": "AR", "geocoded": 1}, {"state": "OK", "geocoded": 6}]
+    assert data["district_of_columbia_geocoded"] == 0
     assert data["price_per_gallon"] == {"min": 2.4, "median": 3.1, "max": 3.6}  # geocoded stations only
     assert data["places_index_entries"] == len(get_place_index())
 
@@ -113,8 +116,14 @@ def test_about_reports_running_versions_and_data_counts(stations):
     if build["commit"]:  # a git checkout (always, except in an exported tarball)
         assert re.fullmatch(r"[0-9a-f]{40}", build["commit"])
         assert build["history"][0]["commit"] == build["commit"]
-        assert build["history"][0]["url"] == f"{build['repo_url']}/commit/{build['commit']}"
         assert isinstance(build["dirty"], bool) and isinstance(build["pushed"], bool)
+        for commit in build["history"]:  # only commits GitHub has are linked
+            assert commit["url"] == (f"{build['repo_url']}/commit/{commit['commit']}" if commit["pushed"] else None)
+    deliverables = body["deliverables"]
+    assert deliverables["postman_collection"] == "postman/collection.json"
+    assert (project_settings.BASE_DIR / deliverables["postman_collection"]).is_file()
+    assert deliverables["release_check"]["django_latest_stable"] == config["DJANGO_LATEST_STABLE"]
+    assert body["api"]["state_codes"] == sorted(body["api"]["state_codes"]) and "TX" in body["api"]["state_codes"]
 
 
 @pytest.mark.django_db
@@ -133,8 +142,10 @@ def test_every_requirement_points_to_existing_tests_and_code():
             assert test in body["test_index"], (requirement["id"], test)
     for key, link in body["code_links"].items():
         assert link["start_line"] and link["end_line"] >= link["start_line"], key
-        assert link["url"].startswith(f"{body['build']['repo_url']}/blob/")
-        assert link["url"].endswith(f"/{link['path']}#L{link['start_line']}-L{link['end_line']}")
+        if link["url"]:  # null while the symbol is not on GitHub yet
+            start, end = link["url_lines"]
+            assert link["url"].startswith(f"{body['build']['repo_url']}/blob/")
+            assert link["url"].endswith(f"/{link['path']}#L{start}-L{end}")
     assert all(entry["line"] > 0 and entry["path"].startswith("fuelroute/tests/") for entry in body["test_index"].values())
     assert "fuelroute/tests/test_about.py::test_every_requirement_points_to_existing_tests_and_code" in body["test_index"]
 
@@ -217,9 +228,51 @@ def test_about_tolerates_missing_git(monkeypatch):
         "subject": None,
         "dirty": None,
         "pushed": None,
+        "linked_commit": None,
+        "linked_commit_short": None,
+        "commits_not_on_github": None,
         "history": [],
     }
     assert all("/blob/main/" in link["url"] for link in body["code_links"].values())
+
+
+@pytest.mark.django_db
+def test_links_point_to_what_github_has_not_to_the_local_checkout(monkeypatch):
+    # Regression: before a push the links went to blob/main with the LOCAL line numbers:
+    # most opened the wrong line, and new files, symbols and commits gave a 404.
+    head, pushed = "a" * 40, "b" * 40
+    log = (
+        f"{head}\x1f2026-10-06T07:00:00-05:00\x1ffeat: not pushed\n"
+        f"{pushed}\x1f2026-10-06T06:00:00-05:00\x1fdocs: pushed\n"
+    )
+    answers = {"log": log, "status": "", "rev-list": f"{pushed}\n"}
+    monkeypatch.setattr(about, "_git", lambda *args, **kwargs: answers[args[0]])
+    asked = []
+
+    def blobs(commit, paths):
+        asked.append(commit)
+        texts = dict.fromkeys(paths)  # every file missing at that commit...
+        texts["fuelroute/services/optimizer.py"] = "\n" * 9 + "def _greedy():\n    pass\n"  # ...but this one
+        texts["fuelroute/tests/test_api.py"] = "def test_invalid_input_returns_400():\n    pass\n"
+        return texts
+
+    monkeypatch.setattr(about, "_git_blobs", blobs)
+    body = about.build_about()
+    build = body["build"]
+    assert (build["commit"], build["pushed"], build["linked_commit"], build["commits_not_on_github"]) == (
+        head, False, pushed, 1,
+    )
+    assert [c["url"] for c in build["history"]] == [None, f"{build['repo_url']}/commit/{pushed}"]
+    greedy = body["code_links"]["optimizer.greedy"]
+    assert greedy["url"] == f"{build['repo_url']}/blob/{pushed}/fuelroute/services/optimizer.py#L10-L11"
+    assert greedy["url_lines"] == [10, 11] and greedy["start_line"] != 10  # GitHub's lines, not the local ones
+    assert body["code_links"]["metrics.route_metrics"]["url"] is None  # not on GitHub yet
+    tests = body["test_index"]
+    assert tests["fuelroute/tests/test_api.py::test_invalid_input_returns_400"]["url"].endswith("/test_api.py#L1")
+    assert tests["fuelroute/tests/test_web.py::test_tabs_are_accessible"]["url"] is None
+    assert asked == [pushed]  # every file in one git call
+    about.build_about()
+    assert asked == [pushed]  # a commit never changes: cached for good
 
 
 def test_conventional_commit_types_are_parsed():

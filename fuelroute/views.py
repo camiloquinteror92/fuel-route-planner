@@ -9,9 +9,11 @@
 The planner page (``/api/route/map``) is ``web.py``: a client of these endpoints.
 
 Every error has the body ``{"error": "<code>", "detail": ..., "meta": {...}}``
-where ``meta`` says how many external calls were made before the error. Every
-``/api/route`` response, errors included, carries a ``Server-Timing`` header with
-the time of each step (``server_timing``).
+where ``meta`` says how many external calls were made before the error: the
+planner's errors, the serializer's, DRF's own (bad JSON, 405, 406, 415), the JSON
+404 and the rate limit's 429 (``no_calls_meta``: those never reach an external
+service). Every ``/api/route`` response, errors included, carries a
+``Server-Timing`` header with the time of each step (``server_timing``).
 """
 
 from collections import defaultdict
@@ -28,6 +30,12 @@ from .services.errors import PlannerError
 from .services.http import ExternalApiClient
 from .services.metrics import route_metrics
 from .services.planner import plan_trip
+
+
+def no_calls_meta() -> dict:
+    """``meta`` of an error answered before any external call could be made."""
+    return {"external_api_calls": 0, "external_api_services": []}
+
 
 # meta.timings_ms key -> Server-Timing metric name, in the order of the pipeline.
 # The external calls are listed right after "routing" (one entry per service).
@@ -81,8 +89,7 @@ def _plan_from(data) -> tuple[dict | None, dict | None, int, dict, ExternalApiCl
     """Validate ``data`` and plan the trip: (result, error_body, status, headers, client)."""
     serializer = RouteRequestSerializer(data=data)
     if not serializer.is_valid():
-        meta = {"external_api_calls": 0, "external_api_services": []}
-        return None, {"error": "invalid_request", "detail": serializer.errors, "meta": meta}, 400, {}, None
+        return None, {"error": "invalid_request", "detail": serializer.errors, "meta": no_calls_meta()}, 400, {}, None
     client = ExternalApiClient()
     try:
         result = plan_trip(**serializer.validated_data, client=client)
@@ -178,17 +185,18 @@ def api_not_found(request, *args, **kwargs):
         {
             "error": "not_found",
             "detail": f"No endpoint at {request.path}. Use /api/route, /api/stats or /api/about.",
+            "meta": no_calls_meta(),
         },
         status=404,
     )
 
 
 def api_exception_handler(exc, context):
-    """DRF's handler, reshaped to {"error": <code>, "detail": <message>}.
+    """DRF's handler, reshaped to {"error": <code>, "detail": <message>, "meta": {...}}.
 
     Covers what DRF raises itself before our code runs: malformed JSON (400
     parse_error), wrong Content-Type (415 unsupported_media_type), wrong method
-    (405 method_not_allowed), Accept mismatch (406).
+    (405 method_not_allowed), Accept mismatch (406). None of them spends a call.
     """
     response = drf_exception_handler(exc, context)
     if response is not None and isinstance(response.data, dict) and "error" not in response.data:
@@ -196,5 +204,6 @@ def api_exception_handler(exc, context):
         response.data = {
             "error": codes if isinstance(codes, str) else "invalid_request",
             "detail": response.data.get("detail", response.data),
+            "meta": no_calls_meta(),
         }
     return response

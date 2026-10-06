@@ -171,13 +171,14 @@ def _plan_trip(
     if version.startswith("0-"):
         raise StationDataNotLoaded("The station table is empty. Run `python manage.py load_stations` first.")
 
-    plan_key = f"plan:v3:{version}:{origin.as_param};{destination.as_param};{start_tank}"
+    plan_key = f"plan:v4:{version}:{origin.as_param};{destination.as_param};{start_tank}"
     cached_plan = cache.get(plan_key)  # the cache returns a fresh copy (unpickled)
     timer.lap("plan_cache_ms")
     if cached_plan is not None:
         compact = cached_plan.pop("_candidates", [])
         cached_plan["start"]["query"], cached_plan["finish"]["query"] = start, finish
         cached_plan["map"]["map_url"] = map_path(origin, destination, start_tank)
+        cached_plan["warnings"] = _geocoder_warnings(origin, destination) + cached_plan["warnings"]
         if "candidates" in include:
             cached_plan["candidates"] = _build_candidates(compact, cached_plan["fuel_stops"])
             timer.lap("candidates_ms")
@@ -204,7 +205,7 @@ def _plan_trip(
     plan = _optimize(route, corridor, tank)
     timer.lap("optimizer_ms")
 
-    stops, total_cost, total_gallons = _build_stops(plan)
+    stops, total_cost, total_gallons = _build_stops(plan, route.distance_miles)
     summary = _build_summary(route, corridor, tank, plan, stops, total_cost, total_gallons)
     result = {
         "start": origin.to_dict(),
@@ -239,6 +240,8 @@ def _plan_trip(
     result["_candidates"] = _compact_candidates(corridor)
     cache.set(plan_key, result)
     compact = result.pop("_candidates")  # private: kept in the cache, never sent
+    # They depend on the text typed, not on the coordinates: never cached.
+    result["warnings"] = _geocoder_warnings(origin, destination) + result["warnings"]
     if "candidates" in include:
         result["candidates"] = _build_candidates(compact, stops)
         timer.lap("candidates_ms")
@@ -314,7 +317,10 @@ def _tank_rules(start_tank: str, route: Route, corridor: list[CorridorStation]) 
     capacity = config["MAX_RANGE_MILES"]
     mpg = config["MILES_PER_GALLON"]
     if start_tank == START_FULL:
-        note = f"The truck leaves with a full tank ({capacity / mpg:.0f} gal); that fuel is not included in the cost."
+        note = (
+            f"The truck leaves with a full tank ({capacity / mpg:.0f} gal); that fuel is not included in the cost. "
+            "The plan buys only what it needs to reach the destination, so it may arrive nearly empty."
+        )
         return TankRules(capacity, 0.0, note, reason=TANK_FULL)
 
     reserve = min(config["START_RESERVE_MILES"], capacity)
@@ -354,7 +360,8 @@ def _tank_rules(start_tank: str, route: Route, corridor: list[CorridorStation]) 
         f"Every mile driven is paid for: the truck leaves with {initial / mpg:.1f} gal "
         f"({'the reserve' if first <= reserve else 'enough to reach the first station'}) and must arrive "
         "with the same amount, so the fuel bought equals the fuel burned"
-        + (" (except the unpriced fuel in 'warnings')." if rules.final < final else ".")
+        + (" (except the unpriced fuel in 'warnings')" if rules.final < final else "")
+        + ". That fuel is borrowed at the start and returned at the end; it is not a safety margin."
     )
     return rules
 
@@ -453,7 +460,7 @@ def _average_price(total_cost: Decimal, total_gallons: Decimal) -> float | None:
     return float((total_cost / total_gallons).quantize(_PRICE_PLACES)) if total_gallons else None
 
 
-def _build_stops(plan: FuelPlan) -> tuple[list[dict], Decimal, Decimal]:
+def _build_stops(plan: FuelPlan, route_miles: float) -> tuple[list[dict], Decimal, Decimal]:
     """Stop rows with exact money (see ``_money_rows``) and why each stop is there."""
     opis_ids = [stop.candidate.ref.opis_id for stop in plan.stops]
     stations = FuelStation.objects.in_bulk(opis_ids, field_name="opis_id")
@@ -462,6 +469,8 @@ def _build_stops(plan: FuelPlan) -> tuple[list[dict], Decimal, Decimal]:
         raise StationDataChanged("The station data changed during the request; please send it again.")
 
     money, total_cost, total_gallons = _money_rows(plan.stops)
+    tank_gallons = settings.FUEL_PLANNER["MAX_RANGE_MILES"] / settings.FUEL_PLANNER["MILES_PER_GALLON"]
+    stop_of_greedy = {stop.greedy_index: n for n, stop in enumerate(plan.stops, start=1)}
     stops = []
     for number, (stop, (gallons, price, cost)) in enumerate(zip(plan.stops, money), start=1):
         info: CorridorStation = stop.candidate.ref
@@ -487,16 +496,59 @@ def _build_stops(plan: FuelPlan) -> tuple[list[dict], Decimal, Decimal]:
                 "fuel_on_arrival_gallons": _round(stop.fuel_on_arrival_gallons),
                 "gallons": float(gallons),
                 "cost": float(cost),
-                "decision": {
-                    "rule": stop.rule,
-                    "cheaper_station_mile": (
-                        None if stop.cheaper_station_mile is None else _round(stop.cheaper_station_mile, 1)
-                    ),
-                    "consolidated": stop.consolidated,
-                },
+                "decision": _decision(stop, number, plan, route_miles, tank_gallons, stop_of_greedy),
             }
         )
     return stops, total_cost, total_gallons
+
+
+def _decision(
+    stop: FuelStop, number: int, plan: FuelPlan, route_miles: float, tank_gallons: float, stop_of_greedy: dict
+) -> dict:
+    """Why this stop of the FINAL plan exists and what its purchase covers.
+
+    * ``rule`` / ``cheaper_station_mile``: the greedy branch that created the stop.
+    * ``greedy_gallons``: what the greedy bought here. ``moved_in``: fuel the greedy
+      had planned at another station and consolidation moved here (``from_stop``:
+      that station's stop in this plan, null when the stop was removed);
+      ``moved_out``: fuel of this station's greedy purchase now bought at another
+      stop. ``consolidation_extra_cost``: what the fuel moved here costs more (or
+      less) at this price; summed over the stops it is the consolidation's cost.
+    * ``reaches``: where the fuel bought here takes the truck in the final plan, the
+      next stop or the destination (``stop`` null). ``fills_tank``: leaves full.
+    """
+    following = plan.stops[number] if number < len(plan.stops) else None
+    greedy = plan.before_consolidation
+    price = Decimal(f"{stop.candidate.price:.4f}")
+    extra = Decimal(0)
+    moved_in = []
+    for k, gallons in sorted(stop.sources.items()):
+        if k == stop.greedy_index or gallons < 0.005:
+            continue
+        origin = greedy[k]
+        extra += Decimal(f"{gallons:.6f}") * (price - Decimal(f"{origin.candidate.price:.4f}"))
+        moved_in.append(
+            {"mile": _round(origin.candidate.mile, 1), "gallons": _round(gallons), "from_stop": stop_of_greedy.get(k)}
+        )
+    moved_out = [
+        {"mile": _round(other.candidate.mile, 1), "gallons": _round(other.sources[stop.greedy_index]), "to_stop": n}
+        for n, other in enumerate(plan.stops, start=1)
+        if other is not stop and other.sources.get(stop.greedy_index, 0.0) >= 0.005
+    ]
+    return {
+        "rule": stop.rule,
+        "cheaper_station_mile": None if stop.cheaper_station_mile is None else _round(stop.cheaper_station_mile, 1),
+        "consolidated": stop.consolidated,
+        "greedy_gallons": _round(stop.greedy_gallons),
+        "moved_in": moved_in,
+        "moved_out": moved_out,
+        "consolidation_extra_cost": float(_money(extra)),
+        "reaches": {
+            "stop": number + 1 if following else None,
+            "mile": _round(following.candidate.mile if following else route_miles, 1),
+        },
+        "fills_tank": stop.fuel_on_arrival_gallons + stop.gallons >= tank_gallons - 0.005,
+    }
 
 
 def _build_summary(route, corridor, tank, plan, stops, total_cost: Decimal, total_gallons: Decimal) -> dict:
@@ -741,6 +793,18 @@ def _build_candidates(compact: list[tuple], stops: list[dict]) -> dict:
             for opis_id, mile, offset, price, lat, lon in compact
         ],
     }
+
+
+def _geocoder_warnings(origin: Location, destination: Location) -> list[str]:
+    """Free text that was not "City, ST" was placed by a search engine: say what it
+    matched, so a wrong match ("Toronto" -> Toronto, Ohio) is visible."""
+    return [
+        f"{field_name} '{location.query}' is not 'City, ST', so it was looked up by free-text search "
+        f"(Nominatim) and matched '{location.label}'. If that is not the place you meant, use 'City, ST' "
+        "or 'lat,lon'."
+        for field_name, location in (("start", origin), ("finish", destination))
+        if location.geocoder == "nominatim"
+    ]
 
 
 def _warnings(route: Route, tank: TankRules) -> list[str]:

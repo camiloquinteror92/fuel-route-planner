@@ -10,11 +10,17 @@ calls and the error code. Latencies are kept for the last ``STATS_WINDOW``
 requests of each outcome, so percentiles stay cheap and recent.
 
 Outcome of a request:
+* ``nominatim_call``: a 200 whose free-text input needed a Nominatim call (its time
+  is mostly Nominatim's, so it is kept apart from the routing-only figures);
 * ``plan_cache_hit``: a 200 served from the plan cache (0 external calls);
 * ``route_cache_hit``: a 200 planned again on a cached route (e.g. the other
   start_tank mode, or new station data);
-* ``cold``: a 200 that needed routing;
+* ``cold``: a 200 that needed the routing call (and no geocoding call);
 * ``error``: any status >= 400.
+
+External calls are also counted per service: ``max_osrm_calls_in_one_request`` is
+the routing budget of the brief (1 per new trip, 2 with a retry), separate from
+``max_calls_in_one_request`` (every service).
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from datetime import UTC, datetime
 
 from django.conf import settings
 
-OUTCOMES = ("cold", "route_cache_hit", "plan_cache_hit", "error")
+OUTCOMES = ("cold", "nominatim_call", "route_cache_hit", "plan_cache_hit", "error")
 SERVICES = ("osrm", "nominatim")
 RECENT = 20
 
@@ -64,6 +70,8 @@ def outcome_of(status: int, meta: dict | None) -> str:
     if status >= 400:
         return "error"
     meta = meta or {}
+    if "nominatim" in (meta.get("external_api_services") or []):
+        return "nominatim_call"
     if meta.get("plan_cache") == "hit":
         return "plan_cache_hit"
     if meta.get("route_cache") == "hit":
@@ -94,6 +102,7 @@ class RouteMetrics:
             self._requests_with_osrm = 0
             self._osrm_calls = 0
             self._max_calls = 0
+            self._max_osrm_calls = 0
             self._latency = {outcome: deque(maxlen=window) for outcome in OUTCOMES}
             self._external_latency = {service: deque(maxlen=window) for service in SERVICES}
             self._recent: deque = deque(maxlen=RECENT)
@@ -133,6 +142,7 @@ class RouteMetrics:
                 self._requests_with_osrm += 1
                 self._osrm_calls += osrm_calls
             self._max_calls = max(self._max_calls, call_count)
+            self._max_osrm_calls = max(self._max_osrm_calls, osrm_calls)
             self._recent.append(
                 {
                     "at": datetime.now(UTC).isoformat(),
@@ -171,6 +181,7 @@ class RouteMetrics:
                     "osrm_calls_per_routing_request": (
                         round(self._osrm_calls / self._requests_with_osrm, 2) if self._requests_with_osrm else None
                     ),
+                    "max_osrm_calls_in_one_request": self._max_osrm_calls,
                     "max_calls_in_one_request": self._max_calls,
                 },
                 "latency_ms": {

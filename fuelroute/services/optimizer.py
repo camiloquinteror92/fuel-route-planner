@@ -51,9 +51,13 @@ station is already full). Each move changes only the two stops involved (fuel
 leaving the second one is unchanged), so the rest of the plan stays valid.
 
 Every stop keeps WHY it exists (``FuelStop.rule``: the greedy branch that created
-it, ``reach_cheaper`` / ``finish`` / ``fill_up``) and whether consolidation changed
-it, and the plan keeps the purchases as they were before consolidation
-(``FuelPlan.before_consolidation``), so the API can show the trade-off.
+it, ``reach_cheaper`` / ``finish`` / ``fill_up``) and where its fuel was planned by
+the greedy (``FuelStop.sources``: greedy stop -> gallons, its own purchase
+included). Consolidation only moves fuel between stops, so the sources of every
+final stop add up to what it buys, and sum(gallons x (price here - price at the
+source)) over the plan is exactly what consolidation costs. The plan also keeps the
+purchases as they were before consolidation (``FuelPlan.before_consolidation``,
+indexed like the sources), so the API can explain each stop of the FINAL plan.
 
 Baselines
 ---------
@@ -107,6 +111,11 @@ class FuelStop:
     rule: str = ""
     cheaper_station_mile: float | None = None  # RULE_REACH_CHEAPER: the station it reaches
     consolidated: bool = False  # consolidation changed the gallons bought here
+    greedy_index: int = -1  # this station's position in FuelPlan.before_consolidation
+    greedy_gallons: float = 0.0  # what the greedy bought here, before consolidation
+    # Greedy stop (index in before_consolidation) -> gallons of THIS purchase that
+    # the greedy had planned there. Without consolidation: {greedy_index: gallons}.
+    sources: dict[int, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -144,6 +153,8 @@ class _Purchase:
     rule: str = ""  # RULE_* of the greedy branch that created it
     cheaper_mile: float | None = None  # RULE_REACH_CHEAPER: mile of the cheaper station
     greedy_bought: float = 0.0  # ``bought`` as the greedy left it (before consolidation)
+    index: int = -1  # position in the greedy's list of purchases
+    sources: dict[int, float] = field(default_factory=dict)  # greedy index -> miles of this purchase
 
 
 def _greedy(
@@ -200,7 +211,10 @@ def _greedy(
             raise UnreachableError(position, stations[end].mile if end < len(stations) else None)
 
         if buy > _EPS:
-            purchases.append(_Purchase(here, buy, fuel, rule, cheaper_mile, greedy_bought=buy))
+            k = len(purchases)
+            purchases.append(
+                _Purchase(here, buy, fuel, rule, cheaper_mile, greedy_bought=buy, index=k, sources={k: buy})
+            )
         fuel = fuel + buy - distance
         if target is None:
             return purchases, fuel
@@ -259,10 +273,32 @@ def _consolidate(
         if not options:
             return purchases
         _keeps, _extra, i, x = min(options)
-        purchases[i].bought += x
-        purchases[i + 1].bought -= x
-        purchases[i + 1].arrival += x
+        a, b = purchases[i], purchases[i + 1]
+        a.bought += x
+        b.bought -= x
+        b.arrival += x
+        if x > 0:
+            _move_sources(b, a, x)
+        else:
+            _move_sources(a, b, -x)
         purchases = [p for p in purchases if p.bought > _EPS]
+
+
+def _move_sources(giver: _Purchase, taker: _Purchase, miles: float) -> None:
+    """Record that ``miles`` of ``giver``'s purchase are now bought at ``taker``: its own
+    greedy fuel goes first, then fuel it had received; all of it when it disappears."""
+    order = [giver.index] + [k for k in giver.sources if k != giver.index]
+    for k in order:
+        if miles <= _EPS:
+            break
+        take = min(giver.sources.get(k, 0.0), miles)
+        if take <= 0:
+            continue
+        giver.sources[k] -= take
+        if giver.sources[k] <= _EPS:
+            del giver.sources[k]
+        taker.sources[k] = taker.sources.get(k, 0.0) + take
+        miles -= take
 
 
 def plan_fuel_stops(
@@ -292,7 +328,7 @@ def plan_fuel_stops(
     stations = _on_route(candidates, route_miles)
     purchases, final_fuel = _greedy(route_miles, stations, max_range_miles, initial_fuel_miles, final_fuel_miles)
     # _consolidate changes ``bought`` / ``arrival`` in place: copy the greedy's answer first.
-    greedy_stops = _to_stops([dataclasses.replace(p) for p in purchases], miles_per_gallon)
+    greedy_stops = _to_stops([dataclasses.replace(p, sources=dict(p.sources)) for p in purchases], miles_per_gallon)
     if min_stop_gallons > 0:
         purchases = _consolidate(
             purchases,
@@ -334,6 +370,9 @@ def _to_stops(purchases: list[_Purchase], miles_per_gallon: float) -> list[FuelS
                 rule=purchase.rule,
                 cheaper_station_mile=purchase.cheaper_mile,
                 consolidated=abs(purchase.bought - purchase.greedy_bought) > _EPS,
+                greedy_index=purchase.index,
+                greedy_gallons=purchase.greedy_bought / miles_per_gallon,
+                sources={k: miles / miles_per_gallon for k, miles in purchase.sources.items()},
             )
         )
     return stops

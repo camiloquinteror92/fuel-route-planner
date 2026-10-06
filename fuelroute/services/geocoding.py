@@ -5,12 +5,22 @@ Order, cheapest first:
 1. "lat,lon" or "lat lon"                  -> parsed, no lookup
 2. "City, ST", "City, State", "City ST",
    "City State" ("Albany New York")         -> offline place index, 0 external calls
-3. anything else with letters               -> Nominatim (1 call, cached; at most
-                                               1 request/second per process)
+3. "City, XX" where XX is not a US state    -> rejected, 0 external calls:
+   - a Canadian province or Mexican state ("Toronto, ON", "Monterrey, NL") or
+     ", Canada" / ", Mexico": location_outside_usa;
+   - a US territory ("San Juan, PR"): no_fuel_data_in_region (no stations there);
+   - any other two letters ("Austin, TZ"): location_not_found, "not a US state".
+4. anything else with letters               -> Nominatim (1 call, cached; at most
+                                               1 request/second per process). A hit
+   that is only a street ("Toronto Court, Indianapolis" for "Toronto, ON") is not a
+   place: location_not_found, and the miss is cached.
 
 Every result is then checked against the US outline (``usa.py``). Ambiguous city
 names resolve to the most populated place with that name in that state; use
-"lat,lon" to be exact.
+"lat,lon" to be exact. Why step 3 exists: Nominatim is called with
+``countrycodes=us`` and ``limit=1``, so for a foreign place it answers with the
+first US text match, often a street named after it, and a trip to the wrong state
+would be planned without any error.
 """
 
 from __future__ import annotations
@@ -22,15 +32,20 @@ from dataclasses import dataclass
 from django.conf import settings
 from django.core.cache import cache
 
-from .errors import ExternalServiceError, LocationNotFound, LocationOutsideUSA
+from .errors import ExternalServiceError, LocationNotFound, LocationOutsideUSA, NoFuelDataInRegion
 from .http import ExternalApiClient
 from .places import get_place_index
-from .text import normalize_state
+from .text import TERRITORY, foreign_region, normalize_state
 from .usa import region_of
 
 _COORDINATES = re.compile(r"^\s*(-?\d{1,3}(?:\.\d+)?)\s*(?:,|\s)\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
 _COUNTRY_SUFFIX = re.compile(r",?\s*(?<![a-z])(usa|us|u\.s\.(a\.)?|united states( of america)?)\s*$", re.I)
 _HAS_LETTER = re.compile(r"[A-Za-z]")
+_TWO_LETTERS = re.compile(r"^[A-Za-z]{2}$")
+_UPPER_CODE = re.compile(r"^[A-Z]{2,4}$")
+# Nominatim categories that are not a place to start or end a trip at: a hit in one
+# of them means the text only matched a street name.
+_NOT_A_PLACE = {"highway"}
 _NOMINATIM_HIT_SECONDS = 24 * 3600
 # A "not found" answer is cached briefly: long enough to absorb retries, short
 # enough that a temporary Nominatim problem is not remembered for a day.
@@ -106,11 +121,62 @@ def _offline(text: str) -> Location | None:
     return Location(text, place.latitude, place.longitude, f"{city.title()}, {state}", "offline")
 
 
-def _nominatim(text: str, client: ExternalApiClient) -> Location | None:
-    key = "nominatim:v2:" + hashlib.sha1(text.strip().lower().encode()).hexdigest()
+def _reject_region_outside_the_states(text: str, field: str) -> None:
+    """Step 3 of the module docstring: raise for "City, XX" when XX is not a US state.
+
+    Called only after the offline index found nothing, so it never blocks a US
+    place. With a comma the region can be a code or a name ("Toronto, Ontario");
+    without one only an upper-case code counts ("Toronto ON"), so free text such as
+    "Lake Ontario" still goes to the geocoder.
+    """
+    cleaned = text.strip()
+    if "," in cleaned:
+        tail = cleaned.rsplit(",", 1)[1].strip()
+        region = foreign_region(tail)
+    else:
+        words = cleaned.split()
+        tail = words[-1] if len(words) > 1 else ""
+        region = foreign_region(tail, codes_only=True) if _UPPER_CODE.match(tail) else None
+    if region:
+        kind, name = region
+        if kind == TERRITORY:
+            raise NoFuelDataInRegion(
+                f"'{text}' is in {name}, a US territory outside the 50 states: the price file has no stations "
+                "there, so the fuel cost of this trip cannot be planned.",
+                field=field,
+            )
+        raise LocationOutsideUSA(
+            f"'{text}' is in {name}, outside the USA. Start and finish must be in the USA.", field=field
+        )
+    if "," in cleaned and _TWO_LETTERS.match(tail) and not normalize_state(tail):
+        raise LocationNotFound(
+            f"'{tail.upper()}' in '{text}' is not a US state code. Use 'City, ST' (e.g. 'Austin, TX') or 'lat,lon'.",
+            field=field,
+        )
+
+
+def _nominatim(text: str, client: ExternalApiClient, field: str) -> Location | None:
+    """Free-text lookup (step 4). None when nothing is found; raises LocationNotFound
+    when the only match is a street."""
+    key = "nominatim:v3:" + hashlib.sha1(text.strip().lower().encode()).hexdigest()
     cached = cache.get(key)
-    if cached is not None:
-        return Location(text, *cached) if cached else None
+    if cached is None:
+        cached = _ask_nominatim(text, client, key)
+    kind = cached[0]
+    if kind == "hit":
+        return Location(text, cached[1], cached[2], cached[3], "nominatim")
+    if kind == "street":
+        raise LocationNotFound(
+            f"'{text}' only matched a street ({cached[1]}), not a city or an address. "
+            "Use 'City, ST' (e.g. 'Austin, TX'), a full street address or 'lat,lon'.",
+            field=field,
+        )
+    return None
+
+
+def _ask_nominatim(text: str, client: ExternalApiClient, key: str) -> tuple:
+    """One Nominatim call. Caches and returns ("hit", lat, lon, label), ("street", label)
+    or ("miss",)."""
     config = settings.FUEL_PLANNER
     status, payload = client.get_json(
         "nominatim",
@@ -123,16 +189,21 @@ def _nominatim(text: str, client: ExternalApiClient) -> Location | None:
         # Not cached, so the next request tries again.
         raise ExternalServiceError(f"nominatim answered HTTP {status}.")
     if not payload:
-        cache.set(key, (), _NOMINATIM_MISS_SECONDS)
-        return None
-    hit = payload[0]
-    values = (float(hit["lat"]), float(hit["lon"]), hit.get("display_name", text), "nominatim")
-    cache.set(key, values, _NOMINATIM_HIT_SECONDS)
-    return Location(text, *values)
+        value, seconds = ("miss",), _NOMINATIM_MISS_SECONDS
+    else:
+        hit = payload[0]
+        label = hit.get("display_name", text)
+        if (hit.get("category") or hit.get("class")) in _NOT_A_PLACE:
+            value, seconds = ("street", label), _NOMINATIM_MISS_SECONDS
+        else:
+            value, seconds = ("hit", float(hit["lat"]), float(hit["lon"]), label), _NOMINATIM_HIT_SECONDS
+    cache.set(key, value, seconds)
+    return value
 
 
 def geocode(text: str, client: ExternalApiClient, field: str) -> Location:
-    """Location for ``text``. Raises LocationNotFound / LocationOutsideUSA (HTTP 400).
+    """Location for ``text``. Raises LocationNotFound / LocationOutsideUSA (HTTP 400), or
+    NoFuelDataInRegion for a US territory (HTTP 422).
 
     ``field`` ("start" / "finish") is echoed in the error so the client knows which
     input was wrong.
@@ -142,7 +213,10 @@ def geocode(text: str, client: ExternalApiClient, field: str) -> Location:
         latitude, longitude = coordinates
         location = Location(text, latitude, longitude, f"{latitude:.5f},{longitude:.5f}", "coordinates")
     else:
-        location = _offline(text) or (_nominatim(text, client) if has_letters(text) else None)
+        location = _offline(text)
+        if location is None:
+            _reject_region_outside_the_states(text, field)
+            location = _nominatim(text, client, field) if has_letters(text) else None
         if location is None:
             raise LocationNotFound(
                 f"Could not find '{text}' in the USA. Use 'City, ST' (e.g. 'Austin, TX') or 'lat,lon'.",

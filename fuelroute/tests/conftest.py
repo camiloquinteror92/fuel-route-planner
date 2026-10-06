@@ -1,5 +1,6 @@
-"""Shared fixtures. No test touches the network: ``fuelroute.services.http.send`` (the
-only function that does) is replaced by ``upstream``, which records every call."""
+"""Shared fixtures. No test can touch the network: ``fuelroute.services.http.send`` (the
+only function that does) fails for every test (``clean_state``, autouse), and tests
+that need an external service ask for ``upstream``, a fake that records every call."""
 
 import json
 
@@ -71,8 +72,13 @@ def upstream(monkeypatch):
     return fake
 
 
+def _no_network(url, params, timeout):
+    raise AssertionError(f"a test tried to reach the network: {url} (ask for the upstream fixture)")
+
+
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch, settings):
+    monkeypatch.setattr(http, "send", _no_network)  # ``upstream`` replaces it with a fake
     cache.clear()
     reset_station_arrays()
     http._next_turn.clear()

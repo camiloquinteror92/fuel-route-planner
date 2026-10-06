@@ -444,6 +444,47 @@
           }
         }
       ]
+    },
+    {
+      "name": "11. Invalid: a city in Canada (Toronto, ON) -> 400 location_outside_usa, no call",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=Toronto, ON&finish=Austin, TX",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "Toronto, ON"
+            },
+            {
+              "key": "finish",
+              "value": "Austin, TX"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+              "const body = pm.response.json();",
+              "pm.test('location_outside_usa', () => pm.expect(body.error).to.eql('location_outside_usa'));",
+              "pm.test('says which field', () => pm.expect(body.field).to.eql('start'));",
+              "pm.test('no external call (not even a geocoding one)', () => pm.expect(body.meta.external_api_calls).to.eql(0));"
+            ]
+          }
+        }
+      ]
     }
   ]
 }

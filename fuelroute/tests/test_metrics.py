@@ -40,7 +40,9 @@ def test_stats_count_requests_calls_and_latency_by_outcome(client, upstream, sta
     requests = stats["route_requests"]
     assert requests["total"] == 4
     assert requests["by_status"] == {"200": 3, "400": 1}
-    assert requests["by_outcome"] == {"cold": 1, "route_cache_hit": 1, "plan_cache_hit": 1, "error": 1}
+    assert requests["by_outcome"] == {
+        "cold": 1, "nominatim_call": 0, "route_cache_hit": 1, "plan_cache_hit": 1, "error": 1,
+    }
     assert requests["errors"] == {"invalid_request": 1}
     assert requests["errors_without_external_calls"] == 1
 
@@ -49,7 +51,7 @@ def test_stats_count_requests_calls_and_latency_by_outcome(client, upstream, sta
     assert external["by_service"] == {"osrm": 1, "nominatim": 0}
     assert external["requests_with_osrm_calls"] == 1
     assert external["osrm_calls_per_routing_request"] == 1.0
-    assert external["max_calls_in_one_request"] == 1
+    assert external["max_calls_in_one_request"] == external["max_osrm_calls_in_one_request"] == 1
     assert external["total_ms"] == pytest.approx(responses[0].json()["meta"]["external_api_ms"], abs=0.1)
 
     latency = stats["latency_ms"]
@@ -82,10 +84,27 @@ def test_retries_and_upstream_errors_are_counted(client, upstream, stations):
     external = client.get("/api/stats").json()["external_api"]
     assert external["calls"] == 4
     assert external["osrm_calls_per_routing_request"] == 2.0
-    assert external["max_calls_in_one_request"] == 2
+    assert external["max_calls_in_one_request"] == external["max_osrm_calls_in_one_request"] == 2
     errors = client.get("/api/stats").json()["route_requests"]
     assert errors["errors"] == {"upstream_unavailable": 1}
     assert errors["errors_without_external_calls"] == 0
+
+
+@pytest.mark.django_db
+def test_geocoding_calls_are_kept_apart_from_the_routing_budget(client, upstream, stations):
+    # Regression: after a free-text trip (Nominatim + OSRM) the page said "at most 2
+    # OSRM calls in one request", and the cold latency included Nominatim's.
+    town = {"lat": "35.0", "lon": "-100.0", "category": "place", "type": "town", "display_name": "Somewhere, Texas"}
+    upstream.respond(lambda url, params: (200, [town]) if "nominatim" in url else OK_ROUTE)
+    assert client.get("/api/route", {"start": "Somewhere", "finish": FINISH}).status_code == 200
+    stats = client.get("/api/stats").json()
+    assert stats["route_requests"]["by_outcome"]["nominatim_call"] == 1
+    assert stats["latency_ms"]["cold"] is None and stats["latency_ms"]["nominatim_call"]["count"] == 1
+    external = stats["external_api"]
+    assert external["by_service"] == {"osrm": 1, "nominatim": 1}
+    assert external["max_calls_in_one_request"] == 2
+    assert external["max_osrm_calls_in_one_request"] == 1
+    assert external["osrm_calls_per_routing_request"] == 1.0
 
 
 @pytest.mark.django_db

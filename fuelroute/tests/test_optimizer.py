@@ -407,6 +407,37 @@ def test_consolidated_stops_are_flagged():
     # mile 10: only mile 10 changed; 490 and the last stop are the greedy's.
     assert [(s.candidate.mile, s.consolidated) for s in merged.stops] == [(10, True), (490, False), (900, False)]
     assert merged.stops[0].gallons == pytest.approx(48.0)
+    # Where mile 10's 48 gal were planned by the greedy: here, at mile 20 and at mile 480.
+    greedy = merged.before_consolidation
+    origins = {greedy[k].candidate.mile: gallons for k, gallons in merged.stops[0].sources.items()}
+    assert origins == {
+        10: pytest.approx(greedy[0].gallons), 20: pytest.approx(greedy[1].gallons), 480: pytest.approx(1.0),
+    }
+    assert merged.stops[1].sources == {3: pytest.approx(greedy[3].gallons)}  # untouched: only its own fuel
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_consolidation_says_where_each_gallon_was_planned(seed):
+    route, stations = _random_instance(seed)
+    try:
+        merged = plan(route, stations, initial=50, final=50, min_stop=10)
+    except UnreachableError:
+        return
+    greedy = merged.before_consolidation
+    received = [0.0] * len(greedy)
+    extra = 0.0
+    for stop in merged.stops:
+        assert greedy[stop.greedy_index].candidate == stop.candidate
+        assert stop.greedy_gallons == pytest.approx(greedy[stop.greedy_index].gallons)
+        assert sum(stop.sources.values()) == pytest.approx(stop.gallons)  # every gallon has an origin
+        for k, gallons in stop.sources.items():
+            assert gallons > 0
+            received[k] += gallons
+            extra += gallons * (stop.candidate.price - greedy[k].candidate.price)
+    # Nothing is lost or invented: each greedy purchase ends up somewhere, whole...
+    assert received == pytest.approx([s.gallons for s in greedy])
+    # ...and the cost of consolidation is exactly the cost of moving that fuel.
+    assert extra == pytest.approx(merged.total_cost - sum(s.cost for s in greedy))
 
 
 # Fingerprint of plan_fuel_stops on the 40 random instances above, with and without

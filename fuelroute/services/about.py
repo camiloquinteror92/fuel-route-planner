@@ -7,11 +7,15 @@ written by hand:
 * versions of the running Python / Django / DRF / numpy / urllib3, and the pins of
   ``requirements.txt``;
 * the git commit this checkout is at (and whether it has local changes or is not
-  pushed yet), plus the recent history, from ``git`` itself;
+  pushed yet), plus the recent history, from ``git`` itself. Links to GitHub point
+  to the newest commit GitHub has (``build.linked_commit``) with the line numbers
+  of the files AT THAT COMMIT (read with ``git cat-file``), so they open the right
+  line even before the latest work is pushed; a symbol, test or commit GitHub does
+  not have yet gets no link (``url`` null) instead of a broken one;
 * the vehicle and planner configuration (``settings.FUEL_PLANNER``);
 * counts of the loaded station data (ORM aggregates and the numpy arrays);
 * the last local pytest run, from its JUnit report (``pytest.ini`` writes it),
-  flagged ``stale`` when code changed after it;
+  flagged ``stale`` when code, templates, JavaScript or CSS changed after it;
 * an index of every test function and links to the code of each step, with line
   numbers from the AST of the source files;
 * the assessment requirements, each with how it is met and the code / tests that
@@ -52,6 +56,11 @@ from .places import get_place_index
 from .planner import SAME_PLACE_MILES
 from .stations import COARSE_STEP_MILES, data_version, get_station_arrays
 from .text import US_STATES
+
+# The contiguous states: where the price file has stations. DC is a district, not a
+# state, and is reported apart.
+LOWER_48 = tuple(sorted(code for code in US_STATES if code not in ("AK", "HI", "DC")))
+_THINNEST = 3
 
 SERVICE = "Spotter fuel route API"
 _GIT_TTL_SECONDS = 60.0
@@ -97,14 +106,16 @@ REQUIREMENTS: list[dict] = [
         "kind": "explicit",
         "brief": "The API takes a start and a finish location, both within the USA.",
         "how": (
-            "Inputs are 'City, ST' or 'lat,lon'. They are geocoded offline from an index of US places "
-            "(Census Gazetteer and GeoNames), so this costs no external call. A point outside the US outline is "
-            "rejected before any routing call (location_outside_usa), and so are Alaska and Hawaii, where the "
-            "price file has no stations (no_fuel_data_in_region)."
+            "Inputs are 'City, ST' or 'lat,lon'. 'lat,lon' is parsed and 'City, ST' is looked up in an offline index "
+            "of US places (Census Gazetteer and GeoNames), so neither costs an external call. Coordinates outside the "
+            "US outline are rejected by validation (invalid_request on the field); a place written with a Canadian "
+            "province or a Mexican state ('Toronto, ON') is location_outside_usa; Alaska, Hawaii and the territories, "
+            "where the price file has no stations, are no_fuel_data_in_region. All of it before any routing call."
         ),
         "sources": ["serializers.request", "geocoding.geocode", "places.index", "usa.in_usa", "planner.check_endpoints"],
         "tests": [
             "test_api::test_points_outside_the_usa_are_400_without_calls",
+            "test_api::test_places_written_with_a_region_outside_the_states_are_rejected_without_calls",
             "test_api::test_alaska_and_hawaii_are_422_before_routing",
             "test_geocoding::test_city_state_is_geocoded_offline",
             "test_geo::test_us_mask",
@@ -163,8 +174,9 @@ REQUIREMENTS: list[dict] = [
         "brief": "Return the total money spent on fuel, at {mpg} miles per gallon.",
         "how": (
             "summary.total_fuel_cost is the sum of the stop costs. With start_tank=empty (the default) every "
-            "mile driven is paid for, so the gallons bought are the miles divided by {mpg}; start_tank=full "
-            "counts only the fuel bought on the way."
+            "mile driven is paid for, so the gallons bought are the miles divided by {mpg}, except where the price "
+            "file has no station to buy from (then the gallons burned there are reported as unpriced, with a "
+            "warning); start_tank=full counts only the fuel bought on the way."
         ),
         "sources": ["planner.tank_rules", "planner.build_stops"],
         "tests": [
@@ -195,8 +207,8 @@ REQUIREMENTS: list[dict] = [
         "brief": "Use a free API for the map and the route.",
         "how": (
             "The public OSRM server (no key) returns the driving route as an encoded polyline, and the map uses "
-            "OpenStreetMap tiles. Nominatim is called only for free text that is neither 'City, ST' nor "
-            "'lat,lon'."
+            "OpenStreetMap tiles. Nominatim is called only for text the offline index cannot place (an address, a "
+            "landmark, a city without its state)."
         ),
         "sources": ["osrm.get_route", "http.client"],
         "tests": ["test_api::test_route_returns_plan_map_and_uses_one_external_call"],
@@ -205,7 +217,10 @@ REQUIREMENTS: list[dict] = [
         "id": "django_version",
         "kind": "explicit",
         "brief": "Build it with the latest stable Django.",
-        "how": "Pinned in requirements.txt; the version actually running is read from Django itself.",
+        "how": (
+            "Pinned in requirements.txt and read from Django itself at run time. Latest stable release on PyPI "
+            "when it was last checked: {django_latest} ({django_checked_on})."
+        ),
         "sources": [],
         "tests": [],
     },
@@ -216,8 +231,8 @@ REQUIREMENTS: list[dict] = [
         "how": (
             "Offline geocoding, one routing call with a compact polyline, a numpy corridor search in three passes, "
             "a reused HTTPS connection, a route cache and a plan cache (a repeated trip makes no external call), "
-            "and one routing call for identical concurrent trips. Every response carries X-Response-Time-ms and "
-            "a Server-Timing breakdown."
+            "one routing call for identical concurrent trips, and gzip on the wire. Every response carries "
+            "X-Response-Time-ms and a Server-Timing breakdown."
         ),
         "sources": ["osrm.get_route", "stations.stations_along_route", "planner.plan_trip", "middleware.response_time"],
         "tests": [
@@ -231,10 +246,10 @@ REQUIREMENTS: list[dict] = [
         "kind": "explicit",
         "brief": "Call the routing API as little as possible: one call is ideal, two or three acceptable.",
         "how": (
-            "One OSRM call per new trip, repeated at most {retries} time(s) on a transient failure. A repeated trip, "
-            "the other start_tank mode and the planner page reuse the cached plan or route with no call. "
+            "One OSRM call per new trip, {retry_rule}. A repeated trip, the other start_tank mode and the planner "
+            "page reuse the cached plan or route (kept {ttl_text} in each server process) with no call. "
             "meta.external_api_calls counts the calls on every response, errors included, and /api/stats counts "
-            "them since the server started."
+            "them per service since the server started."
         ),
         "sources": ["osrm.get_route", "http.client", "metrics.route_metrics"],
         "tests": [
@@ -250,7 +265,8 @@ REQUIREMENTS: list[dict] = [
         "brief": "Share the code on GitHub, with a Postman demo in a short Loom video.",
         "how": (
             "The repository has the code, the README, postman/collection.json with the trips and edge cases, "
-            "and the Loom script. This server reports the commit it runs."
+            "and the Loom script; the video link is published here when LOOM_URL is set. This server reports the "
+            "commit it runs and links to the code as GitHub has it."
         ),
         "sources": [],
         "tests": [],
@@ -272,15 +288,15 @@ REQUIREMENTS: list[dict] = [
         "kind": "implicit",
         "brief": "Clear errors for bad input and for failures of the free services.",
         "how": (
-            "Every error has the same body (error, detail, meta). Invalid input is rejected before any external "
-            "call; external calls have connect and read timeouts and are retried at most {retries} time(s) on a "
-            "transient failure; an upstream rate limit becomes upstream_busy with Retry-After; each client may send "
-            "{rate} requests per minute to /api/route."
+            "Every error has the same body (error, detail, meta), the framework's and the rate limit's included. "
+            "Invalid input is rejected before any external call; external calls have connect and read timeouts and "
+            "are {retry_rule}; an upstream rate limit becomes upstream_busy with Retry-After; each client may send "
+            "{rate} requests per minute to /api/route (the page itself is not counted)."
         ),
         "sources": ["serializers.request", "http.client", "middleware.rate_limit"],
         "tests": [
             "test_api::test_invalid_input_returns_400",
-            "test_api::test_drf_errors_use_the_same_format",
+            "test_api::test_every_error_code_of_the_catalog_has_the_same_body_with_meta",
             "test_api::test_transient_failure_is_retried_once",
             "test_api::test_routing_service_down_returns_502",
             "test_api::test_own_rate_limit_answers_429",
@@ -322,9 +338,10 @@ REQUIREMENTS: list[dict] = [
         "kind": "implicit",
         "brief": "Tested.",
         "how": (
-            "A pytest suite that never touches the network (the routing service is faked): the greedy against "
-            "an exact dynamic-programming solution, the corridor search against brute force, the price file "
-            "loader and the API end to end. The page reads the report of the last local run."
+            "A pytest suite that cannot touch the network (an autouse fixture makes any real HTTP call fail; the "
+            "routing service is faked): the greedy against an exact dynamic-programming solution, the corridor "
+            "search against brute force, the price file loader, the API end to end and this page's contract. The "
+            "page reads the report of the last local run."
         ),
         "sources": [],
         "tests": [],
@@ -353,6 +370,7 @@ _lock = threading.Lock()
 _git_cache: dict = {"at": None, "value": None}
 _junit_cache: dict = {}
 _ast_cache: dict = {}
+_blob_cache: dict = {}  # (commit, path) -> symbols of that file at that commit (immutable)
 _data_cache: dict = {}
 
 
@@ -362,6 +380,7 @@ def reset_caches() -> None:
         _git_cache.update(at=None, value=None)
         _junit_cache.clear()
         _ast_cache.clear()
+        _blob_cache.clear()
         _data_cache.clear()
 
 
@@ -397,30 +416,37 @@ def _pinned() -> dict:
     return pins
 
 
-def _git(*args: str) -> str | None:
+def _git(*args: str, stdin: bytes | None = None) -> str | None:
     """stdout of a git command in the project directory, or None (no git, not a repo, timeout)."""
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=_base_dir(),
             capture_output=True,
-            encoding="utf-8",
-            errors="replace",
+            input=stdin,
             timeout=_GIT_TIMEOUT_SECONDS,
             check=True,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def _git_info(repo_url: str) -> dict:
-    """Commit, local changes, pushed or not, and recent history. Cached for a minute."""
+    """Commit, local changes, what GitHub has, and recent history. Cached for a minute.
+
+    "On GitHub" means reachable from a remote-tracking branch (as of the last fetch
+    or push). ``linked_commit``: the newest commit of this history that GitHub has,
+    the one every link points to; null when GitHub has none of them.
+    """
     now = time.monotonic()
     with _lock:
         if _git_cache["at"] is not None and now - _git_cache["at"] < _GIT_TTL_SECONDS:
             return _git_cache["value"]
     log = _git("log", f"-n{_HISTORY_COMMITS}", "--format=%H%x1f%cI%x1f%s")
+    status = _git("status", "--porcelain", "--untracked-files=no") if log else None
+    remote = _git("rev-list", "--remotes", "--max-count=2000") if log else None
+    on_github = set((remote or "").split())
     history = []
     for line in (log or "").splitlines():
         parts = line.split("\x1f")
@@ -428,6 +454,7 @@ def _git_info(repo_url: str) -> dict:
             continue
         sha, date, subject = parts
         kind = _CONVENTIONAL.match(subject)
+        pushed = sha in on_github
         history.append(
             {
                 "commit": sha,
@@ -435,12 +462,12 @@ def _git_info(repo_url: str) -> dict:
                 "date": date,
                 "type": kind.group(1) if kind else None,
                 "subject": subject,
-                "url": f"{repo_url}/commit/{sha}",
+                "pushed": pushed,
+                "url": f"{repo_url}/commit/{sha}" if pushed else None,
             }
         )
-    status = _git("status", "--porcelain", "--untracked-files=no") if history else None
-    remote = _git("branch", "-r", "--contains", "HEAD") if history else None
     head = history[0] if history else None
+    linked = next((c for c in history if c["pushed"]), None)
     value = {
         "repo_url": repo_url,
         "commit": head["commit"] if head else None,
@@ -448,12 +475,41 @@ def _git_info(repo_url: str) -> dict:
         "commit_time": head["date"] if head else None,
         "subject": head["subject"] if head else None,
         "dirty": None if status is None else bool(status.strip()),
-        "pushed": None if remote is None else bool(remote.strip()),
+        "pushed": None if remote is None else bool(head and head["pushed"]),
+        "linked_commit": linked["commit"] if linked else None,
+        "linked_commit_short": linked["commit_short"] if linked else None,
+        "commits_not_on_github": None if remote is None else sum(1 for c in history if not c["pushed"]),
         "history": history,
     }
     with _lock:
         _git_cache.update(at=now, value=value)
     return value
+
+
+def _git_blobs(commit: str, paths: list[str]) -> dict[str, str | None]:
+    """Text of each file at ``commit`` (None when it does not exist there), in ONE git call."""
+    request = "".join(f"{commit}:{path}\n" for path in paths).encode()
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "--batch"], cwd=_base_dir(), input=request, capture_output=True,
+            timeout=_GIT_TIMEOUT_SECONDS, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out, position, texts = result.stdout, 0, {}
+    for path in paths:
+        end = out.find(b"\n", position)
+        if end < 0:
+            break
+        header = out[position:end].split()
+        position = end + 1
+        if len(header) == 3 and header[1] == b"blob":
+            size = int(header[2])
+            texts[path] = out[position:position + size].decode("utf-8", errors="replace")
+            position += size + 1  # the blob is followed by a newline
+        else:  # "<commit>:<path> missing"
+            texts[path] = None
+    return texts
 
 
 # --- tests: the JUnit report of the last pytest run, and an index of the test functions ----
@@ -530,32 +586,28 @@ def _junit_summary(path: Path) -> tuple[dict, dict | None]:
     return {**summary, "stale": _code_changed_since(mtime)}, cases
 
 
+_STALE_PATTERNS = ("*.py", "*.html", "*.js", "*.css")
+
+
 def _code_changed_since(mtime: float) -> bool:
-    """Is any .py file of the app or the project settings newer than the report?"""
+    """Is any code, template, script or stylesheet of the app, or the settings, newer than the report?"""
     base = _base_dir()
     for folder in ("fuelroute", "config"):
-        for path in (base / folder).rglob("*.py"):
-            try:
-                if path.stat().st_mtime > mtime:
-                    return True
-            except OSError:
-                continue
+        for pattern in _STALE_PATTERNS:
+            for path in (base / folder).rglob(pattern):
+                try:
+                    if path.stat().st_mtime > mtime:
+                        return True
+                except OSError:
+                    continue
     return False
 
 
-def _symbols(path: Path) -> dict[str, tuple[int, int]]:
-    """Qualified name -> (first line, last line) of every function / class / method of a file."""
+def _symbols_of(source: str) -> dict[str, tuple[int, int]]:
+    """Qualified name -> (first line, last line) of every function / class / method of a source."""
     try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return {}
-    with _lock:
-        cached = _ast_cache.get(str(path))
-    if cached and cached[0] == mtime:
-        return cached[1]
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
         return {}
     symbols: dict[str, tuple[int, int]] = {}
     kinds = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -569,9 +621,75 @@ def _symbols(path: Path) -> dict[str, tuple[int, int]]:
                     visit(node.body, f"{prefix}{node.name}.")
 
     visit(tree.body)
+    return symbols
+
+
+def _symbols(path: Path) -> dict[str, tuple[int, int]]:
+    """Symbols of a file of this checkout (cached per modification time)."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    with _lock:
+        cached = _ast_cache.get(str(path))
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        symbols = _symbols_of(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
     with _lock:
         _ast_cache[str(path)] = (mtime, symbols)
     return symbols
+
+
+class _GitHubLines:
+    """Line numbers of symbols as GitHub shows them at ``build.linked_commit``.
+
+    When that commit is the checkout itself (pushed, no local changes) the files on
+    disk are used. Otherwise each file is read from git at that commit, all in one
+    ``git cat-file`` call, and cached for good (a commit never changes). Without git
+    the links fall back to ``main`` and the local lines (best effort).
+    """
+
+    def __init__(self, build: dict, paths: list[str]):
+        self.commit = build.get("linked_commit")
+        self.local = self.commit is None or (self.commit == build.get("commit") and build.get("dirty") is False)
+        self.ref = self.commit or ("main" if build.get("commit") is None else None)
+        self.symbols: dict[str, dict] = {}
+        if self.local:
+            return
+        missing = []
+        with _lock:
+            for path in paths:
+                cached = _blob_cache.get((self.commit, path))
+                if cached is None:
+                    missing.append(path)
+                else:
+                    self.symbols[path] = cached
+        if missing:
+            texts = _git_blobs(self.commit, missing)
+            for path in missing:
+                if path not in texts:  # git failed: unknown, not cached
+                    continue
+                symbols = _symbols_of(texts[path]) if texts[path] is not None else {}
+                self.symbols[path] = symbols
+                with _lock:
+                    _blob_cache[(self.commit, path)] = symbols
+
+    def lines(self, path: str, symbol: str) -> tuple[int, int] | None:
+        if self.ref is None:  # git works but GitHub has none of this history
+            return None
+        if self.local:
+            return _symbols(_base_dir() / path).get(symbol)
+        return self.symbols.get(path, {}).get(symbol)
+
+    def url(self, repo_url: str, path: str, symbol: str, whole_range: bool = True) -> tuple[str | None, list | None]:
+        found = self.lines(path, symbol)
+        if not found:
+            return None, None
+        start, end = found
+        return _blob_url(repo_url, self.ref, path, start, end if whole_range else None), [start, end]
 
 
 def _blob_url(repo_url: str, ref: str, path: str, start: int | None = None, end: int | None = None) -> str:
@@ -581,20 +699,25 @@ def _blob_url(repo_url: str, ref: str, path: str, start: int | None = None, end:
     return url
 
 
-def _test_index(repo_url: str, ref: str, results: dict | None) -> dict:
+def _test_files() -> list[str]:
+    base = _base_dir()
+    return [path.relative_to(base).as_posix() for path in sorted((base / "fuelroute" / "tests").glob("test_*.py"))]
+
+
+def _test_index(repo_url: str, github: _GitHubLines, results: dict | None) -> dict:
     index = {}
     base = _base_dir()
-    for path in sorted((base / "fuelroute" / "tests").glob("test_*.py")):
-        relative = path.relative_to(base).as_posix()
-        for name, (start, _end) in _symbols(path).items():
+    for relative in _test_files():
+        for name, (start, _end) in _symbols(base / relative).items():
             if not name.split(".")[-1].startswith("test"):
                 continue
             key = f"{relative}::{name.replace('.', '::')}"
             result = None if results is None else results.get(key, {"cases": 0, "passed": 0, "failed": 0})
+            url, _lines = github.url(repo_url, relative, name, whole_range=False)
             index[key] = {
                 "path": relative,
                 "line": start,
-                "url": _blob_url(repo_url, ref, relative, start),
+                "url": url,  # null: this test is not on GitHub yet
                 "cases": None if result is None else result["cases"],
                 "passed": None if result is None else result["passed"],
                 "failed": None if result is None else result["failed"],
@@ -602,16 +725,18 @@ def _test_index(repo_url: str, ref: str, results: dict | None) -> dict:
     return index
 
 
-def _code_links(repo_url: str, ref: str) -> dict:
+def _code_links(repo_url: str, github: _GitHubLines) -> dict:
     links = {}
     for key, (path, symbol) in CODE_LINKS.items():
         start, end = _symbols(_base_dir() / path).get(symbol, (None, None))
+        url, url_lines = github.url(repo_url, path, symbol)
         links[key] = {
             "path": path,
             "symbol": symbol,
-            "start_line": start,
+            "start_line": start,  # in this checkout
             "end_line": end,
-            "url": _blob_url(repo_url, ref, path, start, end),
+            "url": url,  # null: not on GitHub yet (new file or symbol)
+            "url_lines": url_lines,  # the lines the url opens, at build.linked_commit
         }
     return links
 
@@ -653,6 +778,8 @@ def _data_summary() -> dict:
         "states": 0,
         "stations_by_state": [],
         "states_without_stations": [],
+        "thinnest_states": [],
+        "district_of_columbia_geocoded": 0,
         "price_per_gallon": None,
         "places_index_entries": len(get_place_index()),
     }
@@ -671,7 +798,8 @@ def _data_summary() -> dict:
         .annotate(stations=Count("id"), geocoded=Count("id", filter=located))
         .order_by("-stations", "state")
     )
-    with_coordinates = {row["state"] for row in by_state if row["geocoded"]}
+    geocoded_in = {row["state"]: row["geocoded"] for row in by_state}
+    in_lower_48 = sorted((geocoded_in.get(code, 0), code) for code in LOWER_48)
     prices = arrays.price
     summary.update(
         stations=totals["stations"],
@@ -683,9 +811,10 @@ def _data_summary() -> dict:
         stations_by_state=[
             {"state": row["state"], "stations": row["stations"], "geocoded": row["geocoded"]} for row in by_state
         ],
-        states_without_stations=sorted(
-            code for code in US_STATES if code not in ("AK", "HI") and code not in with_coordinates
-        ),
+        # Lower 48 only: a state whose stations all lack coordinates counts as without.
+        states_without_stations=[code for count, code in in_lower_48 if count == 0],
+        thinnest_states=[{"state": code, "geocoded": count} for count, code in in_lower_48 if count > 0][:_THINNEST],
+        district_of_columbia_geocoded=geocoded_in.get("DC", 0),
         price_per_gallon=(
             {
                 "min": round(float(prices.min()), 4),
@@ -743,7 +872,7 @@ def _external_services(config: dict) -> list[dict]:
         {"name": "osrm", "purpose": "Driving route: one call per new trip, cached.", "url": config["OSRM_URL"]},
         {
             "name": "nominatim",
-            "purpose": "Geocoding of free text that is neither 'City, ST' nor 'lat,lon' (rare, cached).",
+            "purpose": "Geocoding of text the offline index cannot place: an address, a landmark (rare, cached).",
             "url": config["NOMINATIM_URL"],
         },
         {
@@ -779,9 +908,33 @@ def _template_values(config: dict) -> dict:
         "max_fix": f"{config['MAX_CONSOLIDATION_COST']:.2f}",
         "policy": f"{config['PRICE_POLICY']} of its quotes",
         "retries": int(config["HTTP_RETRIES"]),
+        "retry_rule": _retry_rule(int(config["HTTP_RETRIES"])),
         "rate": config["RATE_LIMIT_PER_MINUTE"],
         "ttl": _plan_cache_seconds(),
+        "ttl_text": _duration_text(_plan_cache_seconds()),
+        "django_latest": config["DJANGO_LATEST_STABLE"],
+        "django_checked_on": config["DJANGO_LATEST_CHECKED_ON"],
     }
+
+
+def _retry_rule(retries: int) -> str:
+    if retries <= 0:
+        return "never retried"
+    if retries == 1:
+        return "retried once on a transient failure"
+    return f"retried up to {retries} times on a transient failure"
+
+
+def _duration_text(seconds: int | None) -> str:
+    if seconds is None:
+        return "with no expiry"
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"for {hours} hour{'s' if hours != 1 else ''}"
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"for {minutes} minute{'s' if minutes != 1 else ''}"
+    return f"for {seconds} seconds"
 
 
 def _requirements(config: dict) -> list[dict]:
@@ -825,8 +978,7 @@ def build_about() -> dict:
     config = settings.FUEL_PLANNER
     repo_url = str(config["REPO_URL"]).rstrip("/")
     build = _git_info(repo_url)
-    # Link to the exact commit when GitHub has it; otherwise to main.
-    ref = build["commit"] if build["commit"] and build["pushed"] else "main"
+    github = _GitHubLines(build, sorted({path for path, _ in CODE_LINKS.values()} | set(_test_files())))
     tests, results = _junit_summary(Path(config["TEST_REPORT_FILE"]))
     return {
         "service": SERVICE,
@@ -836,11 +988,19 @@ def build_about() -> dict:
         "vehicle": _vehicle(config),
         "planner": _planner(config),
         "external_services": _external_services(config),
-        "api": {"include_values": list(INCLUDE_VALUES), "params": _params()},
+        "api": {"include_values": list(INCLUDE_VALUES), "params": _params(), "state_codes": sorted(US_STATES)},
+        "deliverables": {
+            "loom_url": str(config.get("LOOM_URL") or "") or None,
+            "postman_collection": "postman/collection.json",
+            "release_check": {
+                "django_latest_stable": config["DJANGO_LATEST_STABLE"],
+                "checked_on": config["DJANGO_LATEST_CHECKED_ON"],
+            },
+        },
         "data": copy.deepcopy(_data_summary()),
         "tests": tests,
-        "test_index": _test_index(repo_url, ref, results),
-        "code_links": _code_links(repo_url, ref),
+        "test_index": _test_index(repo_url, github, results),
+        "code_links": _code_links(repo_url, github),
         "requirements": _requirements(config),
         "errors": error_catalog(),
         "endpoints": [dict(endpoint) for endpoint in ENDPOINTS],

@@ -38,6 +38,64 @@ US_STATES = {
 _STATE_BY_NAME = {name.lower(): code for code, name in US_STATES.items()}
 _STATE_BY_NAME["washington dc"] = _STATE_BY_NAME["district of columbia"]
 
+# Regions that are NOT US states, recognised in "City, XX" so that "Toronto, ON" is
+# answered "outside the USA" at once instead of being sent to a geocoder restricted
+# to the USA (which then matches a street called "Toronto Court"). A code that is
+# also a US state code is never read as foreign: the US state wins.
+US_TERRITORIES = {
+    "PR": "Puerto Rico", "VI": "U.S. Virgin Islands", "GU": "Guam", "AS": "American Samoa",
+    "MP": "Northern Mariana Islands", "UM": "U.S. Minor Outlying Islands",
+}
+CANADA_PROVINCES = {
+    "AB": "Alberta", "BC": "British Columbia", "MB": "Manitoba", "NB": "New Brunswick",
+    "NL": "Newfoundland and Labrador", "NS": "Nova Scotia", "NT": "Northwest Territories", "NU": "Nunavut",
+    "ON": "Ontario", "PE": "Prince Edward Island", "QC": "Quebec", "SK": "Saskatchewan", "YT": "Yukon",
+}
+# ISO 3166-2:MX codes (three letters) and the usual abbreviations. "NL" (Nuevo Leon,
+# also Newfoundland) and "BC" (Baja California, also British Columbia) are outside
+# the USA either way.
+MEXICO_STATES = {
+    "AGU": "Aguascalientes", "BCN": "Baja California", "BCS": "Baja California Sur", "CAM": "Campeche",
+    "CHP": "Chiapas", "CHH": "Chihuahua", "CMX": "Ciudad de Mexico", "COA": "Coahuila", "COL": "Colima",
+    "DUR": "Durango", "GUA": "Guanajuato", "GRO": "Guerrero", "HID": "Hidalgo", "JAL": "Jalisco",
+    "MEX": "Estado de Mexico", "MIC": "Michoacan", "MOR": "Morelos", "NAY": "Nayarit", "NLE": "Nuevo Leon",
+    "OAX": "Oaxaca", "PUE": "Puebla", "QUE": "Queretaro", "ROO": "Quintana Roo", "SLP": "San Luis Potosi",
+    "SIN": "Sinaloa", "SON": "Sonora", "TAB": "Tabasco", "TAM": "Tamaulipas", "TLA": "Tlaxcala",
+    "VER": "Veracruz", "YUC": "Yucatan", "ZAC": "Zacatecas",
+}
+_MEXICO_ALIASES = {"CDMX": "CMX", "DF": "CMX", "QROO": "ROO", "NL": "NLE"}
+_COUNTRIES = {"canada": "Canada", "mexico": "Mexico"}
+
+TERRITORY, CANADA, MEXICO = "us_territory", "canada", "mexico"
+
+
+def foreign_region(value: str, codes_only: bool = False) -> tuple[str, str] | None:
+    """(kind, name) when ``value`` is a US territory, a Canadian province or territory,
+    a Mexican state, or Canada / Mexico themselves; None otherwise (US states too).
+
+    "ON" -> ("canada", "Ontario"); "Nuevo León" -> ("mexico", "Nuevo Leon");
+    "PR" -> ("us_territory", "Puerto Rico"). ``codes_only``: match codes, not names.
+    """
+    code = " ".join(value.replace(".", "").split()).upper()
+    if code in US_STATES:
+        return None
+    if code in US_TERRITORIES:
+        return TERRITORY, US_TERRITORIES[code]
+    if code in CANADA_PROVINCES:
+        return CANADA, CANADA_PROVINCES[code]
+    if code in MEXICO_STATES or code in _MEXICO_ALIASES:
+        return MEXICO, MEXICO_STATES[_MEXICO_ALIASES.get(code, code)]
+    if codes_only:
+        return None
+    name = normalize_place(value)
+    if name in _COUNTRIES:
+        return (CANADA if name == "canada" else MEXICO), _COUNTRIES[name]
+    for kind, table in ((TERRITORY, US_TERRITORIES), (CANADA, CANADA_PROVINCES), (MEXICO, MEXICO_STATES)):
+        for full in table.values():
+            if normalize_place(full) == name:
+                return kind, full
+    return None
+
 
 def normalize_place(name: str) -> str:
     """Lowercase, strip accents and punctuation, expand common abbreviations.

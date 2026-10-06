@@ -4,6 +4,8 @@ The synthetic route runs east along latitude 35 from (35, -100) to (35, -88):
 about 680 road miles, 1 degree of longitude ~ 56.7 miles.
 """
 
+import gzip
+import json
 import threading
 import time
 from datetime import datetime
@@ -16,6 +18,8 @@ from rest_framework.test import APIClient
 
 from fuelroute.models import FuelStation
 from fuelroute.renderers import TimedJSONRenderer
+from fuelroute.services.about import error_catalog
+from fuelroute.services.errors import PlannerError
 from fuelroute.services.geocoding import Location
 from fuelroute.services.http import ExternalApiClient
 from fuelroute.services.osrm import get_route
@@ -159,6 +163,26 @@ def test_response_explains_the_pipeline_and_compares_strategies(client, upstream
     assert stops[0]["decision"]["rule"] == "reach_cheaper"
     assert stops[0]["decision"]["cheaper_station_mile"] == stops[1]["mile_marker"]
     assert any(s["decision"]["consolidated"] for s in stops)  # this trip has stops under the minimum
+    # ...and what its fuel covers in the FINAL plan: the next stop or the destination,
+    # with the fuel consolidation moved here or away (regression: a consolidated stop
+    # was explained with a station that was no longer in the plan).
+    for n, stop in enumerate(stops):
+        decision = stop["decision"]
+        following = stops[n + 1] if n + 1 < len(stops) else None
+        assert decision["reaches"] == {
+            "stop": following["stop"] if following else None,
+            "mile": following["mile_marker"] if following else body["route"]["distance_miles"],
+        }
+        moved_here = sum(m["gallons"] for m in decision["moved_in"])
+        moved_away = sum(m["gallons"] for m in decision["moved_out"])
+        assert stop["gallons"] == pytest.approx(decision["greedy_gallons"] + moved_here - moved_away, abs=0.02)
+        if decision["moved_in"] or decision["moved_out"]:
+            assert decision["consolidated"]
+        for moved in decision["moved_in"]:
+            if moved["from_stop"] is not None:
+                assert stops[moved["from_stop"] - 1]["mile_marker"] == moved["mile"]
+        tank = (stop["fuel_on_arrival_gallons"] + stop["gallons"]) >= body["vehicle"]["tank_gallons"] - 0.01
+        assert decision["fills_tank"] == tank
 
     comparison = summary["comparison"]
     optimized = comparison["optimized"]
@@ -228,6 +252,9 @@ def test_response_explains_the_pipeline_and_compares_strategies(client, upstream
         before["total_fuel_cost"]
     )
     assert optimizer["consolidation_extra_cost"] >= 0
+    # Per stop, the extra cost of the fuel moved there adds up to the consolidation's cost.
+    per_stop = sum(_dec(s["decision"]["consolidation_extra_cost"]) for s in stops)
+    assert per_stop == pytest.approx(_dec(optimizer["consolidation_extra_cost"]), abs=Decimal("0.01") * len(stops))
 
 
 @pytest.mark.django_db
@@ -587,6 +614,58 @@ def test_drf_errors_use_the_same_format(client):
     assert put.status_code == 405 and put.json()["error"] == "method_not_allowed"
 
 
+def _planner_error_codes(cls=PlannerError) -> set[str]:
+    return {cls.code}.union(*(_planner_error_codes(sub) for sub in cls.__subclasses__()))
+
+
+@pytest.mark.django_db
+def test_every_error_code_of_the_catalog_has_the_same_body_with_meta(client, upstream, stations, settings, monkeypatch):
+    # Regression: DRF's errors, the JSON 404 and the 429 came without meta, although
+    # the catalog says every error has {error, detail, meta}.
+    answers = {
+        "invalid_request": client.get("/api/route"),
+        "parse_error": client.post("/api/route", data="{not json", content_type="application/json"),
+        "unsupported_media_type": client.post("/api/route", data="start=a", content_type="text/plain"),
+        "method_not_allowed": client.put("/api/route", {}, format="json"),
+        "not_acceptable": client.get("/api/route", HTTP_ACCEPT="text/csv"),
+        "not_found": client.get("/api/nope"),
+    }
+    monkeypatch.setitem(settings.FUEL_PLANNER, "RATE_LIMIT_PER_MINUTE", 1)
+    answers["rate_limited"] = get(client)
+    for code, response in answers.items():
+        body = response.json()
+        assert body["error"] == code, body
+        assert body["detail"]
+        assert body["meta"] == {"external_api_calls": 0, "external_api_services": []}, code
+    # The other codes are PlannerErrors, whose body always gets meta (test_errors_report_*).
+    assert {error["code"] for error in error_catalog()} <= set(answers) | _planner_error_codes()
+    assert upstream.calls == []
+
+
+@pytest.mark.django_db
+def test_rate_limit_counts_the_endpoint_not_the_page(client, upstream, stations, settings, monkeypatch):
+    # Regression: /api/route/map shared the quota, and the 61st reload of the page
+    # answered a JSON 429 instead of the page.
+    monkeypatch.setitem(settings.FUEL_PLANNER, "RATE_LIMIT_PER_MINUTE", 2)
+    for _ in range(4):
+        assert client.get("/api/route/map").status_code == 200
+    upstream.respond(OK_ROUTE)
+    assert [get(client).status_code for _ in range(3)] == [200, 200, 429]
+
+
+@pytest.mark.django_db
+def test_answers_are_gzipped_for_clients_that_accept_it(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    plain = get(client)
+    zipped = client.get("/api/route", {"start": START, "finish": FINISH}, HTTP_ACCEPT_ENCODING="gzip, deflate")
+    assert not plain.has_header("Content-Encoding")
+    assert zipped["Content-Encoding"] == "gzip"
+    assert len(zipped.content) < len(plain.content) / 3
+    assert json.loads(gzip.decompress(zipped.content))["fuel_stops"] == plain.json()["fuel_stops"]
+    page = client.get("/api/route/map", HTTP_ACCEPT_ENCODING="gzip")
+    assert page["Content-Encoding"] == "gzip"
+
+
 @pytest.mark.django_db
 def test_trailing_slash_and_unknown_paths(client):
     assert client.get("/api/route/").json()["error"] == "invalid_request"  # same endpoint
@@ -597,13 +676,71 @@ def test_trailing_slash_and_unknown_paths(client):
 
 @pytest.mark.django_db
 def test_errors_report_the_external_calls_already_made(client, upstream, stations):
-    # Free text goes to Nominatim (filtered to the USA): "Toronto, ON" is not found.
+    # Free text goes to Nominatim (filtered to the USA), which finds nothing.
     upstream.respond((200, []))
-    response = client.get("/api/route", {"start": "Toronto, ON", "finish": FINISH})
+    response = client.get("/api/route", {"start": "Nowhere in particular", "finish": FINISH})
     assert response.status_code == 400
     body = response.json()
     assert body["error"] == "location_not_found"
     assert body["meta"] == {"external_api_calls": 1, "external_api_services": ["nominatim"]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("start", "status", "error"),
+    [
+        # Regression: "Toronto, ON" went to Nominatim, matched "Toronto Court" in
+        # Indianapolis and a 1,101-mile trip was planned without any error.
+        ("Toronto, ON", 400, "location_outside_usa"),
+        ("Toronto ON", 400, "location_outside_usa"),
+        ("Vancouver, BC", 400, "location_outside_usa"),
+        ("Toronto, Ontario, Canada", 400, "location_outside_usa"),
+        ("Monterrey, NL", 400, "location_outside_usa"),
+        ("Monterrey, Nuevo León", 400, "location_outside_usa"),
+        ("Tijuana, Mexico", 400, "location_outside_usa"),
+        ("San Juan, PR", 422, "no_fuel_data_in_region"),
+        ("Austin, TZ", 400, "location_not_found"),  # a typo: not a US state, not a place abroad
+    ],
+)
+def test_places_written_with_a_region_outside_the_states_are_rejected_without_calls(
+    client, upstream, stations, start, status, error
+):
+    response = client.get("/api/route", {"start": start, "finish": FINISH})
+    assert response.status_code == status
+    body = response.json()
+    assert body["error"] == error
+    assert body["field"] == "start"
+    assert body["meta"] == {"external_api_calls": 0, "external_api_services": []}
+    assert upstream.calls == []
+
+
+@pytest.mark.django_db
+def test_a_street_matched_by_free_text_is_not_a_place(client, upstream, stations):
+    street = {
+        "lat": "39.7", "lon": "-86.2", "category": "highway", "type": "residential", "addresstype": "road",
+        "display_name": "Toronto Court, Westover, Indianapolis, Indiana, United States",
+    }
+    upstream.respond((200, [street]))
+    for _ in range(2):  # the rejection is cached: one Nominatim call in total
+        response = client.get("/api/route", {"start": "Toronto Ontario", "finish": FINISH})
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error"] == "location_not_found"
+        assert "Toronto Court" in body["detail"]
+    assert len(upstream.calls) == 1
+
+
+@pytest.mark.django_db
+def test_free_text_match_is_planned_with_a_warning_that_names_it(client, upstream, stations):
+    town = {"lat": "35.0", "lon": "-100.0", "category": "place", "type": "town", "display_name": "Somewhere, Texas"}
+    upstream.respond(lambda url, params: (200, [town]) if "nominatim" in url else OK_ROUTE)
+    body = client.get("/api/route", {"start": "Somewhere", "finish": FINISH}).json()
+    assert body["start"]["geocoder"] == "nominatim"
+    assert any("'Somewhere'" in w and "Somewhere, Texas" in w for w in body["warnings"])
+    # The warning depends on the text typed, not on the plan: a cache hit by coordinates has none.
+    again = client.get("/api/route", {"start": "35.0,-100.0", "finish": FINISH}).json()
+    assert again["meta"]["plan_cache"] == "hit"
+    assert not any("free-text" in w for w in again["warnings"])
 
 
 # --- upstream failures --------------------------------------------------------------------
@@ -678,6 +815,12 @@ def test_new_station_data_is_used_without_restart(client, upstream, stations):
     assert second["meta"]["plan_cache"] == "miss"
     assert second["meta"]["external_api_calls"] == 0  # the route itself is still cached
     assert second["summary"]["total_fuel_cost"] < first["summary"]["total_fuel_cost"]
+
+
+def test_the_suite_cannot_reach_the_network():
+    # Without the upstream fixture any real HTTP call fails the test (conftest.clean_state).
+    with pytest.raises(AssertionError, match="network"):
+        ExternalApiClient().get_json("osrm", "https://router.project-osrm.org/route/v1/driving/0,0;1,1")
 
 
 def test_identical_concurrent_requests_make_one_routing_call(upstream):

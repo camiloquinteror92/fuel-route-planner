@@ -28,14 +28,14 @@ class PlannerError(Exception):
 
 
 class LocationNotFound(PlannerError):
-    """start or finish is not a known US place (offline index, then Nominatim for free text)."""
+    """Not a known US place: unknown to the index and Nominatim, a state code that does not exist, or a street."""
 
     status_code = 400
     code = "location_not_found"
 
 
 class LocationOutsideUSA(PlannerError):
-    """The place was found, but it is outside the USA."""
+    """Outside the USA: "City, XX" with a Canadian province or a Mexican state ("Toronto, ON"), or text found abroad."""
 
     status_code = 400
     code = "location_outside_usa"
@@ -49,7 +49,7 @@ class SameLocation(PlannerError):
 
 
 class NoFuelDataInRegion(PlannerError):
-    """Alaska / Hawaii: valid US places, but the price file has no station there."""
+    """Alaska, Hawaii or a US territory: valid US places, but the price file has no station there."""
 
     status_code = 422
     code = "no_fuel_data_in_region"

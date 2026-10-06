@@ -36,8 +36,11 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    # Outermost, so the header measures the whole request.
+    # Outermost, so the header measures the whole request (compression included).
     "fuelroute.middleware.ResponseTimeMiddleware",
+    # A coast-to-coast plan is ~110 KB of JSON and the page ~100 KB of HTML; gzip
+    # sends a fraction of that to clients that accept it (curl, Postman, browsers).
+    "django.middleware.gzip.GZipMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "fuelroute.middleware.RateLimitMiddleware",
@@ -129,7 +132,7 @@ FUEL_PLANNER = {
     "HTTP_RETRIES": int(_env("HTTP_RETRIES", "1")),
     # Nominatim's policy asks for an identifying User-Agent; add a contact URL/email.
     "USER_AGENT": _env("HTTP_USER_AGENT", "spotter-fuel-route/1.0 (coding assessment)"),
-    # Requests per minute per client IP on /api/route and its page (0 = no limit);
+    # Requests per minute per client IP on /api/route (0 = no limit); the planner page,
     # /api/stats and /api/about never leave the server and are not limited. Protects the free
     # upstream services from a loop or a Postman runner.
     "RATE_LIMIT_PER_MINUTE": int(_env("RATE_LIMIT_PER_MINUTE", "60")),
@@ -139,6 +142,12 @@ FUEL_PLANNER = {
     # local pytest run (pytest.ini writes it there).
     "REPO_URL": _env("REPO_URL", "https://github.com/camiloquinteror92/fuel-route-planner"),
     "TEST_REPORT_FILE": Path(_env("TEST_REPORT_FILE", str(BASE_DIR / ".reports" / "pytest.xml"))),
+    # The Loom video of the deliverables, linked from the page once it exists.
+    "LOOM_URL": _env("LOOM_URL", ""),
+    # "Latest stable Django": what PyPI said and when it was checked. The running and
+    # pinned versions are read at run time; this is the only part that needs a date.
+    "DJANGO_LATEST_STABLE": _env("DJANGO_LATEST_STABLE", "6.1.1"),
+    "DJANGO_LATEST_CHECKED_ON": _env("DJANGO_LATEST_CHECKED_ON", "2026-10-06"),
     # Data files (committed; see scripts/ for how they are built)
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
     "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Spotter Fuel Route API",
-    "description": "Route + cheapest fuel stops inside the USA. Start the server with `python manage.py runserver` and run the requests in order. Run each request twice: the second run is served from the cache (see `meta.external_api_calls` and the `X-Response-Time-ms` header). Requests 1-4 make one call each to the public OSRM server the first time.",
+    "description": "Route + cheapest fuel stops inside the USA. Start the server with `python manage.py runserver` and run the requests in order. Run each request twice: the second run is served from the cache (see `meta.external_api_calls` and the `X-Response-Time-ms` header). Requests 1-4 make one call each to the public OSRM server the first time. Every /api/route response has a `Server-Timing` header with the time of each step (the Postman console of request 1 prints it), `summary.comparison` (the same trip for a price-blind driver) and `pipeline` (how the plan was computed). Requests 9 and 10 read the server's own counters and self-description.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -63,7 +63,15 @@
               "  pm.expect(sum).to.eql(Math.round(body.summary.total_fuel_cost * 100));",
               "});",
               "console.log('stops', body.summary.number_of_stops, 'cost $' + body.summary.total_fuel_cost, 'time', pm.response.headers.get('X-Response-Time-ms') + ' ms');",
-              "console.log('map:', body.map.map_url);"
+              "console.log('map:', body.map.map_url);",
+              "pm.test('Server-Timing breaks the time down', () => {",
+              "  pm.expect(pm.response.headers.get('Server-Timing')).to.include('total;dur=');",
+              "});",
+              "console.log('external calls', body.meta.external_api_calls, (body.meta.external_api_services || []).join(',') || '-',",
+              "  '| plan cache', body.meta.plan_cache, '| route cache', body.meta.route_cache);",
+              "console.log('Server-Timing:', pm.response.headers.get('Server-Timing'));",
+              "const blind = body.summary.comparison && body.summary.comparison.savings_vs_price_blind;",
+              "if (blind) console.log('vs a price-blind driver: saves $' + blind.amount + ' (' + blind.percent + '%), stops +' + blind.extra_stops);"
             ]
           }
         }
@@ -314,6 +322,124 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Same trip with include=candidates (map layer, 0 calls after request 1)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&include=candidates",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "include",
+              "value": "candidates",
+              "description": "Adds every station within the corridor (price, mile marker, plan stop). It does not change the plan and shares its cache."
+            }
+          ]
+        },
+        "description": "The extra block the planner page draws as the corridor layer. After request 1 it is a plan cache hit: no external call."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('one row per corridor station', () => {",
+              "  pm.expect(body.candidates.rows.length).to.eql(body.summary.candidate_stations_on_route);",
+              "});",
+              "pm.test('served from the plan cache of request 1 (0 calls)', () => {",
+              "  pm.expect(body.meta.plan_cache).to.eql('hit');",
+              "  pm.expect(body.meta.external_api_calls).to.eql(0);",
+              "});",
+              "console.log('Server-Timing:', pm.response.headers.get('Server-Timing'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. GET /api/stats (requests, external calls, latency since start)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/stats",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "stats"
+          ]
+        },
+        "description": "Counters of this server process for /api/route: requests by status and outcome (cold, route cache, plan cache, error), external calls by service, latency percentiles. No locations are stored. Not rate limited, no external call."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const stats = pm.response.json();",
+              "pm.test('counts the route requests', () => pm.expect(stats.route_requests.total).to.be.at.least(0));",
+              "console.log('requests', JSON.stringify(stats.route_requests.by_outcome));",
+              "console.log('OSRM calls per routing request', stats.external_api.osrm_calls_per_routing_request);",
+              "console.log('latency', JSON.stringify(stats.latency_ms));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "10. GET /api/about (versions, data, requirements, tests, errors)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/about",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "about"
+          ]
+        },
+        "description": "What the server runs (Python, Django, commit), the loaded station data, each requirement of the assessment with the code and tests that show it, the last local pytest run and the error catalog. The planner page embeds this document."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const about = pm.response.json();",
+              "pm.test('reports the running Django', () => pm.expect(about.versions.django).to.be.a('string'));",
+              "pm.test('maps every requirement to code and tests', () => pm.expect(about.requirements.length).to.be.above(0));",
+              "console.log('Django', about.versions.django, '| commit', about.build.commit_short, '| stations', about.data.stations);",
+              "console.log('last pytest run', JSON.stringify(about.tests));"
             ]
           }
         }

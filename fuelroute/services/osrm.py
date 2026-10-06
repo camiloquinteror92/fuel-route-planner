@@ -51,13 +51,18 @@ class Route:
     sample_in_usa: np.ndarray  # (N,) bool
     line: np.ndarray  # (M, 2) lat, lon, simplified for display
     snap_miles: tuple[float, float]  # start / finish distance to the road OSRM used
+    geometry_points: int = 0  # vertices of the decoded OSRM geometry
+    polyline_chars: int = 0  # length of the polyline6 string OSRM sent
+
+    @property
+    def sample_spacing_miles(self) -> float:
+        if len(self.sample_miles) < 2:
+            return 0.0
+        return float(self.sample_miles[-1]) / (len(self.sample_miles) - 1)
 
     @property
     def miles_outside_usa(self) -> float:
-        if len(self.sample_miles) < 2:
-            return 0.0
-        spacing = float(self.sample_miles[-1]) / (len(self.sample_miles) - 1)
-        return float(np.count_nonzero(~self.sample_in_usa)) * spacing
+        return float(np.count_nonzero(~self.sample_in_usa)) * self.sample_spacing_miles
 
 
 def decode_polyline(encoded: str, precision: int = 6) -> np.ndarray:
@@ -89,7 +94,7 @@ def decode_polyline(encoded: str, precision: int = 6) -> np.ndarray:
 
 
 def prepare_route(
-    points: np.ndarray, distance_miles: float, duration_seconds: float, snap_miles=(0.0, 0.0)
+    points: np.ndarray, distance_miles: float, duration_seconds: float, snap_miles=(0.0, 0.0), polyline_chars: int = 0
 ) -> Route:
     """Resample, mark the USA part and simplify a decoded geometry (see module docstring)."""
     cumulative = cumulative_miles(points)
@@ -106,12 +111,14 @@ def prepare_route(
         sample_in_usa=in_usa(samples[:, 0], samples[:, 1]),
         line=simplify(points),
         snap_miles=(float(snap_miles[0]), float(snap_miles[1])),
+        geometry_points=len(points),
+        polyline_chars=int(polyline_chars),
     )
 
 
 def _cache_key(start: Location, finish: Location) -> str:
     step = settings.FUEL_PLANNER["RESAMPLE_MILES"]
-    return f"route:v2:{step}:{start.latitude:.5f},{start.longitude:.5f};{finish.latitude:.5f},{finish.longitude:.5f}"
+    return f"route:v3:{step}:{start.latitude:.5f},{start.longitude:.5f};{finish.latitude:.5f},{finish.longitude:.5f}"
 
 
 def get_route(start: Location, finish: Location, client: ExternalApiClient) -> tuple[Route, bool]:
@@ -153,4 +160,6 @@ def _fetch(start: Location, finish: Location, client: ExternalApiClient) -> Rout
     waypoints = payload.get("waypoints") or []
     snaps = [float(w.get("distance") or 0.0) / METERS_PER_MILE for w in waypoints[:2]]
     snaps += [0.0] * (2 - len(snaps))
-    return prepare_route(points, best["distance"] / METERS_PER_MILE, best["duration"], snaps)
+    return prepare_route(
+        points, best["distance"] / METERS_PER_MILE, best["duration"], snaps, polyline_chars=len(best["geometry"])
+    )

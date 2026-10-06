@@ -7,6 +7,8 @@ Every error response of the API has the same shape:
 
 
 class PlannerError(Exception):
+    """Invalid input: a missing or malformed parameter, or an unknown one (nothing is planned)."""
+
     status_code = 400
     code = "invalid_request"
 
@@ -26,11 +28,15 @@ class PlannerError(Exception):
 
 
 class LocationNotFound(PlannerError):
+    """start or finish is not a known US place (offline index, then Nominatim for free text)."""
+
     status_code = 400
     code = "location_not_found"
 
 
 class LocationOutsideUSA(PlannerError):
+    """The place was found, but it is outside the USA."""
+
     status_code = 400
     code = "location_outside_usa"
 
@@ -57,6 +63,8 @@ class LocationNotNearRoad(PlannerError):
 
 
 class NoRouteFound(PlannerError):
+    """The routing service found no drivable route between the two points."""
+
     status_code = 422
     code = "no_route"
 
@@ -76,6 +84,8 @@ class NoReachableStation(PlannerError):
 
 
 class ExternalServiceError(PlannerError):
+    """The routing / geocoding service failed or was unreachable, after one retry."""
+
     status_code = 502
     code = "upstream_unavailable"
 
@@ -96,6 +106,8 @@ class UpstreamBusy(PlannerError):
 
 
 class StationDataNotLoaded(PlannerError):
+    """The station table is empty: run `python manage.py load_stations`."""
+
     status_code = 503
     code = "station_data_not_loaded"
 

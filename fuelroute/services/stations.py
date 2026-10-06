@@ -37,7 +37,7 @@ class StationArrays:
 
 
 # The coarse pass of the corridor search checks one route sample every this many miles.
-_COARSE_STEP_MILES = 20.0
+COARSE_STEP_MILES = 20.0
 _lock = threading.Lock()
 _arrays: StationArrays | None = None
 
@@ -84,6 +84,18 @@ class CorridorStation:
     mile: float  # mile marker of the closest route sample
     offset_miles: float  # straight-line distance from that sample (the detour, one way)
     price: float
+    lat: float = 0.0  # the station's (city-level) coordinates
+    lon: float = 0.0
+
+
+FUNNEL_KEYS = (
+    "stations_searched",
+    "in_bounding_box",
+    "after_coarse_pass",
+    "within_corridor",
+    "dropped_outside_usa",
+    "candidates",
+)
 
 
 def stations_along_route(
@@ -92,6 +104,7 @@ def stations_along_route(
     corridor_miles: float,
     stations: StationArrays,
     sample_in_usa: np.ndarray | None = None,
+    stats: dict | None = None,
 ) -> list[CorridorStation]:
     """Stations within ``corridor_miles`` of the route, with their mile marker.
 
@@ -109,7 +122,16 @@ def stations_along_route(
     ``sample_in_usa``: optional mask of the samples. A station whose nearest route
     point is outside the USA (a US station seen from a Canadian highway) is dropped:
     reaching it would mean crossing the border.
+
+    ``stats``: optional dict filled with how many stations survived each pass
+    (``FUNNEL_KEYS``); the API shows it as the funnel of the search.
     """
+    funnel = dict.fromkeys(FUNNEL_KEYS, 0)
+    if stats is not None:
+        stats.clear()
+        stats.update(funnel)
+        funnel = stats
+    funnel["stations_searched"] = len(stations)
     if len(stations) == 0 or len(samples) == 0:
         return []
     margin_lat = corridor_miles / 69.0
@@ -122,28 +144,35 @@ def stations_along_route(
         & (stations.lon <= samples[:, 1].max() + margin_lon)
     )
     idx = np.nonzero(in_box)[0]
+    funnel["in_bounding_box"] = len(idx)
     if len(idx) == 0:
         return []
 
     sample_spacing = float(sample_miles[1] - sample_miles[0]) if len(sample_miles) > 1 else 1.0
-    step = max(1, int(round(_COARSE_STEP_MILES / max(sample_spacing, 1e-6))))
+    step = max(1, int(round(COARSE_STEP_MILES / max(sample_spacing, 1e-6))))
     coarse = samples[::step]
     if not np.array_equal(coarse[-1], samples[-1]):
         coarse = np.vstack((coarse, samples[-1]))
     spacing = float(sample_miles[min(step, len(sample_miles) - 1)] - sample_miles[0])
     idx = idx[within_distance(stations.lat[idx], stations.lon[idx], coarse, corridor_miles + spacing / 2 + 1)]
+    funnel["after_coarse_pass"] = len(idx)
     if len(idx) == 0:
         return []
     nearest, distance = nearest_on_line(stations.lat[idx], stations.lon[idx], samples)
     close = distance <= corridor_miles
+    funnel["within_corridor"] = int(np.count_nonzero(close))
     if sample_in_usa is not None:
         close &= sample_in_usa[nearest]
+    funnel["candidates"] = int(np.count_nonzero(close))
+    funnel["dropped_outside_usa"] = funnel["within_corridor"] - funnel["candidates"]
     return [
         CorridorStation(
             opis_id=int(stations.opis_ids[i]),
             mile=float(sample_miles[n]),
             offset_miles=float(d),
             price=float(stations.price[i]),
+            lat=float(stations.lat[i]),
+            lon=float(stations.lon[i]),
         )
         for i, n, d in zip(idx[close], nearest[close], distance[close])
     ]

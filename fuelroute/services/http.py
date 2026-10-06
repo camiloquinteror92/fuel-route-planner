@@ -88,10 +88,19 @@ class ExternalApiClient:
         self.retries = int(config["HTTP_RETRIES"])
         self.calls: list[str] = []
         self.elapsed_ms = 0.0
+        # (service, milliseconds) of every attempt, failed ones included: the
+        # Server-Timing header and /api/stats break the external time down with it.
+        self.call_log: list[tuple[str, float]] = []
 
     @property
     def call_count(self) -> int:
         return len(self.calls)
+
+    def _record(self, service: str, started: float) -> float:
+        elapsed = (time.perf_counter() - started) * 1000
+        self.elapsed_ms += elapsed
+        self.call_log.append((service, elapsed))
+        return elapsed
 
     def get_json(self, service: str, url: str, params: dict | None = None, min_interval: float = 0.0):
         """GET ``url`` and parse JSON. Returns (status, payload) for any status below 500
@@ -104,14 +113,13 @@ class ExternalApiClient:
             try:
                 status, body, headers = send(url, params, self.timeout)
             except urllib3.exceptions.HTTPError as exc:
-                self.elapsed_ms += (time.perf_counter() - started) * 1000
+                self._record(service, started)
                 logger.warning("event=external_call_failed service=%s attempt=%s error=%r", service, attempt + 1, exc)
                 if not last_attempt:
                     time.sleep(_RETRY_DELAY_SECONDS)
                     continue
                 raise ExternalServiceError(f"{service} is unreachable, try again later.") from exc
-            elapsed = (time.perf_counter() - started) * 1000
-            self.elapsed_ms += elapsed
+            elapsed = self._record(service, started)
             logger.info(
                 "event=external_call service=%s status=%s duration_ms=%.0f attempt=%s",
                 service, status, elapsed, attempt + 1,

@@ -102,8 +102,12 @@ FUEL_PLANNER = {
     # first station, if that is further) and must arrive with the same amount, so
     # every mile driven is paid for. See planner._tank_rules.
     "START_RESERVE_MILES": float(_env("START_RESERVE_MILES", "50")),
-    # Stops that buy less than this are consolidated with a neighbour (optimizer).
+    # Stops that buy less than this are consolidated with a neighbour (optimizer),
+    # each fix costing at most MAX_CONSOLIDATION_COST dollars more than the optimum.
     "MIN_STOP_GALLONS": float(_env("MIN_STOP_GALLONS", "10")),
+    "MAX_CONSOLIDATION_COST": float(_env("MAX_CONSOLIDATION_COST", "1.0")),
+    # summary.comparison: the "quarter-tank driver" refuels at or below this fraction.
+    "BASELINE_REFUEL_FRACTION": float(_env("BASELINE_REFUEL_FRACTION", "0.25")),
     # A station is a candidate if it is at most this far from the route line.
     # Station coordinates are city-level, so this also absorbs that error.
     "CORRIDOR_MILES": float(_env("CORRIDOR_MILES", "10")),
@@ -123,9 +127,16 @@ FUEL_PLANNER = {
     "HTTP_RETRIES": int(_env("HTTP_RETRIES", "1")),
     # Nominatim's policy asks for an identifying User-Agent; add a contact URL/email.
     "USER_AGENT": _env("HTTP_USER_AGENT", "spotter-fuel-route/1.0 (coding assessment)"),
-    # Requests per minute per client IP on /api/ (0 = no limit). Protects the free
+    # Requests per minute per client IP on /api/route and its page (0 = no limit);
+    # /api/stats and /api/about never leave the server and are not limited. Protects the free
     # upstream services from a loop or a Postman runner.
     "RATE_LIMIT_PER_MINUTE": int(_env("RATE_LIMIT_PER_MINUTE", "60")),
+    # /api/stats keeps the latency of the last STATS_WINDOW requests per outcome.
+    "STATS_WINDOW": int(_env("STATS_WINDOW", "500")),
+    # /api/about: links to the code on GitHub, and the JUnit report of the last
+    # local pytest run (pytest.ini writes it there).
+    "REPO_URL": _env("REPO_URL", "https://github.com/camiloquinteror92/fuel-route-planner"),
+    "TEST_REPORT_FILE": Path(_env("TEST_REPORT_FILE", str(BASE_DIR / ".reports" / "pytest.xml"))),
     # Data files (committed; see scripts/ for how they are built)
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
     "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",

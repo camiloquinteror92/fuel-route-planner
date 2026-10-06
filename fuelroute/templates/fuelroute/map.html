@@ -35,12 +35,14 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const data = JSON.parse(document.getElementById("route-data").textContent);
-    const map = L.map("map");
+    const container = document.getElementById("map");
+    const map = L.map(container).setView([39.5, -98.35], 4); // whole USA until the route is fitted
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     }).addTo(map);
 
+    const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
     const colors = { start: "#1a7f37", finish: "#cf222e", fuel_stop: "#0969da" };
     const layer = L.geoJSON(data, {
       style: { color: "#0969da", weight: 4, opacity: 0.8 },
@@ -59,13 +61,13 @@
       onEachFeature: (feature, l) => {
         const p = feature.properties;
         if (p.kind === "fuel_stop") {
-          l.bindPopup(`<b>Stop ${p.stop}: ${p.name}</b><br>${p.city}<table>
+          l.bindPopup(`<b>Stop ${p.stop}: ${esc(p.name)}</b><br>${esc(p.city)}<table>
             <tr><td>Mile</td><td>${p.mile_marker}</td></tr>
             <tr><td>Price</td><td>$${p.price_per_gallon}/gal</td></tr>
             <tr><td>Buy</td><td>${p.gallons} gal</td></tr>
             <tr><td>Cost</td><td>$${p.cost}</td></tr></table>`);
         } else if (p.kind !== "route") {
-          l.bindPopup(`<b>${p.kind}</b>: ${p.label}`);
+          l.bindPopup(`<b>${p.kind}</b>: ${esc(p.label)}`);
         }
       },
     }).addTo(map);
@@ -73,13 +75,14 @@
     // page is still laying out, e.g. in a hidden tab).
     let fitted = false;
     const fit = () => {
+      if (container.clientWidth === 0 || container.clientHeight === 0) return;
       map.invalidateSize();
-      if (fitted || map.getSize().x === 0 || map.getSize().y === 0) return;
+      if (fitted) return;
       map.fitBounds(layer.getBounds(), { padding: [30, 30] });
       fitted = true;
     };
     fit();
-    new ResizeObserver(fit).observe(document.getElementById("map"));
+    new ResizeObserver(fit).observe(container);
   </script>
 {% endif %}
 </body>

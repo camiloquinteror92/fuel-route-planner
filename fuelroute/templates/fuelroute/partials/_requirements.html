@@ -1,0 +1,18 @@
+{% comment %}Requirements tab: filled by static/fuelroute/js/requirements.js and cases.js.{% endcomment %}
+<section id="panel-requirements" class="panel" role="tabpanel" aria-labelledby="tab-requirements" tabindex="0" hidden>
+  <div class="panel-head">
+    <div id="req-head"></div>
+    <button type="button" class="btn btn-small btn-ghost" id="about-refresh">Refresh</button>
+  </div>
+  <p class="muted">What the brief asks directly, and what it asks between the lines: how each one is met, the live
+    evidence from the answers this page received, the code that does it and the tests that check it
+    (results of the last <code>pytest</code> run on this machine).</p>
+  <div id="req-table"></div>
+
+  <h3>Contract checks <small class="muted">recomputed in your browser from the answer</small></h3>
+  <p class="muted">Money in integer cents, rounding half up, like the server's Decimal arithmetic. A failure is shown, never hidden.</p>
+  <ol id="checks-list" class="checks"></ol>
+
+  <h3>Edge cases <small class="muted">real requests to this server</small></h3>
+  <div id="cases"></div>
+</section>

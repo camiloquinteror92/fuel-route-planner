@@ -1,0 +1,23 @@
+{% comment %}Footer: provenance (versions, commit, data) and attributions, all from /api/about.{% endcomment %}
+<footer class="foot">
+  <div class="wrap">
+    <p>
+      Python <span data-live="about.versions.python">—</span> ·
+      Django <span data-live="about.versions.django">—</span> ·
+      DRF <span data-live="about.versions.djangorestframework">—</span> ·
+      numpy <span data-live="about.versions.numpy">—</span>
+    </p>
+    <p>
+      commit <a data-href="derived.commit_url" target="_blank" rel="noopener"><code data-live="about.build.commit_short">—</code></a>
+      <span class="tag tag-warn" data-live-if="derived.not_pushed">not pushed yet</span>
+      <span class="tag tag-warn" data-live-if="derived.dirty">+ local changes</span>
+      · station data <code data-live="about.data.version">—</code>
+      · <a data-href="about.build.repo_url" target="_blank" rel="noopener">source on GitHub</a>
+    </p>
+    <p class="attrib">
+      Fuel prices provided with the assessment · US Census Bureau · GeoNames (<span data-literal>CC BY 4.0</span>) ·
+      © OpenStreetMap contributors · routing by OSRM · map by Leaflet
+    </p>
+    <p>Built by Camilo Quintero</p>
+  </div>
+</footer>

@@ -100,6 +100,30 @@ def test_alaska_is_suggested_but_flagged_and_territories_are_not(index):
 
 
 @pytest.mark.django_db
+def test_a_name_and_its_city_twin_rank_as_one_place():
+    """Regression: "New York, NY" (the examples' form) has no population in the Census file,
+    so typing "new york" suggested "New York City", "New York Mills"... and not it."""
+    index = PlaceIndex([
+        ("New York", "NY", 40.66271, -73.93868, 0, "census"),
+        ("New York City", "NY", 40.71427, -74.00597, 8_804_190, "geonames"),  # 5.0 miles away
+        ("New York Mills", "NY", 43.10, -75.29, 3_200, "census"),
+        ("Newark", "NJ", 40.73, -74.17, 300_000, "census"),
+        ("Bay", "MI", 45.30, -85.06, 0, "geonames"),
+        ("Bay City", "MI", 43.59, -83.89, 33_917, "census"),  # 130 miles away: another place
+    ])
+    rows, _ = index.search("new york")
+    assert labels(rows) == ["New York, NY", "New York City, NY", "New York Mills, NY"]
+    assert rows[0]["population"] == 8_804_190
+    assert (rows[0]["lat"], rows[0]["lon"]) == (40.66271, -73.93868)  # still plans to its own point
+    rows, _ = index.search("bay")
+    assert labels(rows) == ["Bay City, MI", "Bay, MI"] and rows[1]["population"] == 0
+
+
+def test_new_york_comes_first_on_the_real_index():
+    rows, _ = get_place_index().search("new york")
+    assert rows[0]["label"] == "New York, NY"
+
+
 def test_every_label_plans_to_the_same_point():
     """Each suggestion, typed back as start / finish, is geocoded offline to exactly its point."""
     index = get_place_index()

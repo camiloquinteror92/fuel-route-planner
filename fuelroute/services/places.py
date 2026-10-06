@@ -10,7 +10,11 @@ state) and each group is ordered best-first, so:
   detect ambiguous city names (12 "Antioch" in Tennessee) instead of guessing.
 * ``search()`` is the type-ahead of ``GET /api/places``: names that START with what
   was typed, most populated first, one row per (name, state) (the place
-  ``lookup()`` would pick, so a suggestion always plans to the same point).
+  ``lookup()`` would pick, so a suggestion always plans to the same point). A name
+  with no population whose "<name> City" twin is within a few miles is the same
+  place under two names ("New York" / "New York City", "Carson" / "Carson City"): it
+  ranks with the twin's population, so "New York, NY" (the form the examples use)
+  comes first.
 
 Memory: ~190k places are kept in numpy arrays and two dicts of
 ``"name|ST" -> packed (first row, row count)`` integers, about 55 MB per process
@@ -35,6 +39,7 @@ from pathlib import Path
 import numpy as np
 from django.conf import settings
 
+from .geo import haversine_miles
 from .text import US_STATES, compact, normalize_place
 
 # States whose places can be suggested ("City, ST" geocodes there). Alaska and Hawaii
@@ -45,6 +50,11 @@ _LETTER = re.compile(r"[a-z]")
 MIN_QUERY_LETTERS = 2
 # Sorts after any character of a name: [prefix, prefix + this) holds every name with that prefix.
 _AFTER_EVERY_NAME = chr(0x10FFFF)
+
+# "New York" (Census, no population) and "New York City" (GeoNames, 8.8 million) are 5.0
+# miles apart: closer than this, a "<name> City" twin is the same place (the next pair of
+# the file, Broad Top / Broad Top City, PA, is 6.2 miles apart and already two places).
+_TWIN_MILES = 6.0
 
 _SOURCES = ("census", "geonames")
 # A group never has more than a few dozen places; 12 bits leave plenty of room.
@@ -127,8 +137,11 @@ class PlaceIndex:
 
     # --- type-ahead -------------------------------------------------------------------
 
-    def _prefix_index(self) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
-        """(sorted "name|ST" keys, first row, population, state) of every US-state group."""
+    def _prefix_index(self) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(sorted "name|ST" keys, first row, population, state, rank) of every US-state group.
+
+        ``population`` is the twin's for a name that has a "<name> city" twin; ``rank``
+        orders by it, the name before its twin on a tie."""
         index = self._prefix
         if index is None:
             with self._prefix_lock:
@@ -136,14 +149,43 @@ class PlaceIndex:
                 if index is None:
                     keys = sorted(key for key in self._exact if key[-2:] in US_STATES)
                     rows = np.array([self._exact[key] >> _COUNT_BITS for key in keys], dtype=np.int64)
+                    population = self._population[rows] if len(rows) else np.zeros(0, dtype=np.int64)
+                    population, has_twin = self._with_twin_population(keys, rows, population)
                     index = (
                         keys,
                         rows,
-                        self._population[rows] if len(rows) else np.zeros(0, dtype=np.int64),
+                        population,
                         np.array([key[-2:] for key in keys], dtype="<U2"),
+                        population * 2 + has_twin,
                     )
                     self._prefix = index
         return index
+
+    def _with_twin_population(
+        self, keys: list[str], rows: np.ndarray, population: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """(``population``, has a twin): a name without population takes that of its "<name> city"
+        twin in the same state when the twin is within ``_TWIN_MILES`` (the same place, two names)."""
+        has_twin = np.zeros(len(population), dtype=np.int64)
+        pairs = []
+        for j, key in enumerate(keys):
+            if " city|" not in key or population[j] <= 0:
+                continue
+            name, state = key.rsplit("|", 1)
+            base = f"{name[: -len(' city')]}|{state}"
+            i = bisect_left(keys, base)  # ``keys`` is sorted
+            if i < len(keys) and keys[i] == base and population[i] == 0:
+                pairs.append((i, j))
+        if not pairs:
+            return population, has_twin
+        mine, twin = (np.array(side, dtype=np.int64) for side in zip(*pairs))
+        near = haversine_miles(
+            self._lat[rows[mine]], self._lon[rows[mine]], self._lat[rows[twin]], self._lon[rows[twin]]
+        ) <= _TWIN_MILES
+        ranked = population.copy()
+        ranked[mine[near]] = population[twin[near]]
+        has_twin[mine[near]] = 1
+        return ranked, has_twin
 
     def search(self, query: str, limit: int = 8) -> tuple[list[dict], int]:
         """Places whose name starts with ``query``, most populated first: (rows, matches).
@@ -157,7 +199,7 @@ class PlaceIndex:
         if parsed is None or limit <= 0:
             return [], 0
         prefix, states = parsed
-        keys, rows, population, state_of = self._prefix_index()
+        keys, rows, population, state_of, rank = self._prefix_index()
         low = bisect_left(keys, prefix)
         high = bisect_left(keys, prefix + _AFTER_EVERY_NAME, lo=low)
         if high <= low:
@@ -168,11 +210,11 @@ class PlaceIndex:
         matches = len(found)
         if matches > limit:
             # Top ``limit`` by population, then in name order (``found`` is sorted by key).
-            found = found[np.argpartition(-population[found], limit - 1)[:limit]]
-        found = found[np.lexsort((found, -population[found]))]
-        return [self._suggestion(keys[i], int(rows[i])) for i in found], matches
+            found = found[np.argpartition(-rank[found], limit - 1)[:limit]]
+        found = found[np.lexsort((found, -rank[found]))]
+        return [self._suggestion(keys[i], int(rows[i]), int(population[i])) for i in found], matches
 
-    def _suggestion(self, key: str, row: int) -> dict:
+    def _suggestion(self, key: str, row: int, population: int) -> dict:
         name, state = key.split("|")
         city = " ".join(word[:1].upper() + word[1:] for word in name.split())
         return {
@@ -181,7 +223,7 @@ class PlaceIndex:
             "state": state,
             "lat": round(float(self._lat[row]), 6),
             "lon": round(float(self._lon[row]), 6),
-            "population": int(self._population[row]),
+            "population": population,
             # False in Alaska and Hawaii: a real US place, but no fuel prices there.
             "plannable": state not in _NO_FUEL_DATA_STATES,
         }

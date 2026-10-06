@@ -6,18 +6,53 @@ Everything that needs geocoding (place not found, same place written two ways,
 Alaska / Hawaii) is checked in ``services/planner.py``.
 
 The ``help_text`` of each field is published by ``/api/about`` (the planner page
-builds its parameter reference from it).
+builds its parameter reference from it), with the default and the allowed range of
+the what-if settings.
+
+What-if settings (all optional): ``mpg``, ``max_range_miles``, ``corridor_miles``,
+``price_policy``, ``consolidate`` and ``safety_reserve_gal``. Missing, blank or
+null means the default (``settings.FUEL_PLANNER``), so a request without them plans
+exactly as before they existed; out of range is a 400 that says the range.
 """
 
 from rest_framework import serializers
 
 from .services.geocoding import has_letters, parse_coordinates
-from .services.planner import START_EMPTY, START_FULL
+from .services.planner import START_EMPTY, START_FULL, WHAT_IF_RANGES, PlanSettings
+from .services.stations import PRICE_POLICIES
 from .services.usa import region_of
 
-ALLOWED_PARAMS = ("start", "finish", "start_tank", "include")
+WHAT_IF_PARAMS = ("mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal")
+ALLOWED_PARAMS = ("start", "finish", "start_tank", "include", *WHAT_IF_PARAMS)
 # Optional extra blocks of the response, asked for with ?include=a,b.
 INCLUDE_VALUES = ("candidates",)
+
+
+class SettingFloatField(serializers.FloatField):
+    """Optional number: missing, blank ("mpg=") or null means the default (None)."""
+
+    def __init__(self, low: float | None = None, high: float | None = None, **kwargs):
+        kwargs.setdefault("required", False)
+        kwargs.setdefault("allow_null", True)
+        messages = {}
+        if low is not None and high is not None:
+            messages = {
+                "min_value": f"Must be between {low:g} and {high:g}.",
+                "max_value": f"Must be between {low:g} and {high:g}.",
+            }
+        elif low is not None:
+            messages = {"min_value": f"Must be at least {low:g}."}
+        super().__init__(min_value=low, max_value=high, error_messages=messages, **kwargs)
+
+    def run_validation(self, data=serializers.empty):
+        if isinstance(data, str) and not data.strip():
+            data = None
+        return super().run_validation(data)
+
+
+def _range_field(name: str, help_text: str) -> SettingFloatField:
+    low, high = WHAT_IF_RANGES[name]
+    return SettingFloatField(low, high, help_text=help_text)
 
 
 class RouteRequestSerializer(serializers.Serializer):
@@ -54,6 +89,43 @@ class RouteRequestSerializer(serializers.Serializer):
             "and shares its cache, so it costs no external call after the same trip was planned."
         ),
     )
+    # --- what-if settings: change the plan, never the route (0 external calls once routed) ---
+    mpg = _range_field(
+        "mpg", "What-if: the truck's fuel economy in miles per gallon. A thirstier truck buys more fuel."
+    )
+    max_range_miles = _range_field(
+        "max_range_miles",
+        "What-if: how far a full tank goes, in miles. The tank size is this range divided by mpg.",
+    )
+    corridor_miles = _range_field(
+        "corridor_miles",
+        "What-if: how far from the route a station may be, in miles. Wider means more stations to choose from.",
+    )
+    price_policy = serializers.ChoiceField(
+        choices=list(PRICE_POLICIES),
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        help_text=(
+            "What-if: which price of a station to use when the file lists it several times. 'median' (default) "
+            "is the price stored for it; 'min' its cheapest quote (best case); 'max' its dearest (worst case)."
+        ),
+    )
+    consolidate = serializers.BooleanField(
+        required=False,
+        allow_null=True,
+        help_text=(
+            "What-if: true (default) merges tiny stops into a neighbour when that costs at most a dollar; "
+            "false keeps the pure cheapest plan, small stops included."
+        ),
+    )
+    safety_reserve_gal = SettingFloatField(
+        0.0,
+        help_text=(
+            "What-if: gallons that must always be left in the tank when the truck reaches any stop and the "
+            "destination. From 0 (default) to less than the tank. If no plan can keep it, the answer is a 422."
+        ),
+    )
 
     def to_internal_value(self, data):
         # A typo like "start_tnak=full" would otherwise be ignored silently and the
@@ -88,6 +160,26 @@ class RouteRequestSerializer(serializers.Serializer):
     def validate_start_tank(self, value: str) -> str:
         return value or START_EMPTY
 
+    def validate_price_policy(self, value):
+        return value or None
+
+    def validate(self, attrs: dict) -> dict:
+        """The safety reserve must fit in the tank of THIS request (range / mpg)."""
+        defaults = PlanSettings.defaults()
+        mpg = attrs.get("mpg") or defaults.mpg
+        max_range = attrs.get("max_range_miles") or defaults.max_range_miles
+        tank = max_range / mpg
+        reserve = attrs.get("safety_reserve_gal")
+        if reserve is not None and reserve >= tank:
+            raise serializers.ValidationError(
+                {
+                    "safety_reserve_gal": [
+                        f"Must be less than the tank: {tank:g} gal (max_range_miles {max_range:g} / mpg {mpg:g})."
+                    ]
+                }
+            )
+        return attrs
+
     def validate_include(self, value: str) -> frozenset:
         items = [item.strip() for item in value.split(",") if item.strip()]
         unknown = sorted(set(items) - set(INCLUDE_VALUES))
@@ -96,3 +188,4 @@ class RouteRequestSerializer(serializers.Serializer):
                 f"Unknown value(s): {', '.join(unknown)}. Allowed: {', '.join(INCLUDE_VALUES)}."
             )
         return frozenset(items)
+

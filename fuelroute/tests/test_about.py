@@ -33,6 +33,7 @@ CONTRACT_CODE_LINKS = {
     "stations.stations_along_route", "optimizer.greedy", "optimizer.consolidate", "optimizer.plan_price_blind",
     "station_loader.load_stations", "station_loader.resolve_homonym", "middleware.response_time",
     "middleware.rate_limit", "metrics.route_metrics",
+    "planner.settings", "optimizer.plan_fuel_stops",
 }
 
 JUNIT = """<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" \
@@ -106,11 +107,26 @@ def test_about_reports_running_versions_and_data_counts(stations):
     assert vehicle["tank_gallons"] == config["MAX_RANGE_MILES"] / config["MILES_PER_GALLON"]
     assert body["planner"]["corridor_miles"] == config["CORRIDOR_MILES"]
     assert body["planner"]["quarter_tank_fraction"] == config["BASELINE_REFUEL_FRACTION"]
-    assert [p["name"] for p in body["api"]["params"]] == ["start", "finish", "start_tank", "include"]
-    assert all(p["help_text"] for p in body["api"]["params"])
+    what_if = ["mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal"]
+    params = {p["name"]: p for p in body["api"]["params"]}
+    assert list(params) == ["start", "finish", "start_tank", "include", *what_if]
+    assert all(p["help_text"] for p in params.values())
+    assert body["api"]["what_if_params"] == what_if == [name for name, p in params.items() if p["what_if"]]
+    # Defaults come from the configuration; ranges from the serializer.
+    assert params["mpg"]["default"] == config["MILES_PER_GALLON"]
+    assert (params["mpg"]["min"], params["mpg"]["max"]) == (3, 30)
+    assert params["max_range_miles"]["default"] == config["MAX_RANGE_MILES"]
+    assert params["corridor_miles"]["default"] == config["CORRIDOR_MILES"]
+    assert params["price_policy"]["default"] == "median"
+    assert params["price_policy"]["choices"] == ["median", "min", "max"]
+    assert params["consolidate"]["default"] is True and params["safety_reserve_gal"]["default"] == 0
+    assert params["start_tank"]["default"] == "empty" and params["start"]["default"] is None
+    assert [m["label"] for m in body["api"]["start_tank_modes"]] == ["Pay for every mile", "Start with a full tank"]
     assert body["api"]["include_values"] == ["candidates"]
     assert {s["name"] for s in body["external_services"]} == {"osrm", "nominatim", "openstreetmap_tiles"}
-    assert {e["path"] for e in body["endpoints"]} >= {"/api/route", "/api/route/map", "/api/stats", "/api/about"}
+    assert {e["path"] for e in body["endpoints"]} >= {
+        "/api/route", "/api/route/map", "/api/stats", "/api/about",
+    }
 
     build = body["build"]
     if build["commit"]:  # a git checkout (always, except in an exported tarball)

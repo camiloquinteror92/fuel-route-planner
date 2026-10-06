@@ -242,6 +242,8 @@ def test_response_explains_the_pipeline_and_compares_strategies(client, upstream
     assert corridor["price_per_gallon"] == {"min": 2.9, "median": 3.3, "max": 3.6, "mean": 3.28}
     assert pipeline["tank"] == {
         "start_fuel_gallons": 5.0, "required_end_fuel_gallons": 5.0, "reason": "reserve", "arrival_capped": False,
+        "safety_reserve_gallons": 0.0,
+        "lowest_fuel_gallons": min([s["fuel_on_arrival_gallons"] for s in stops] + [summary["end_fuel_gallons"]]),
     }
     optimizer = pipeline["optimizer"]
     assert optimizer["candidates"] == corridor["candidates"]

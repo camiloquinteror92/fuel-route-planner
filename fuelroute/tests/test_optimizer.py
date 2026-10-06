@@ -470,3 +470,102 @@ def test_trace_does_not_change_results():
             )
             lines.append(f"{seed}:{min_stop}:{result.total_cost:.6f}:{result.final_fuel_gallons:.6f}:{stops}")
     assert hashlib.sha256("\n".join(lines).encode()).hexdigest() == _RESULTS_BEFORE_TRACING
+
+
+# --- the safety reserve (min_fuel_miles) ------------------------------------------------------
+
+
+def _exact_cost_with_reserve(route, stations, capacity, initial, final, reserve):
+    """Like ``_exact_cost``, but enforcing the reserve directly: at least ``reserve`` miles
+    of fuel on arrival at every station and at the destination (no change of variables)."""
+    best, position = {initial: 0.0}, 0
+    for mile, price in sorted(stations):
+        leg = mile - position
+        best = {fuel - leg: cost for fuel, cost in best.items() if fuel - leg >= reserve}
+        bought = {}
+        for fuel, cost in best.items():
+            for buy in range(0, capacity - fuel + 1):
+                value = cost + buy / MPG * price
+                if value < bought.get(fuel + buy, math.inf):
+                    bought[fuel + buy] = value
+        best, position = bought, mile
+    leg = route - position
+    costs = [cost for fuel, cost in best.items() if fuel - leg >= max(final, reserve)]
+    return min(costs) if costs else None
+
+
+@pytest.mark.parametrize("mode", ["reserve", "full", "random"])
+@pytest.mark.parametrize("seed", range(30))
+def test_safety_reserve_is_the_optimum_of_a_smaller_tank(seed, mode):
+    """With a safety reserve the greedy still finds the exact optimum, and never goes below it."""
+    rng = random.Random(seed * 13 + len(mode))
+    capacity, route = 40, 120  # denser than _small_instance: most instances stay feasible with a reserve
+    miles = sorted(rng.choice([0, route]) if rng.random() < 0.1 else rng.randint(0, route) for _ in range(14))
+    stations = [(m, round(rng.uniform(2.5, 4.0), 2)) for m in miles]
+    reserve = rng.randint(1, 10)
+    if mode == "reserve":
+        initial = final = rng.randint(reserve + 2, reserve + 15)
+    elif mode == "full":
+        initial, final = capacity, 0
+    else:
+        initial, final = rng.randint(reserve, capacity), rng.randint(0, 15)
+    expected = _exact_cost_with_reserve(route, stations, capacity, initial, final, reserve)
+    try:
+        result = plan_fuel_stops(
+            route,
+            [Candidate(mile=m, price=p) for m, p in stations],
+            max_range_miles=capacity,
+            miles_per_gallon=MPG,
+            initial_fuel_miles=initial,
+            final_fuel_miles=final,
+            min_fuel_miles=reserve,
+        )
+    except UnreachableError:
+        assert expected is None
+        return
+    assert expected is not None
+    assert result.total_cost == pytest.approx(expected)
+    for stop in result.stops:
+        assert stop.fuel_on_arrival_gallons * MPG >= reserve - 1e-6
+        assert stop.fuel_on_arrival_gallons + stop.gallons <= capacity / MPG + 1e-9
+    assert result.final_fuel_gallons * MPG >= max(final, reserve) - 1e-6
+    assert drive(result, route, initial, capacity) >= max(final, reserve) - 1e-6
+
+
+def test_safety_reserve_raises_when_a_stretch_exceeds_the_usable_range():
+    stations = [(100, 3.0), (380, 3.0)]  # 280 miles between them
+    plan_fuel_stops(  # fine with the whole 500-mile tank
+        600, [Candidate(m, p) for m, p in stations], max_range_miles=RANGE, miles_per_gallon=MPG,
+        initial_fuel_miles=RANGE, min_fuel_miles=0,
+    )
+    with pytest.raises(UnreachableError) as error:
+        plan_fuel_stops(  # 250 miles of reserve leave 250 usable miles
+            600, [Candidate(m, p) for m, p in stations], max_range_miles=RANGE, miles_per_gallon=MPG,
+            initial_fuel_miles=RANGE, min_fuel_miles=250,
+        )
+    assert error.value.from_mile == 100 and error.value.next_mile == 380
+    with pytest.raises(ValueError):
+        plan_fuel_stops(
+            100, [], max_range_miles=RANGE, miles_per_gallon=MPG, initial_fuel_miles=0, min_fuel_miles=RANGE
+        )
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_baselines_keep_the_safety_reserve_and_never_beat_the_optimum(seed):
+    route, stations = _random_instance(seed)
+    reserve, initial = 80.0, 200.0
+    try:
+        best = plan_fuel_stops(
+            route, [Candidate(m, p) for m, p in stations], max_range_miles=RANGE, miles_per_gallon=MPG,
+            initial_fuel_miles=initial, final_fuel_miles=initial, min_fuel_miles=reserve,
+        )
+    except UnreachableError:
+        return
+    for function in (plan_price_blind, plan_quarter_tank):
+        try:
+            other = _baseline(function, route, stations, initial, initial, min_fuel_miles=reserve)
+        except UnreachableError:
+            continue
+        assert all(stop.fuel_on_arrival_gallons * MPG >= reserve - 1e-6 for stop in other.stops)
+        assert other.total_gallons == pytest.approx(best.total_gallons)
+        assert other.total_cost >= best.total_cost - 1e-6

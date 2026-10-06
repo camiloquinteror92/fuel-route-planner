@@ -50,11 +50,11 @@ from django.db import DatabaseError
 from django.db.models import Count, Q, Sum
 
 from ..models import FuelStation
-from ..serializers import INCLUDE_VALUES, RouteRequestSerializer
+from ..serializers import INCLUDE_VALUES, WHAT_IF_PARAMS, RouteRequestSerializer
 from .errors import PlannerError
 from .places import get_place_index
-from .planner import SAME_PLACE_MILES
-from .stations import COARSE_STEP_MILES, data_version, get_station_arrays
+from .planner import SAME_PLACE_MILES, START_TANK_HELP, START_TANK_LABELS, PlanSettings
+from .stations import COARSE_STEP_MILES, PRICE_POLICIES, data_version, get_station_arrays
 from .text import US_STATES
 
 # The contiguous states: where the price file has stations. DC is a district, not a
@@ -95,6 +95,8 @@ CODE_LINKS: dict[str, tuple[str, str]] = {
     "middleware.response_time": ("fuelroute/middleware.py", "ResponseTimeMiddleware"),
     "middleware.rate_limit": ("fuelroute/middleware.py", "RateLimitMiddleware"),
     "metrics.route_metrics": ("fuelroute/services/metrics.py", "RouteMetrics"),
+    "planner.settings": ("fuelroute/services/planner.py", "PlanSettings"),
+    "optimizer.plan_fuel_stops": ("fuelroute/services/optimizer.py", "plan_fuel_stops"),
 }
 
 # The assessment, requirement by requirement. ``brief`` / ``how`` are templates
@@ -160,12 +162,16 @@ REQUIREMENTS: list[dict] = [
         "how": (
             "The optimizer tracks the tank along the route: it never goes below empty nor above the {tank}-gallon "
             "tank, and the plan has as many stops as the trip needs. A stretch without stations longer than the "
-            "range is an error (no_reachable_fuel_station) that says where it is."
+            "range is an error (no_reachable_fuel_station) that says where it is. The range, the mpg and a safety "
+            "reserve (gallons that must be left at every stop and at the destination) can be changed per request "
+            "with max_range_miles, mpg and safety_reserve_gal, without touching the code."
         ),
-        "sources": ["optimizer.greedy", "planner.tank_rules"],
+        "sources": ["optimizer.greedy", "planner.tank_rules", "planner.settings"],
         "tests": [
             "test_optimizer::test_long_trip_needs_several_stops_and_never_runs_dry",
             "test_api::test_gap_longer_than_the_range_is_422_and_says_where",
+            "test_what_if::test_safety_reserve_is_kept_at_every_stop_and_at_the_destination",
+            "test_optimizer::test_safety_reserve_is_the_optimum_of_a_smaller_tank",
         ],
     },
     {
@@ -183,6 +189,7 @@ REQUIREMENTS: list[dict] = [
             "test_api::test_stop_costs_add_up_to_the_total_to_the_cent",
             "test_optimizer::test_empty_start_pays_for_every_mile",
             "test_api::test_post_json_and_full_tank_mode",
+            "test_what_if::test_each_setting_changes_the_plan_with_no_external_call",
         ],
     },
     {
@@ -246,8 +253,9 @@ REQUIREMENTS: list[dict] = [
         "kind": "explicit",
         "brief": "Call the routing API as little as possible: one call is ideal, two or three acceptable.",
         "how": (
-            "One OSRM call per new trip, {retry_rule}. A repeated trip, the other start_tank mode and the planner "
-            "page reuse the cached plan or route (kept {ttl_text} in each server process) with no call. "
+            "One OSRM call per new trip, {retry_rule}. A repeated trip, the other start_tank mode, every what-if "
+            "setting and the planner page reuse the cached plan or route (kept {ttl_text} in each server process) "
+            "with no call. "
             "meta.external_api_calls counts the calls on every response, errors included, and /api/stats counts "
             "them per service since the server started."
         ),
@@ -257,6 +265,7 @@ REQUIREMENTS: list[dict] = [
             "test_api::test_second_request_uses_the_plan_cache",
             "test_api::test_identical_concurrent_requests_make_one_routing_call",
             "test_api::test_errors_report_the_external_calls_already_made",
+            "test_what_if::test_settings_are_in_the_plan_cache_key_not_the_route_cache_key",
         ],
     },
     {
@@ -296,6 +305,7 @@ REQUIREMENTS: list[dict] = [
         "sources": ["serializers.request", "http.client", "middleware.rate_limit"],
         "tests": [
             "test_api::test_invalid_input_returns_400",
+            "test_what_if::test_out_of_range_settings_are_400",
             "test_api::test_every_error_code_of_the_catalog_has_the_same_body_with_meta",
             "test_api::test_transient_failure_is_retried_once",
             "test_api::test_routing_service_down_returns_502",
@@ -884,15 +894,24 @@ def _external_services(config: dict) -> list[dict]:
 
 
 def _params() -> list[dict]:
+    """Parameters of /api/route: help text, choices, and for the what-if settings their
+    default (the configuration) and allowed range."""
+    defaults = PlanSettings.defaults()
     params = []
     for name, field in RouteRequestSerializer().fields.items():
         choices = getattr(field, "choices", None)
+        what_if = name in WHAT_IF_PARAMS
+        default = getattr(defaults, name, None) if what_if or name == "start_tank" else None
         params.append(
             {
                 "name": name,
                 "required": bool(field.required),
                 "choices": list(choices) if choices else None,
                 "help_text": str(field.help_text or ""),
+                "what_if": what_if,
+                "default": default,
+                "min": getattr(field, "min_value", None),
+                "max": getattr(field, "max_value", None),
             }
         )
     return params
@@ -988,7 +1007,17 @@ def build_about() -> dict:
         "vehicle": _vehicle(config),
         "planner": _planner(config),
         "external_services": _external_services(config),
-        "api": {"include_values": list(INCLUDE_VALUES), "params": _params(), "state_codes": sorted(US_STATES)},
+        "api": {
+            "include_values": list(INCLUDE_VALUES),
+            "params": _params(),
+            "state_codes": sorted(US_STATES),
+            "what_if_params": list(WHAT_IF_PARAMS),
+            "price_policies": list(PRICE_POLICIES),
+            "start_tank_modes": [
+                {"value": mode, "label": START_TANK_LABELS[mode], "help": START_TANK_HELP[mode]}
+                for mode in START_TANK_LABELS
+            ],
+        },
         "deliverables": {
             "loom_url": str(config.get("LOOM_URL") or "") or None,
             "postman_collection": "postman/collection.json",

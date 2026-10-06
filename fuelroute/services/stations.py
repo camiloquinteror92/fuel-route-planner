@@ -1,7 +1,9 @@
 """Stations near a route: an in-memory numpy copy of the station table + corridor search.
 
-``get_station_arrays`` keeps (opis_id, lat, lon, price) of every geocoded station
-in numpy arrays, loaded once per process and reloaded when the table changes.
+``get_station_arrays`` keeps (opis_id, lat, lon, price, price_min, price_max) of every
+geocoded station in numpy arrays, loaded once per process and reloaded when the
+table changes. ``StationArrays.priced(policy)`` picks which price the planner uses
+(the ``price_policy`` what-if of ``/api/route``) without copying anything.
 ``stations_along_route`` finds the ones within ``CORRIDOR_MILES`` of the route and
 gives each its mile marker on the route, in ~20 ms for a coast-to-coast trip.
 
@@ -15,13 +17,18 @@ next request without a restart, and never mixes old arrays with new rows.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from django.db.models import Count, Max
 
 from ..models import FuelStation
 from .geo import nearest_on_line, within_distance
+
+
+# ``price_policy`` -> the column of the station table it plans with. "median" is the
+# stored ``price`` (the median of the station's quotes, PRICE_POLICY at load time).
+PRICE_POLICIES = ("median", "min", "max")
 
 
 @dataclass
@@ -31,9 +38,21 @@ class StationArrays:
     lon: np.ndarray
     price: np.ndarray
     version: str = ""
+    # Cheapest / dearest quote of each station (None in hand-built arrays: same as price).
+    price_min: np.ndarray | None = None
+    price_max: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.opis_ids)
+
+    def priced(self, policy: str) -> "StationArrays":
+        """The same stations with ``price`` set to the column of ``policy`` (views, no copy)."""
+        if policy not in PRICE_POLICIES:
+            raise ValueError(f"unknown price policy {policy!r}")
+        column = {"median": self.price, "min": self.price_min, "max": self.price_max}[policy]
+        if column is None or column is self.price:
+            return self
+        return replace(self, price=column)
 
 
 # The coarse pass of the corridor search checks one route sample every this many miles.
@@ -58,15 +77,17 @@ def get_station_arrays(version: str | None = None) -> StationArrays:
                 rows = list(
                     FuelStation.objects.filter(latitude__isnull=False)
                     .order_by("opis_id")
-                    .values_list("opis_id", "latitude", "longitude", "price")
+                    .values_list("opis_id", "latitude", "longitude", "price", "price_min", "price_max")
                 )
-                data = np.array(rows, dtype=float).reshape(-1, 4)
+                data = np.array(rows, dtype=float).reshape(-1, 6)
                 _arrays = StationArrays(
                     opis_ids=data[:, 0].astype(np.int64),
                     lat=data[:, 1],
                     lon=data[:, 2],
                     price=data[:, 3],
                     version=version,
+                    price_min=data[:, 4],
+                    price_max=data[:, 5],
                 )
     return _arrays
 

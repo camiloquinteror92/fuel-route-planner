@@ -102,6 +102,9 @@ TANK_FULL = "full_tank"
 TANK_RESERVE = "reserve"
 TANK_FIRST_STATION = "first_station_beyond_reserve"
 TANK_SAFETY_RESERVE = "safety_reserve"  # leaves with more to reach the first station above the safety reserve
+# Leaves with less than the reserve: the last station is so far from the destination that
+# the truck can only arrive with that little, and it must arrive with what it left with.
+TANK_LAST_STRETCH = "last_stretch"
 TANK_NO_STATION = "no_station_on_route"
 
 # Allowed range of each numeric what-if parameter of /api/route (validated by the
@@ -217,7 +220,7 @@ class PlanSettings:
         return {
             "max_range_miles": self.max_range_miles,
             "miles_per_gallon": self.mpg,
-            "tank_gallons": _round(self.tank_gallons, 1),
+            "tank_gallons": _round(self.tank_gallons, 2),
             "start_tank": self.start_tank,
             "start_tank_label": START_TANK_LABELS[self.start_tank],
             "start_tank_help": START_TANK_HELP[self.start_tank],
@@ -257,6 +260,27 @@ def _money(value: Decimal) -> Decimal:
 
 def _round(value: float, digits: int = 2) -> float:
     return round(float(value), digits)
+
+
+def _fixed(value: float, places: int) -> str:
+    """``value`` with ``places`` decimals, rounded half up like the page (6.25 -> "6.3", not "6.2")."""
+    return str(Decimal(repr(float(value))).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
+
+
+def _gal(value: float) -> str:
+    """Gallons in a sentence, to the hundredth: "5.0", "4.96", "6.25" (never "5.0 instead of 5.0")."""
+    text = _fixed(value, 2)
+    return text[:-1] if text.endswith("0") else text
+
+
+def _short(value: float) -> str:
+    """A configured quantity without useless zeros: 50 -> "50", 62.5 -> "62.5", 41.666 -> "41.67"."""
+    return f"{float(_fixed(value, 2)):g}"
+
+
+def _miles_text(miles: float) -> str:
+    """Miles in a sentence: whole miles, one decimal under ten ("0.1", not "0")."""
+    return _fixed(miles, 1) if abs(miles) < 10 else _fixed(miles, 0)
 
 
 class _Timer:
@@ -330,7 +354,7 @@ def _plan_trip(
 
     # The route is cached apart (osrm.get_route), keyed by the coordinates only: a
     # what-if misses this key but hits the route, so it costs no external call.
-    plan_key = f"plan:v5:{version}:{origin.as_param};{destination.as_param};{plan.cache_key()}"
+    plan_key = f"plan:v6:{version}:{origin.as_param};{destination.as_param};{plan.cache_key()}"
     cached_plan = cache.get(plan_key)  # the cache returns a fresh copy (unpickled)
     timer.lap("plan_cache_ms")
     if cached_plan is not None:
@@ -350,14 +374,16 @@ def _plan_trip(
     timer.lap("routing_ms")
 
     funnel: dict = {}
+    arrays = get_station_arrays(version)
     corridor = stations_along_route(
         route.samples,
         route.sample_miles,
         plan.corridor_miles,
-        get_station_arrays(version).priced(plan.price_policy),
+        arrays.priced(plan.price_policy),
         route.sample_in_usa,
         stats=funnel,
     )
+    funnel["stations_with_several_prices"] = _with_several_prices(arrays, corridor)
     timer.lap("corridor_ms")
 
     tank = _tank_rules(plan, route, corridor)
@@ -471,8 +497,11 @@ def _tank_rules(plan: PlanSettings, route: Route, corridor: list[CorridorStation
       the truck leaves with enough fuel to reach it, and must ARRIVE with that same
       amount ("return the tank as you got it"), so every mile is still paid;
     * the last station is so far from the destination that arriving with that much
-      fuel is impossible: the truck arrives with what it can, and the difference is
-      reported as unpriced fuel, with a warning.
+      fuel is impossible: the truck LEAVES with what it can still have on arrival
+      (a full tank at the last station minus the last stretch), so every mile is
+      still paid. Only when that is too little to reach the first station does it
+      arrive with less than it left with; the difference is reported as unpriced
+      fuel, with a warning.
 
     A safety reserve (``safety_reserve_gal``) must still be in the tank on arrival at
     the first station, so the truck leaves with at least that plus the miles to it.
@@ -488,10 +517,10 @@ def _tank_rules(plan: PlanSettings, route: Route, corridor: list[CorridorStation
     )
     if plan.start_tank == START_FULL:
         note = (
-            f"The truck leaves with a full tank ({capacity / mpg:.0f} gal); that fuel is not included in the cost. "
+            f"The truck leaves with a full tank ({_short(capacity / mpg)} gal); that fuel is not included in the cost. "
             "The plan buys only what it needs to reach the destination, so it may arrive nearly empty."
             if safety <= 0
-            else f"The truck leaves with a full tank ({capacity / mpg:.0f} gal); that fuel is not included in the "
+            else f"The truck leaves with a full tank ({_short(capacity / mpg)} gal); that fuel is not included in the "
             "cost. The plan buys only what it needs to reach the destination with the safety reserve."
         )
         return TankRules(capacity, 0.0, note + safety_text, reason=TANK_FULL)
@@ -506,46 +535,60 @@ def _tank_rules(plan: PlanSettings, route: Route, corridor: list[CorridorStation
         rules.note = "No station of the price file is on this route, so no fuel can be bought or priced."
         rules.warnings.append(
             f"No station of the price file is within {plan.corridor_miles:g} miles of this route. "
-            f"The {route_miles / mpg:.2f} gal burned come from the {initial:.0f}-mile reserve and are not priced."
+            f"The {_fixed(route_miles / mpg, 2)} gal burned come from the {_miles_text(initial)}-mile reserve and are "
+            "not priced."
         )
         return rules
 
     first = min(c.mile for c in corridor)
     last = max(c.mile for c in corridor)
     initial = min(capacity, max(reserve, first + safety))
-    final = initial
     if first > reserve:
         reason = TANK_FIRST_STATION
     elif first + safety > reserve:
         reason = TANK_SAFETY_RESERVE
     else:
         reason = TANK_RESERVE
-    rules = TankRules(initial, final, "", reason=reason)
+    warnings = []
     if first > reserve:
-        rules.warnings.append(
-            f"The first station of the price file on this route is at mile {first:.0f}, beyond the "
-            f"{reserve:.0f}-mile reserve. The truck is assumed to leave with {initial / mpg:.1f} gal to reach it "
-            "and must arrive with the same amount, so every mile is still paid for."
+        warnings.append(
+            f"The first station of the price file on this route is at mile {_miles_text(first)}, beyond the "
+            f"{_miles_text(reserve)}-mile reserve. The truck is assumed to leave with {_gal(initial / mpg)} gal to "
+            "reach it and must arrive with the same amount, so every mile is still paid for."
         )
+    # The most the truck can still have on arrival: a full tank at the last station,
+    # minus the last stretch. It must arrive with what it left with, so when that is
+    # less than the reserve it LEAVES with less (still enough to reach the first
+    # station): the books balance and every mile is still paid for.
     last_gap = route_miles - last
-    if last_gap + final > capacity:
-        rules.final = max(0.0, capacity - last_gap)
-        rules.arrival_capped = True
+    reachable = capacity - last_gap
+    lowered = max(reachable, first + safety)
+    if lowered < initial:
+        initial, reason = lowered, TANK_LAST_STRETCH
+    final = min(initial, max(0.0, reachable))
+    rules = TankRules(initial, final, "", warnings=warnings, reason=reason, arrival_capped=final < initial)
+    if rules.arrival_capped:
+        # Even leaving with just enough to reach the first station, the truck cannot
+        # arrive with that much: the difference is burned without a station to buy from.
         rules.warnings.append(
-            f"The last station of the price file is {last_gap:.0f} miles before the destination, so the truck "
-            f"can only arrive with {rules.final / mpg:.1f} gal instead of {final / mpg:.1f}: "
-            f"{(final - rules.final) / mpg:.1f} gal burned on that stretch are not priced."
+            f"The last station of the price file is {_miles_text(last_gap)} miles before the destination, so the "
+            f"truck can only arrive with {_gal(final / mpg)} gal instead of {_gal(initial / mpg)}: "
+            f"{_gal((initial - final) / mpg)} gal burned on that stretch are not priced."
         )
     why = {
         TANK_RESERVE: "the reserve",
         TANK_FIRST_STATION: "enough to reach the first station",
         TANK_SAFETY_RESERVE: "enough to reach the first station with the safety reserve",
+        TANK_LAST_STRETCH: (
+            f"less than the {_miles_text(reserve)}-mile reserve: the last station is {_miles_text(last_gap)} miles "
+            "before the destination, so that is all it can still have on arrival"
+        ),
     }[reason]
     rules.note = (
-        f"Every mile driven is paid for: the truck leaves with {initial / mpg:.1f} gal "
+        f"Every mile driven is paid for: the truck leaves with {_gal(initial / mpg)} gal "
         f"({why}) and must arrive "
         "with the same amount, so the fuel bought equals the fuel burned"
-        + (" (except the unpriced fuel in 'warnings')" if rules.final < final else "")
+        + (" (except the unpriced fuel in 'warnings')" if rules.arrival_capped else "")
         + ". That fuel is borrowed at the start and returned at the end; it is not a safety margin."
         + safety_text
     )
@@ -567,7 +610,7 @@ def _optimize(route: Route, corridor: list[CorridorStation], tank: TankRules, pl
             f"{route_miles:.0f}-mile route, so fuel cannot be bought or priced. The file has few or no "
             "stations in some areas (for example only 8, all in the far south-east, in California). "
             + (
-                f"With start_tank=full a trip under {plan.usable_range_miles:.0f} miles needs no stop."
+                f"With start_tank=full a trip under {_miles_text(plan.usable_range_miles)} miles needs no stop."
                 if route_miles <= plan.usable_range_miles and tank.initial < capacity
                 else ""
             ),
@@ -601,11 +644,11 @@ def _unreachable(exc: UnreachableError, route: Route, plan: PlanSettings) -> NoR
     end_mile = route.distance_miles if exc.next_mile is None else exc.next_mile
     if plan.safety_reserve_miles > 0:
         range_text = (
-            f"{plan.usable_range_miles:.0f}-mile usable range (the {plan.max_range_miles:.0f}-mile range minus "
-            f"the {plan.safety_reserve_gal:g}-gal safety reserve)"
+            f"{_miles_text(plan.usable_range_miles)}-mile usable range (the {_miles_text(plan.max_range_miles)}-mile "
+            f"range minus the {plan.safety_reserve_gal:g}-gal safety reserve)"
         )
     else:
-        range_text = f"{plan.max_range_miles:.0f}-mile range"
+        range_text = f"{_miles_text(plan.max_range_miles)}-mile range"
     if exc.at_start:
         message = f"The first station on this route is at mile {end_mile:.0f}, more than the {range_text}."
     elif exc.next_mile is None:
@@ -672,6 +715,7 @@ def _build_stops(
 
     money, total_cost, total_gallons = _money_rows(plan.stops)
     tank_gallons = plan_settings.tank_gallons
+    tank_shown = _round(tank_gallons)
     stop_of_greedy = {stop.greedy_index: n for n, stop in enumerate(plan.stops, start=1)}
     stops = []
     for number, (stop, (gallons, price, cost)) in enumerate(zip(plan.stops, money), start=1):
@@ -695,7 +739,11 @@ def _build_stops(
                 },
                 "mile_marker": _round(info.mile, 1),
                 "distance_from_route_miles": _round(info.offset_miles, 1),
-                "fuel_on_arrival_gallons": _round(stop.fuel_on_arrival_gallons),
+                # Rounded so that arrival + purchase never shows a tank above full
+                # (15.375 + 47.125 of a 62.5-gal tank: 15.37 + 47.13, not 15.38 + 47.13).
+                "fuel_on_arrival_gallons": max(
+                    0.0, min(_round(stop.fuel_on_arrival_gallons), _round(tank_shown - float(gallons)))
+                ),
                 "gallons": float(gallons),
                 "cost": float(cost),
                 "decision": _decision(stop, number, plan, route_miles, tank_gallons, stop_of_greedy),
@@ -914,6 +962,18 @@ def _lowest_fuel_gallons(plan: FuelPlan) -> float:
 # --- how the plan was computed -------------------------------------------------------------
 
 
+def _with_several_prices(arrays, corridor: list[CorridorStation]) -> int:
+    """How many corridor stations have quotes that disagree (cheapest != dearest)."""
+    if not corridor or arrays.price_min is None or arrays.price_max is None or not len(arrays):
+        return 0
+    ids = np.fromiter((c.opis_id for c in corridor), dtype=np.int64, count=len(corridor))
+    index = np.searchsorted(arrays.opis_ids, ids)  # the arrays are sorted by opis_id
+    found = index < len(arrays.opis_ids)
+    index = np.where(found, index, 0)
+    found &= arrays.opis_ids[index] == ids
+    return int(np.count_nonzero(found & (arrays.price_min[index] != arrays.price_max[index])))
+
+
 def _price_stats(corridor: list[CorridorStation]) -> dict | None:
     if not corridor:
         return None
@@ -964,6 +1024,9 @@ def _build_pipeline(
             **{key: int(funnel.get(key, 0)) for key in FUNNEL_KEYS},
             "price_per_gallon": _price_stats(corridor),
             "price_policy": plan_settings.price_policy,
+            # Candidates whose quotes in the file disagree: only these change price with
+            # price_policy (median / min / max).
+            "stations_with_several_prices": int(funnel.get("stations_with_several_prices", 0)),
         },
         "tank": {
             "start_fuel_gallons": _round(tank.initial / mpg),

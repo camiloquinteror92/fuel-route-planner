@@ -7,6 +7,7 @@ The synthetic route of test_api.py: east along latitude 35, about 680 road miles
 """
 
 import json
+import re
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -48,6 +49,7 @@ def _without_new_keys(body: dict) -> dict:
     body["pipeline"]["tank"].pop("safety_reserve_gallons")
     body["pipeline"]["tank"].pop("lowest_fuel_gallons")
     body["pipeline"]["corridor"].pop("price_policy")
+    body["pipeline"]["corridor"].pop("stations_with_several_prices")
     body["pipeline"]["optimizer"].pop("consolidate")
     return body
 
@@ -60,7 +62,8 @@ def _without_new_keys(body: dict) -> dict:
     "scenario", json.loads(GOLDEN.read_text(encoding="utf-8"))["scenarios"], ids=lambda scenario: scenario["name"]
 )
 def test_default_plans_are_identical_to_the_ones_before_what_if_settings(client, upstream, scenario):
-    """The golden file was written by the code of the commit before this feature (generated_from)."""
+    """The golden file was written by the code of the commit before this feature (generated_from); a
+    scenario marked "revised" was regenerated after a deliberate change, explained in the file."""
     add_stations([tuple(row) for row in scenario["stations"]])
     upstream.respond((200, osrm_answer([tuple(p) for p in scenario["route"]["points"]], scenario["route"]["miles"])))
     body = _ok(client.get("/api/route", scenario["request"]))
@@ -224,6 +227,8 @@ def test_price_policy_uses_the_cheapest_or_dearest_quote(client, upstream):
         prices = body["pipeline"]["corridor"]["price_per_gallon"]
         assert prices["min"] == float(min(q[policy] for q in quotes.values()))
         assert body["pipeline"]["corridor"]["price_policy"] == policy
+        # Only the stations whose quotes disagree can change price with the policy.
+        assert body["pipeline"]["corridor"]["stations_with_several_prices"] == 4
         costs[policy] = body["summary"]["total_fuel_cost"]
     assert costs["min"] < costs["median"] < costs["max"]
     assert len(upstream.calls) == 1
@@ -352,3 +357,75 @@ def test_new_station_prices_are_used_by_every_policy(client, upstream, stations)
     body = _ok(get(client, price_policy="max"))
     assert body["meta"]["plan_cache"] == "miss"
     assert 2 not in [s["opis_id"] for s in body["fuel_stops"]]  # now the dearest station of the route
+
+
+# --- the last stretch, and the words and rounding of a plan -------------------------------------------
+
+
+@pytest.mark.django_db
+def test_a_last_stretch_just_over_the_reserve_still_pays_every_mile(client, upstream, stations):
+    """Regression ("can only arrive with 5.0 gal instead of 5.0: 0.0 gal ... not priced"): with a
+    short range the last station is so far that the truck can arrive with a bit less than the
+    reserve. It now LEAVES with that much, so the fuel bought is still the fuel burned."""
+    upstream.respond(OK_ROUTE)
+    body = _ok(get(client, include="candidates"))
+    fields, rows = body["candidates"]["fields"], body["candidates"]["rows"]
+    gap = body["route"]["distance_miles"] - max(row[fields.index("mile_marker")] for row in rows)
+    max_range = round(gap + 49.6, 1)  # a full tank at the last station arrives with ~49.6 of the 50 miles
+    body = _ok(get(client, max_range_miles=max_range))
+    summary, tank = body["summary"], body["pipeline"]["tank"]
+    assert body["meta"]["external_api_calls"] == 0
+    assert tank["reason"] == "last_stretch" and tank["arrival_capped"] is False
+    assert summary["unpriced_fuel_gallons"] == 0 and body["warnings"] == []
+    assert summary["start_fuel_gallons"] == summary["end_fuel_gallons"]
+    assert summary["start_fuel_gallons"] == pytest.approx((max_range - gap) / 10, abs=0.02)
+    assert summary["total_gallons_purchased"] == pytest.approx(summary["fuel_used_gallons"], abs=0.02)
+    assert "less than the 50-mile reserve" in summary["note"]
+
+
+@pytest.mark.django_db
+def test_an_unpriced_last_stretch_names_two_different_amounts(client, upstream):
+    # Last station ~482 miles before the destination: even leaving with just enough to reach
+    # the first station, the truck arrives with less.
+    add_stations([(1, 35.02, -99.3, "3.00"), (2, 35.02, -96.5, "3.00")])
+    upstream.respond(OK_ROUTE)
+    body = _ok(get(client))
+    (warning,) = [text for text in body["warnings"] if "last station" in text]
+    found = re.search(r"arrive with ([\d.]+) gal instead of ([\d.]+): ([\d.]+) gal", warning)
+    arrive, left, unpriced = map(float, found.groups())
+    assert arrive < left and unpriced == pytest.approx(left - arrive, abs=0.011)
+    assert unpriced == pytest.approx(body["summary"]["unpriced_fuel_gallons"], abs=0.011)
+    assert body["pipeline"]["tank"]["arrival_capped"] is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mpg", ["7", "8", "9.5", "11"])
+def test_rounded_arrival_plus_purchase_never_shows_a_tank_above_full(client, upstream, stations, mpg):
+    """Regression: at 8 mpg a stop arrived with 15.38 gal and bought 47.13 in a 62.5-gal tank."""
+    upstream.respond(OK_ROUTE)
+    body = _ok(get(client, mpg=mpg))
+    tank = body["vehicle"]["tank_gallons"]
+    assert tank == round(500 / float(mpg), 2)
+    for stop in body["fuel_stops"]:
+        assert round(stop["fuel_on_arrival_gallons"] + stop["gallons"], 2) <= tank, stop
+
+
+@pytest.mark.django_db
+def test_the_full_tank_note_names_the_real_tank(client, upstream, stations):
+    """Regression: "a full tank (62 gal)" for a 62.5-gal tank."""
+    upstream.respond(OK_ROUTE)
+    summary = _ok(get(client, start_tank="full", mpg=8))["summary"]
+    assert "a full tank (62.5 gal)" in summary["note"]
+    assert summary["start_fuel_gallons"] == 62.5
+
+
+@pytest.mark.django_db
+def test_almost_no_usable_range_is_said_with_a_decimal(client, upstream, stations):
+    """Regression: "more than the 0-mile usable range" for a reserve that almost fills the tank."""
+    upstream.respond(OK_ROUTE)
+    _ok(get(client))
+    response = get(client, safety_reserve_gal="49.99")
+    assert response.status_code == 422
+    assert "0.1-mile usable range" in response.json()["detail"]
+    assert response.json()["meta"]["external_api_calls"] == 0
+

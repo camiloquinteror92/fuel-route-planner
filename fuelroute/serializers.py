@@ -108,7 +108,9 @@ class RouteRequestSerializer(serializers.Serializer):
         allow_null=True,
         help_text=(
             "What-if: which price of a station to use when the file lists it several times. 'median' (default) "
-            "is the price stored for it; 'min' its cheapest quote (best case); 'max' its dearest (worst case)."
+            "is the price stored for it: the median of its quotes (the average of the two when there are two), "
+            "unless load_stations ran with PRICE_POLICY=min; 'min' its cheapest quote (best case); 'max' its "
+            "dearest (worst case)."
         ),
     )
     consolidate = serializers.BooleanField(

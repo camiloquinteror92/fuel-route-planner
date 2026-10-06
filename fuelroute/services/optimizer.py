@@ -49,10 +49,34 @@ within $1 per fix of the true optimum, and a small stop that cannot be fixed tha
 cheaply is kept (e.g. the last stop before the destination, when every other
 station is already full). Each move changes only the two stops involved (fuel
 leaving the second one is unchanged), so the rest of the plan stays valid.
+
+Every stop keeps WHY it exists (``FuelStop.rule``: the greedy branch that created
+it, ``reach_cheaper`` / ``finish`` / ``fill_up``) and whether consolidation changed
+it, and the plan keeps the purchases as they were before consolidation
+(``FuelPlan.before_consolidation``), so the API can show the trade-off.
+
+Baselines
+---------
+Two simple drivers, used only to show what the optimizer is worth on a route
+(``planner._build_comparison``); they never change the plan. Both see the same
+stations and start / end with the same fuel as the optimizer, so they buy the
+same gallons and only WHERE they buy differs:
+
+* ``plan_price_blind``: ignores prices. Drives until the next station is out of
+  reach, then fills the tank (or buys just what the rest of the trip needs).
+* ``plan_quarter_tank``: the habit "refuel at a quarter tank": also buys at the
+  first station reached with the tank at or below ``refuel_below_fraction``.
+
+Neither looks at prices, not even to break ties: stations at the same mile (the
+coordinates are city-level, so a town's stations share one) are visited in the
+caller's order and the driver buys at the first one, so a baseline is not biased
+towards the dearest (or the cheapest) station of a town. The greedy is optimal,
+so neither baseline can cost less (asserted in the tests).
 """
 
 from __future__ import annotations
 
+import dataclasses
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -67,12 +91,22 @@ class Candidate:
     ref: Any = None  # whatever the caller needs back (station id, row...)
 
 
+# Why a stop exists: the branch of ``_greedy`` that created the purchase.
+RULE_REACH_CHEAPER = "reach_cheaper"  # bought just enough to reach a cheaper station in range
+RULE_FINISH = "finish"  # destination in range: bought just enough to finish
+RULE_FILL_UP = "fill_up"  # no cheaper station within one tank: filled the tank
+RULE_BASELINE = "baseline"  # a stop of plan_price_blind / plan_quarter_tank
+
+
 @dataclass
 class FuelStop:
     candidate: Candidate
     gallons: float
     cost: float
     fuel_on_arrival_gallons: float
+    rule: str = ""
+    cheaper_station_mile: float | None = None  # RULE_REACH_CHEAPER: the station it reaches
+    consolidated: bool = False  # consolidation changed the gallons bought here
 
 
 @dataclass
@@ -81,6 +115,9 @@ class FuelPlan:
     total_gallons: float = 0.0
     total_cost: float = 0.0
     final_fuel_gallons: float = 0.0  # in the tank on arrival at the destination
+    # The greedy's purchases before ``_consolidate`` (the same as ``stops`` when
+    # consolidation is off or changed nothing).
+    before_consolidation: list[FuelStop] = field(default_factory=list)
 
 
 class UnreachableError(Exception):
@@ -104,6 +141,9 @@ class _Purchase:
     station: Candidate
     bought: float  # miles of range bought here
     arrival: float  # miles of range in the tank on arrival here
+    rule: str = ""  # RULE_* of the greedy branch that created it
+    cheaper_mile: float | None = None  # RULE_REACH_CHEAPER: mile of the cheaper station
+    greedy_bought: float = 0.0  # ``bought`` as the greedy left it (before consolidation)
 
 
 def _greedy(
@@ -134,16 +174,19 @@ def _greedy(
         cheaper = next((i for i in ahead if stations[i].price < here.price), None)
         to_finish = route_miles - position + final_fuel
 
+        cheaper_mile = None
         if cheaper is not None:
             # Any fuel bought here beyond what reaches the cheaper station would be
             # burned after it, where it costs less: buy only the shortfall (maybe 0).
             target, distance = cheaper, stations[cheaper].mile - position
             buy = max(0.0, distance - fuel)
+            rule, cheaper_mile = RULE_REACH_CHEAPER, stations[cheaper].mile
         elif to_finish <= capacity + _EPS:
             # This is the cheapest price left on the way: buy exactly what the rest of
             # the trip (plus the required arrival fuel) needs.
             target, distance = None, route_miles - position
             buy = max(0.0, to_finish - fuel)
+            rule = RULE_FINISH
         elif len(ahead):
             # No cheaper station within a tank: this price is the best for the next
             # ``capacity`` miles, so fill up, then continue from the cheapest station in
@@ -151,12 +194,13 @@ def _greedy(
             target = min(ahead, key=lambda i: (stations[i].price, -stations[i].mile))
             distance = stations[target].mile - position
             buy = capacity - fuel
+            rule = RULE_FILL_UP
         else:
             # Neither another station nor the destination is within one full tank.
             raise UnreachableError(position, stations[end].mile if end < len(stations) else None)
 
         if buy > _EPS:
-            purchases.append(_Purchase(here, buy, fuel))
+            purchases.append(_Purchase(here, buy, fuel, rule, cheaper_mile, greedy_bought=buy))
         fuel = fuel + buy - distance
         if target is None:
             return purchases, fuel
@@ -244,17 +288,11 @@ def plan_fuel_stops(
     Raises ``UnreachableError`` when some stretch is longer than the range, and
     ``ValueError`` for impossible parameters.
     """
-    if max_range_miles <= 0 or miles_per_gallon <= 0:
-        raise ValueError("max_range_miles and miles_per_gallon must be positive")
-    if not 0 <= initial_fuel_miles <= max_range_miles or not 0 <= final_fuel_miles <= max_range_miles:
-        raise ValueError("initial and final fuel must be between 0 and max_range_miles")
-    if route_miles < 0:
-        raise ValueError("route_miles must be >= 0")
-
-    stations = sorted(
-        (c for c in candidates if -_EPS <= c.mile <= route_miles + _EPS), key=lambda c: (c.mile, c.price)
-    )
+    _validate(route_miles, max_range_miles, miles_per_gallon, initial_fuel_miles, final_fuel_miles)
+    stations = _on_route(candidates, route_miles)
     purchases, final_fuel = _greedy(route_miles, stations, max_range_miles, initial_fuel_miles, final_fuel_miles)
+    # _consolidate changes ``bought`` / ``arrival`` in place: copy the greedy's answer first.
+    greedy_stops = _to_stops([dataclasses.replace(p) for p in purchases], miles_per_gallon)
     if min_stop_gallons > 0:
         purchases = _consolidate(
             purchases,
@@ -262,18 +300,135 @@ def plan_fuel_stops(
             min_stop_gallons * miles_per_gallon,
             max_consolidation_cost * miles_per_gallon,  # dollars -> miles x $/gal
         )
+    plan = _plan(_to_stops(purchases, miles_per_gallon), final_fuel, miles_per_gallon)
+    plan.before_consolidation = greedy_stops
+    return plan
 
-    plan = FuelPlan(final_fuel_gallons=final_fuel / miles_per_gallon)
+
+def _validate(route_miles, max_range_miles, miles_per_gallon, initial_fuel_miles, final_fuel_miles) -> None:
+    if max_range_miles <= 0 or miles_per_gallon <= 0:
+        raise ValueError("max_range_miles and miles_per_gallon must be positive")
+    if not 0 <= initial_fuel_miles <= max_range_miles or not 0 <= final_fuel_miles <= max_range_miles:
+        raise ValueError("initial and final fuel must be between 0 and max_range_miles")
+    if route_miles < 0:
+        raise ValueError("route_miles must be >= 0")
+
+
+def _on_route(candidates: Sequence[Candidate], route_miles: float, by_price: bool = True) -> list[Candidate]:
+    """Stations inside [0, route_miles], by mile. ``by_price=False`` keeps the caller's
+    order between stations at the same mile (the baselines must not look at prices)."""
+    inside = (c for c in candidates if -_EPS <= c.mile <= route_miles + _EPS)
+    return sorted(inside, key=(lambda c: (c.mile, c.price)) if by_price else (lambda c: c.mile))
+
+
+def _to_stops(purchases: list[_Purchase], miles_per_gallon: float) -> list[FuelStop]:
+    stops = []
     for purchase in purchases:
         gallons = purchase.bought / miles_per_gallon
-        plan.stops.append(
+        stops.append(
             FuelStop(
                 candidate=purchase.station,
                 gallons=gallons,
                 cost=gallons * purchase.station.price,
                 fuel_on_arrival_gallons=max(0.0, purchase.arrival) / miles_per_gallon,
+                rule=purchase.rule,
+                cheaper_station_mile=purchase.cheaper_mile,
+                consolidated=abs(purchase.bought - purchase.greedy_bought) > _EPS,
             )
         )
-    plan.total_gallons = sum(s.gallons for s in plan.stops)
-    plan.total_cost = sum(s.cost for s in plan.stops)
+    return stops
+
+
+def _plan(stops: list[FuelStop], final_fuel_miles: float, miles_per_gallon: float) -> FuelPlan:
+    plan = FuelPlan(stops=stops, final_fuel_gallons=final_fuel_miles / miles_per_gallon)
+    plan.total_gallons = sum(s.gallons for s in stops)
+    plan.total_cost = sum(s.cost for s in stops)
+    plan.before_consolidation = list(stops)
     return plan
+
+
+# --- baselines (see "Baselines" in the module docstring) ----------------------------------
+
+
+def _refuel_by_habit(
+    route_miles: float,
+    candidates: Sequence[Candidate],
+    max_range_miles: float,
+    miles_per_gallon: float,
+    initial_fuel_miles: float,
+    final_fuel_miles: float,
+    refuel_at_or_below: float | None,
+) -> FuelPlan:
+    """A driver who ignores prices.
+
+    At each station, in mile order: stop buying once the tank covers the rest of the
+    trip; otherwise buy when the next station (at a greater mile) is out of reach,
+    or, with ``refuel_at_or_below`` (miles), when the tank is at or below that. A
+    purchase fills the tank, or buys just what the rest of the trip needs.
+    """
+    _validate(route_miles, max_range_miles, miles_per_gallon, initial_fuel_miles, final_fuel_miles)
+    if route_miles + final_fuel_miles <= initial_fuel_miles + _EPS:
+        return _plan([], initial_fuel_miles - route_miles, miles_per_gallon)
+    stations = _on_route(candidates, route_miles, by_price=False)
+    if not stations:
+        raise UnreachableError(0.0, None, at_start=True)
+    miles = [s.mile for s in stations]
+    purchases: list[_Purchase] = []
+    fuel, position = initial_fuel_miles, 0.0
+    for index, station in enumerate(stations):
+        fuel -= station.mile - position
+        if fuel < -_EPS:
+            raise UnreachableError(position, station.mile, at_start=index == 0)
+        position = station.mile
+        need = route_miles - station.mile + final_fuel_miles
+        if fuel >= need - _EPS:
+            break
+        following = bisect_right(miles, station.mile + _EPS)  # first station at a greater mile
+        reach = miles[following] - station.mile if following < len(stations) else need
+        low = refuel_at_or_below is not None and fuel <= refuel_at_or_below + _EPS
+        if fuel < reach - _EPS or low:
+            buy = min(max_range_miles - fuel, need - fuel)
+            if buy > _EPS:
+                purchases.append(_Purchase(station, buy, fuel, RULE_BASELINE, greedy_bought=buy))
+                fuel += buy
+    final_fuel = fuel - (route_miles - position)
+    if final_fuel < final_fuel_miles - _EPS:
+        raise UnreachableError(position, None)
+    return _plan(_to_stops(purchases, miles_per_gallon), final_fuel, miles_per_gallon)
+
+
+def plan_price_blind(
+    route_miles: float,
+    candidates: Sequence[Candidate],
+    *,
+    max_range_miles: float,
+    miles_per_gallon: float,
+    initial_fuel_miles: float,
+    final_fuel_miles: float = 0.0,
+) -> FuelPlan:
+    """Baseline: drive until the next station is out of reach, then fill up (or buy
+    just what the rest of the trip needs). Same inputs, validation and errors as
+    ``plan_fuel_stops``; it never costs less."""
+    return _refuel_by_habit(
+        route_miles, candidates, max_range_miles, miles_per_gallon, initial_fuel_miles, final_fuel_miles, None
+    )
+
+
+def plan_quarter_tank(
+    route_miles: float,
+    candidates: Sequence[Candidate],
+    *,
+    max_range_miles: float,
+    miles_per_gallon: float,
+    initial_fuel_miles: float,
+    final_fuel_miles: float = 0.0,
+    refuel_below_fraction: float = 0.25,
+) -> FuelPlan:
+    """Baseline: like ``plan_price_blind``, but also refuels at the first station
+    reached with the tank at or below ``refuel_below_fraction`` of its capacity."""
+    if not 0 <= refuel_below_fraction <= 1:
+        raise ValueError("refuel_below_fraction must be between 0 and 1")
+    return _refuel_by_habit(
+        route_miles, candidates, max_range_miles, miles_per_gallon, initial_fuel_miles, final_fuel_miles,
+        refuel_below_fraction * max_range_miles,
+    )

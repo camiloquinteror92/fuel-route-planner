@@ -1,11 +1,14 @@
 {
   "info": {
     "name": "Spotter Fuel Route API",
-    "description": "Route + cheapest fuel stops inside the USA. Start the server with `python manage.py runserver` and run the requests in order. Run each request twice: the second run is served from the cache (see `meta.external_api_calls` and the `X-Response-Time-ms` header).",
+    "description": "Route + cheapest fuel stops inside the USA. Start the server with `python manage.py runserver` and run the requests in order. Run each request twice: the second run is served from the cache (see `meta.external_api_calls` and the `X-Response-Time-ms` header). Requests 1-4 make one call each to the public OSRM server the first time.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://127.0.0.1:8000" }
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    }
   ],
   "item": [
     {
@@ -13,13 +16,29 @@
       "request": {
         "method": "GET",
         "url": {
-          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "route"],
+          "raw": "{{baseUrl}}/api/route?start=New York, NY&finish=Los Angeles, CA&start_tank=empty",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
           "query": [
-            { "key": "start", "value": "New York, NY" },
-            { "key": "finish", "value": "Los Angeles, CA" },
-            { "key": "start_tank", "value": "empty", "description": "empty (default) = pay for every mile; full = leave with a full tank", "disabled": true }
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "start_tank",
+              "value": "empty",
+              "description": "empty (default) = pay for every mile; full = leave with a full tank",
+              "disabled": true
+            }
           ]
         }
       },
@@ -35,7 +54,14 @@
               "  pm.expect(body.fuel_stops.length).to.be.above(0);",
               "  pm.expect(body.summary.total_fuel_cost).to.be.above(0);",
               "});",
-              "pm.test('at most one external API call', () => pm.expect(body.meta.external_api_calls).to.be.at.most(1));",
+              "pm.test('one routing call (0 when cached)', () => pm.expect(body.meta.external_api_calls).to.be.at.most(1));",
+              "pm.test('every mile is paid (gallons = miles / 10)', () => {",
+              "  pm.expect(body.summary.total_gallons_purchased).to.be.closeTo(body.route.distance_miles / 10, 0.1);",
+              "});",
+              "pm.test('stop costs add up to the total, to the cent', () => {",
+              "  const sum = body.fuel_stops.reduce((acc, s) => acc + Math.round(s.cost * 100), 0);",
+              "  pm.expect(sum).to.eql(Math.round(body.summary.total_fuel_cost * 100));",
+              "});",
               "console.log('stops', body.summary.number_of_stops, 'cost $' + body.summary.total_fuel_cost, 'time', pm.response.headers.get('X-Response-Time-ms') + ' ms');",
               "console.log('map:', body.map.map_url);"
             ]
@@ -47,15 +73,25 @@
       "name": "2. Chicago, IL -> Houston, TX (POST JSON)",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"start\": \"Chicago, IL\",\n  \"finish\": \"Houston, TX\",\n  \"start_tank\": \"empty\"\n}"
         },
         "url": {
           "raw": "{{baseUrl}}/api/route",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "route"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ]
         }
       },
       "event": [
@@ -68,6 +104,10 @@
               "const body = pm.response.json();",
               "pm.test('every mile is paid (gallons = miles / 10)', () => {",
               "  pm.expect(body.summary.total_gallons_purchased).to.be.closeTo(body.route.distance_miles / 10, 0.1);",
+              "});",
+              "pm.test('stop costs add up to the total, to the cent', () => {",
+              "  const sum = body.fuel_stops.reduce((acc, s) => acc + Math.round(s.cost * 100), 0);",
+              "  pm.expect(sum).to.eql(Math.round(body.summary.total_fuel_cost * 100));",
               "});"
             ]
           }
@@ -75,17 +115,73 @@
       ]
     },
     {
-      "name": "3. Dallas, TX -> Austin, TX with a full tank (short trip, no stop)",
+      "name": "3. Los Angeles, CA -> New York, NY (first station at mile ~251: see warnings)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=Los Angeles, CA&finish=New York, NY",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "finish",
+              "value": "New York, NY"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('explains the start fuel in warnings', () => pm.expect(body.warnings.join(' ')).to.include('first station'));",
+              "pm.test('every mile is paid (gallons = miles / 10)', () => {",
+              "  pm.expect(body.summary.total_gallons_purchased).to.be.closeTo(body.route.distance_miles / 10, 0.1);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Dallas, TX -> Austin, TX with a full tank (short trip, no stop)",
       "request": {
         "method": "GET",
         "url": {
           "raw": "{{baseUrl}}/api/route?start=Dallas, TX&finish=Austin, TX&start_tank=full",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "route"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
           "query": [
-            { "key": "start", "value": "Dallas, TX" },
-            { "key": "finish", "value": "Austin, TX" },
-            { "key": "start_tank", "value": "full" }
+            {
+              "key": "start",
+              "value": "Dallas, TX"
+            },
+            {
+              "key": "finish",
+              "value": "Austin, TX"
+            },
+            {
+              "key": "start_tank",
+              "value": "full"
+            }
           ]
         }
       },
@@ -103,16 +199,27 @@
       ]
     },
     {
-      "name": "4. Invalid: start outside the USA (Paris coordinates) -> 400",
+      "name": "5. Invalid: start outside the USA (Paris coordinates) -> 400",
       "request": {
         "method": "GET",
         "url": {
           "raw": "{{baseUrl}}/api/route?start=48.8566,2.3522&finish=Austin, TX",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "route"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
           "query": [
-            { "key": "start", "value": "48.8566,2.3522" },
-            { "key": "finish", "value": "Austin, TX" }
+            {
+              "key": "start",
+              "value": "48.8566,2.3522"
+            },
+            {
+              "key": "finish",
+              "value": "Austin, TX"
+            }
           ]
         }
       },
@@ -123,28 +230,94 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
-              "pm.test('explains the problem', () => pm.expect(pm.response.json().detail.start[0]).to.include('USA'));"
+              "const body = pm.response.json();",
+              "pm.test('explains the problem', () => pm.expect(body.detail.start[0]).to.include('USA'));",
+              "pm.test('no external call', () => pm.expect(body.meta.external_api_calls).to.eql(0));"
             ]
           }
         }
       ]
     },
     {
-      "name": "5. Map page (HTML, served from the cache)",
+      "name": "6. Invalid: same place written two ways -> 400 same_location",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/api/route?start=Austin, TX&finish=Austin, Texas",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route"
+          ],
+          "query": [
+            {
+              "key": "start",
+              "value": "Austin, TX"
+            },
+            {
+              "key": "finish",
+              "value": "Austin, Texas"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+              "pm.test('same_location', () => pm.expect(pm.response.json().error).to.eql('same_location'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Map page (HTML, served from the cache)",
       "request": {
         "method": "GET",
         "url": {
           "raw": "{{baseUrl}}/api/route/map?start=New York, NY&finish=Los Angeles, CA&start_tank=empty",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "route", "map"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "route",
+            "map"
+          ],
           "query": [
-            { "key": "start", "value": "New York, NY" },
-            { "key": "finish", "value": "Los Angeles, CA" },
-            { "key": "start_tank", "value": "empty" }
+            {
+              "key": "start",
+              "value": "New York, NY"
+            },
+            {
+              "key": "finish",
+              "value": "Los Angeles, CA"
+            },
+            {
+              "key": "start_tank",
+              "value": "empty"
+            }
           ]
         },
         "description": "Open the `map_url` from request 1 in a browser to see the Leaflet map. Postman shows the HTML."
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
     }
   ]
 }

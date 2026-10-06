@@ -152,6 +152,10 @@ FUEL_PLANNER = {
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
     "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",
     "FUEL_PRICES_FILE": BASE_DIR / "data" / "fuel-prices-for-be-assessment.csv",
+    # `manage.py benchmark` writes its results here (committed; /api/stats publishes
+    # them) and keeps the OSRM answer it measures with in the route file.
+    "BENCHMARK_FILE": Path(_env("BENCHMARK_FILE", str(BASE_DIR / "data" / "benchmark.json"))),
+    "BENCHMARK_ROUTE_FILE": Path(_env("BENCHMARK_ROUTE_FILE", str(BASE_DIR / "data" / "benchmark_route.json"))),
 }
 
 # Test runner of the planner page (POST /api/tests/run runs pytest on this machine).

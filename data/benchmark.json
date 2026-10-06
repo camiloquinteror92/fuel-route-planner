@@ -1,0 +1,73 @@
+{
+  "measured_at": "2026-10-06T14:21:00+00:00",
+  "command": "python manage.py benchmark",
+  "method": "Sequential requests in one process and one thread, through Django's test client (no sockets, so no network time) with gzip and without the per-request log lines; the route comes from data/benchmark_route.json, so 0 external calls. requests_per_second = iterations / total time.",
+  "machine": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "cpu": "Intel(R) Core(TM) Ultra 9 185H",
+    "cores": 22,
+    "python": "3.14.0",
+    "django": "6.1.1",
+    "numpy": "2.5.3"
+  },
+  "trip": {
+    "start": "New York, NY",
+    "finish": "Los Angeles, CA",
+    "distance_miles": 2810.4,
+    "fuel_stops": 12,
+    "total_fuel_cost": 855.49,
+    "corridor_candidates": 458,
+    "route_samples": 2812,
+    "osrm_geometry_points": 35146,
+    "route_fetched_at": "2026-10-06T14:20:24+00:00"
+  },
+  "stations": 6544,
+  "memory": {
+    "rss_mb": 191.8,
+    "kind": "current"
+  },
+  "external_api_calls": 0,
+  "results": {
+    "plan_cache_hit": {
+      "iterations": 300,
+      "p50_ms": 5.52,
+      "p95_ms": 9.43,
+      "mean_ms": 6.17,
+      "min_ms": 4.36,
+      "max_ms": 17.48,
+      "requests_per_second": 162.1,
+      "response_bytes_gzip": 25743,
+      "description": "A trip that was already planned: GET /api/route through the whole Django stack."
+    },
+    "what_if_replan": {
+      "iterations": 100,
+      "p50_ms": 35.03,
+      "p95_ms": 45.81,
+      "mean_ms": 36.52,
+      "min_ms": 29.75,
+      "max_ms": 55.6,
+      "requests_per_second": 27.4,
+      "description": "The same trip with a different mpg each time: the plan is recomputed on the cached route (corridor, optimizer, comparison, response), with no external call."
+    },
+    "planning_no_network": {
+      "iterations": 100,
+      "p50_ms": 20.44,
+      "p95_ms": 26.09,
+      "mean_ms": 21.9,
+      "min_ms": 18.08,
+      "max_ms": 102.82,
+      "requests_per_second": 45.7,
+      "description": "The planner's own work on this route: corridor search, tank rules and optimizer."
+    },
+    "route_preparation": {
+      "iterations": 20,
+      "p50_ms": 56.95,
+      "p95_ms": 68.14,
+      "mean_ms": 58.88,
+      "min_ms": 50.38,
+      "max_ms": 79.66,
+      "requests_per_second": 17.0,
+      "description": "Decoding OSRM's polyline and preparing the route (resample, US outline, simplify)."
+    }
+  }
+}

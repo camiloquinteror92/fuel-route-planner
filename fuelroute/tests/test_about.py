@@ -34,7 +34,7 @@ CONTRACT_CODE_LINKS = {
     "station_loader.load_stations", "station_loader.resolve_homonym", "middleware.response_time",
     "middleware.rate_limit", "metrics.route_metrics",
     "planner.settings", "optimizer.plan_fuel_stops", "places.search", "testrunner.run_tests",
-    "testrunner.runner_status",
+    "testrunner.runner_status", "benchmark.run_benchmark",
 }
 
 JUNIT = """<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" \

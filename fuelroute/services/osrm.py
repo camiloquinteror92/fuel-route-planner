@@ -116,6 +116,11 @@ def prepare_route(
     )
 
 
+def route_cache_key(start: Location, finish: Location) -> str:
+    """Key of the prepared route in the cache: the rounded coordinates only (no plan setting)."""
+    return _cache_key(start, finish)
+
+
 def _cache_key(start: Location, finish: Location) -> str:
     step = settings.FUEL_PLANNER["RESAMPLE_MILES"]
     return f"route:v3:{step}:{start.latitude:.5f},{start.longitude:.5f};{finish.latitude:.5f},{finish.longitude:.5f}"
@@ -136,14 +141,27 @@ def get_route(start: Location, finish: Location, client: ExternalApiClient) -> t
         return route, False
 
 
-def _fetch(start: Location, finish: Location, client: ExternalApiClient) -> Route:
-    url = (
+# Query of the routing call: the full geometry as an encoded polyline, no turn-by-turn steps.
+ROUTE_PARAMS = {"overview": "full", "geometries": "polyline6", "steps": "false"}
+
+
+def route_url(start: Location, finish: Location) -> str:
+    return (
         f"{settings.FUEL_PLANNER['OSRM_URL']}/route/v1/driving/"
         f"{start.longitude:.6f},{start.latitude:.6f};{finish.longitude:.6f},{finish.latitude:.6f}"
     )
-    status, payload = client.get_json(
-        "osrm", url, params={"overview": "full", "geometries": "polyline6", "steps": "false"}
-    )
+
+
+def _fetch(start: Location, finish: Location, client: ExternalApiClient) -> Route:
+    status, payload = client.get_json("osrm", route_url(start, finish), params=dict(ROUTE_PARAMS))
+    return route_from_payload(status, payload)
+
+
+def route_from_payload(status: int, payload) -> Route:
+    """A prepared ``Route`` from an OSRM /route answer; raises the API's routing errors.
+
+    Also used by ``manage.py benchmark`` with the answer it keeps on disk.
+    """
     code = payload.get("code") if isinstance(payload, dict) else None
     if code in ("NoRoute", "NoSegment"):
         raise NoRouteFound("No drivable route between the two locations.", upstream_code=code)

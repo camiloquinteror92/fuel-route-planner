@@ -2,7 +2,8 @@
 
 * ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``), with optional what-if settings
 * ``GET /api/places``     -> type-ahead of US places from the offline index (``PlacesView``)
-* ``GET /api/stats``      -> requests, external calls and latency since start (``StatsView``)
+* ``GET /api/stats``      -> requests, external calls and latency since start, and the
+                             last ``manage.py benchmark`` (``StatsView``)
 * ``GET /api/about``      -> versions, config, data, requirements, tests, errors (``AboutView``)
 * ``GET /api/tests``      -> the test inventory and the last run (``SuiteView``)
 * ``POST /api/tests/run`` -> run pytest on this machine, local requests only (``SuiteRunView``)
@@ -31,6 +32,7 @@ from rest_framework.views import exception_handler as drf_exception_handler
 from .serializers import PlacesRequestSerializer, RouteRequestSerializer
 from .services import testrunner
 from .services.about import build_about
+from .services.benchmark import load_benchmark
 from .services.errors import PlannerError
 from .services.http import ExternalApiClient
 from .services.metrics import route_metrics
@@ -151,11 +153,15 @@ class StatsView(APIView):
     """GET /api/stats: what this server process has answered on /api/route since it started.
 
     Request counts by status and outcome, external calls by service, latency
-    percentiles and the last requests (without locations). 0 external calls.
+    percentiles and the last requests (without locations), plus ``benchmark``: the
+    results of the last ``python manage.py benchmark`` (data/benchmark.json), or
+    null. 0 external calls.
     """
 
     def get(self, request):
-        return Response(route_metrics.snapshot(), headers={"Cache-Control": "no-store"})
+        body = route_metrics.snapshot()
+        body["benchmark"] = load_benchmark()
+        return Response(body, headers={"Cache-Control": "no-store"})
 
 
 def _error_response(exc: PlannerError) -> Response:
@@ -254,7 +260,7 @@ def index(request):
                 ),
                 "GET /api/route/map": "same parameters, the planner page (HTML)",
                 "GET /api/places": "q (the start of a US place name, 'chi' or 'chi, il'), limit: type-ahead",
-                "GET /api/stats": "requests, external calls and latency since the server started",
+                "GET /api/stats": "requests, external calls and latency since the server started, and the benchmark",
                 "GET /api/about": "versions, configuration, loaded data, requirements, tests and error codes",
                 "GET /api/tests": "the test inventory and the last run",
                 "POST /api/tests/run": "runs the test suite (only when the server runs on your machine)",

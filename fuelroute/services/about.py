@@ -100,6 +100,7 @@ CODE_LINKS: dict[str, tuple[str, str]] = {
     "places.search": ("fuelroute/services/places.py", "PlaceIndex.search"),
     "testrunner.run_tests": ("fuelroute/services/testrunner.py", "run_tests"),
     "testrunner.runner_status": ("fuelroute/services/testrunner.py", "runner_status"),
+    "benchmark.run_benchmark": ("fuelroute/services/benchmark.py", "run_benchmark"),
 }
 
 # The assessment, requirement by requirement. ``brief`` / ``how`` are templates
@@ -243,13 +244,18 @@ REQUIREMENTS: list[dict] = [
             "Offline geocoding, one routing call with a compact polyline, a numpy corridor search in three passes, "
             "a reused HTTPS connection, a route cache and a plan cache (a repeated trip makes no external call), "
             "one routing call for identical concurrent trips, and gzip on the wire. Every response carries "
-            "X-Response-Time-ms and a Server-Timing breakdown."
+            "X-Response-Time-ms and a Server-Timing breakdown, and manage.py benchmark measures cached plans, "
+            "what-if re-plans and the planner itself on this machine (published by /api/stats)."
         ),
-        "sources": ["osrm.get_route", "stations.stations_along_route", "planner.plan_trip", "middleware.response_time"],
+        "sources": [
+            "osrm.get_route", "stations.stations_along_route", "planner.plan_trip", "middleware.response_time",
+            "benchmark.run_benchmark",
+        ],
         "tests": [
             "test_api::test_second_request_uses_the_plan_cache",
             "test_api::test_identical_concurrent_requests_make_one_routing_call",
             "test_api::test_server_timing_header_breaks_down_the_request",
+            "test_benchmark::test_committed_benchmark_has_the_documented_shape",
             "test_places::test_search_is_fast_on_the_real_index",
         ],
     },
@@ -381,7 +387,7 @@ ENDPOINTS = [
     {"method": "GET|POST", "path": "/api/route", "description": "Plan a trip: route, cheapest fuel stops, total cost and map (JSON)."},
     {"method": "GET", "path": "/api/route/map", "description": "The planner page (HTML), a client of /api/route."},
     {"method": "GET", "path": "/api/places", "description": "Type-ahead of US places (offline index, no external call)."},
-    {"method": "GET", "path": "/api/stats", "description": "Requests, external calls and latency since this server process started."},
+    {"method": "GET", "path": "/api/stats", "description": "Requests, external calls and latency since this server process started, and the last benchmark."},
     {"method": "GET", "path": "/api/about", "description": "Versions, configuration, loaded data, requirements, tests and errors."},
     {"method": "GET", "path": "/api/tests", "description": "The test inventory and the last test run."},
     {"method": "POST", "path": "/api/tests/run", "description": "Run the test suite (only when the server runs on your own machine)."},

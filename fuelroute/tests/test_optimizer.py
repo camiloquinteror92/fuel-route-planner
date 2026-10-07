@@ -366,12 +366,12 @@ def test_decisions_explain_each_purchase(seed):
         assert stop.rule in ("reach_cheaper", "fill_up", "finish")
         assert not stop.consolidated
         if stop.rule == "reach_cheaper":
-            target = stop.cheaper_station_mile
-            assert price_at[target] < price
+            target = stop.cheaper_station.mile
+            assert stop.cheaper_station.price == price_at[target] < price
             assert 0 < target - mile <= RANGE + 1e-6
             assert leaving == pytest.approx(target - mile)  # just enough to reach it
         else:
-            assert stop.cheaper_station_mile is None
+            assert stop.cheaper_station is None
         if stop.rule == "fill_up":
             assert leaving == pytest.approx(RANGE)
         if stop.rule == "finish":

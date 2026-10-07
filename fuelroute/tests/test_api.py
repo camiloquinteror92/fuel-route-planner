@@ -153,15 +153,49 @@ def _server_timing(response) -> dict:
 
 
 @pytest.mark.django_db
-def test_response_explains_the_pipeline_and_compares_strategies(client, upstream, stations):
+def test_default_answer_is_short_and_details_are_opt_in(client, upstream, stations):
+    """The answer Postman shows first has only what the trip needs; how it was computed and
+    the other strategies come with include=details (same plan, from the cache)."""
     upstream.respond(OK_ROUTE)
     body = get(client).json()
+    assert set(body) == {"start", "finish", "route", "vehicle", "summary", "warnings", "fuel_stops", "map", "meta"}
+    assert set(body["meta"]) == {
+        "external_api_calls", "external_api_services", "route_cache", "plan_cache", "settings_changed",
+    }
+    assert set(body["summary"]["comparison"]) == {"price_blind", "savings_vs_price_blind"}
+    assert set(body["summary"]["comparison"]["price_blind"]) == {
+        "total_fuel_cost", "total_gallons_purchased", "number_of_stops", "average_price_paid",
+    }
+    assert "mpg" not in body["vehicle"]  # one name per value: miles_per_gallon
+    assert body["summary"]["price_per_gallon_on_route"] == {"min": 2.9, "max": 3.6}
+    assert body["summary"]["tiny_stops_merged"] is None  # merging tiny stops is off by default
+    # The three rules alone: each stop says its rule, and nothing about merges.
+    for stop in body["fuel_stops"]:
+        assert set(stop["decision"]) == {"rule", "cheaper_station", "reaches", "fills_tank"}
+
+    detailed = get(client, include="details").json()
+    assert detailed["meta"]["plan_cache"] == "hit" and len(upstream.calls) == 1
+    assert set(detailed["details"]) == {
+        "timings_ms", "external_api_ms", "station_data_version", "road_snap_miles", "comparison", "pipeline",
+    }
+    assert {k: v for k, v in detailed.items() if k not in ("details", "meta")} == {
+        k: v for k, v in body.items() if k != "meta"
+    }
+
+
+@pytest.mark.django_db
+def test_response_explains_the_pipeline_and_compares_strategies(client, upstream, stations):
+    upstream.respond(OK_ROUTE)
+    body = get(client, consolidate="true", include="details").json()
     summary, stops = body["summary"], body["fuel_stops"]
 
     # Every stop says why it is there: the first one buys just enough to reach the cheap one.
     assert all(s["decision"]["rule"] in ("reach_cheaper", "fill_up", "finish") for s in stops)
     assert stops[0]["decision"]["rule"] == "reach_cheaper"
-    assert stops[0]["decision"]["cheaper_station_mile"] == stops[1]["mile_marker"]
+    assert stops[0]["decision"]["cheaper_station"] == {
+        "name": "STOP 2", "city": "Town", "state": "OK", "mile": stops[1]["mile_marker"], "price_per_gallon": 2.9,
+    }
+    assert all(s["decision"]["cheaper_station"] is None for s in stops if s["decision"]["rule"] != "reach_cheaper")
     assert any(s["decision"]["consolidated"] for s in stops)  # this trip has stops under the minimum
     # ...and what its fuel covers in the FINAL plan: the next stop or the destination,
     # with the fuel consolidation moved here or away (regression: a consolidated stop
@@ -179,12 +213,15 @@ def test_response_explains_the_pipeline_and_compares_strategies(client, upstream
         if decision["moved_in"] or decision["moved_out"]:
             assert decision["consolidated"]
         for moved in decision["moved_in"]:
+            assert (moved["city"], moved["state"]) == ("Town", "OK")
             if moved["from_stop"] is not None:
                 assert stops[moved["from_stop"] - 1]["mile_marker"] == moved["mile"]
         tank = (stop["fuel_on_arrival_gallons"] + stop["gallons"]) >= body["vehicle"]["tank_gallons"] - 0.01
         assert decision["fills_tank"] == tank
 
-    comparison = summary["comparison"]
+    comparison = body["details"]["comparison"]
+    assert summary["comparison"]["savings_vs_price_blind"] == comparison["savings_vs_price_blind"]
+    assert summary["comparison"]["price_blind"]["total_fuel_cost"] == comparison["price_blind"]["total_fuel_cost"]
     optimized = comparison["optimized"]
     assert "stops" not in optimized  # the plan's stops are fuel_stops
     assert _dec(optimized["total_fuel_cost"]) == _dec(summary["total_fuel_cost"])
@@ -227,7 +264,7 @@ def test_response_explains_the_pipeline_and_compares_strategies(client, upstream
         _dec(average["total_fuel_cost"]) - _dec(summary["total_fuel_cost"])
     )
 
-    pipeline = body["pipeline"]
+    pipeline = body["details"]["pipeline"]
     assert pipeline["external_api_calls"] == 1 and pipeline["external_api_services"] == ["osrm"]
     routing = pipeline["routing"]
     assert routing["polyline_chars"] == len(encode_polyline(LINE))
@@ -254,6 +291,9 @@ def test_response_explains_the_pipeline_and_compares_strategies(client, upstream
         before["total_fuel_cost"]
     )
     assert optimizer["consolidation_extra_cost"] >= 0
+    assert summary["tiny_stops_merged"] == {
+        "stops_before": optimizer["stops_before_consolidation"], "extra_cost": optimizer["consolidation_extra_cost"],
+    }
     # Per stop, the extra cost of the fuel moved there adds up to the consolidation's cost.
     per_stop = sum(_dec(s["decision"]["consolidation_extra_cost"]) for s in stops)
     assert per_stop == pytest.approx(_dec(optimizer["consolidation_extra_cost"]), abs=Decimal("0.01") * len(stops))
@@ -289,6 +329,8 @@ def test_candidates_are_opt_in_and_share_the_plan_cache(client, upstream, statio
     assert {k: v for k, v in body.items() if k not in ("candidates", "meta")} == {
         k: v for k, v in plain.items() if k != "meta"
     }
+    both = get(client, include="details,candidates").json()
+    assert {"details", "candidates"} <= set(both) and len(upstream.calls) == 1
 
     # A plan computed with include (here on the cached route) has it too.
     full = get(client, start_tank="full", include="candidates").json()
@@ -298,13 +340,13 @@ def test_candidates_are_opt_in_and_share_the_plan_cache(client, upstream, statio
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(("value", "unknown"), [("foo", "foo"), ("candidates, foo", "foo"), ("CANDIDATES", "CANDIDATES")])
+@pytest.mark.parametrize(("value", "unknown"), [("foo", "foo"), ("candidates, foo", "foo"), ("DETAILS", "DETAILS")])
 def test_unknown_include_value_is_400(client, upstream, stations, value, unknown):
     response = get(client, include=value)
     assert response.status_code == 400
     body = response.json()
     assert body["error"] == "invalid_request"
-    assert body["detail"] == {"include": [f"Unknown value(s): {unknown}. Allowed: candidates."]}
+    assert body["detail"] == {"include": [f"Unknown value(s): {unknown}. Allowed: details, candidates."]}
     assert body["meta"]["external_api_calls"] == 0
     assert upstream.calls == []
 
@@ -322,12 +364,12 @@ def test_include_does_not_change_map_url(client, upstream, stations):
 @pytest.mark.django_db
 def test_server_timing_header_breaks_down_the_request(client, upstream, stations):
     upstream.respond(OK_ROUTE)
-    first = get(client)
+    first = get(client, include="details")
     timing = _server_timing(first)
     assert list(timing) == [
         "geocoding", "plan-cache", "routing", "osrm", "corridor", "optimizer", "build", "comparison", "render", "total",
     ]
-    meta = first.json()["meta"]
+    meta = first.json()["details"]
     assert timing["osrm"]["desc"] == "1 call"
     assert timing["osrm"]["dur"] == pytest.approx(meta["external_api_ms"], abs=0.051)
     assert timing["routing"]["dur"] == meta["timings_ms"]["routing_ms"]
@@ -357,33 +399,35 @@ def test_server_timing_header_breaks_down_the_request(client, upstream, stations
     assert list(_server_timing(gap)) == ["geocoding", "plan-cache", "routing", "osrm", "corridor", "render", "total"]
 
 
-LEGACY_TIMINGS = {"geocoding_ms", "routing_ms", "corridor_ms", "optimizer_ms", "response_build_ms"}
+STEP_TIMINGS = {"geocoding_ms", "routing_ms", "corridor_ms", "optimizer_ms", "response_build_ms"}
 
 
 @pytest.mark.django_db
-def test_timings_keep_the_legacy_keys(client, upstream, stations):
+def test_details_time_each_step_of_this_request(client, upstream, stations):
     upstream.respond(OK_ROUTE)
-    miss = get(client).json()["meta"]["timings_ms"]
-    assert set(miss) == LEGACY_TIMINGS | {"plan_cache_ms", "comparison_ms"}
+    miss = get(client, include="details").json()["details"]["timings_ms"]
+    assert set(miss) == STEP_TIMINGS | {"plan_cache_ms", "comparison_ms"}
     assert all(isinstance(value, float) and value >= 0 for value in miss.values())
-    assert set(get(client).json()["meta"]["timings_ms"]) == {"geocoding_ms", "plan_cache_ms"}
-    with_candidates = get(client, include="candidates").json()["meta"]["timings_ms"]
+    assert set(get(client, include="details").json()["details"]["timings_ms"]) == {"geocoding_ms", "plan_cache_ms"}
+    with_candidates = get(client, include="details,candidates").json()["details"]["timings_ms"]
     assert set(with_candidates) == {"geocoding_ms", "plan_cache_ms", "candidates_ms"}
 
 
 @pytest.mark.django_db
 def test_cache_hit_keeps_the_pipeline_of_the_first_computation(client, upstream, stations):
     upstream.respond(OK_ROUTE)
-    first = get(client).json()
-    second = get(client).json()
-    assert second["meta"]["plan_cache"] == "hit" and second["meta"]["external_api_calls"] == 0
+    first = get(client, include="details").json()["details"]
+    second_body = get(client, include="details").json()
+    second = second_body["details"]
+    assert second_body["meta"]["plan_cache"] == "hit" and second_body["meta"]["external_api_calls"] == 0
     assert second["pipeline"] == first["pipeline"]
     assert second["pipeline"]["external_api_calls"] == 1  # what the first computation cost
-    assert second["pipeline"]["timings_ms"] == first["meta"]["timings_ms"]
+    assert second["pipeline"]["timings_ms"] == first["timings_ms"]
     assert datetime.fromisoformat(first["pipeline"]["computed_at"]).tzinfo is not None
 
-    other = get(client, start_tank="full").json()  # the other tank mode: same route, new plan
-    assert other["meta"]["route_cache"] == "hit" and other["meta"]["plan_cache"] == "miss"
+    other_body = get(client, start_tank="full", include="details").json()  # the other tank mode: same route
+    other = other_body["details"]
+    assert other_body["meta"]["route_cache"] == "hit" and other_body["meta"]["plan_cache"] == "miss"
     assert other["pipeline"]["external_api_calls"] == 0
     assert other["pipeline"]["routing"]["from_route_cache"] is True
     assert other["pipeline"]["routing"]["polyline_chars"] == first["pipeline"]["routing"]["polyline_chars"]
@@ -406,11 +450,13 @@ def test_post_json_and_full_tank_mode(client, upstream, stations):
 @pytest.mark.django_db
 def test_short_trip_with_full_tank_has_no_stops(client, upstream, stations):
     upstream.respond((200, osrm_answer(LINE[:41], 120)))
-    body = client.get("/api/route", {"start": START, "finish": "35.0,-98.0", "start_tank": "full"}).json()
+    body = client.get(
+        "/api/route", {"start": START, "finish": "35.0,-98.0", "start_tank": "full", "include": "details"}
+    ).json()
     assert body["fuel_stops"] == []
     assert body["summary"]["total_fuel_cost"] == 0
     assert body["summary"]["comparison"] is None  # nothing bought: nothing to compare
-    assert body["pipeline"]["optimizer"]["stops"] == 0
+    assert body["details"]["pipeline"]["optimizer"]["stops"] == 0
 
 
 @pytest.mark.django_db
@@ -434,7 +480,7 @@ def test_first_station_beyond_the_reserve_is_planned_not_rejected(client, upstre
     add_stations([(1, 35.02, -97.3, "3.10"), (2, 35.02, -95.0, "3.00"), (3, 35.02, -92.5, "3.20"),
                   (4, 35.02, -90.5, "2.95")])
     upstream.respond(OK_ROUTE)
-    response = get(client)
+    response = get(client, include="details")
     assert response.status_code == 200, response.json()
     body = response.json()
     first_mile = mile_of(-97.3)
@@ -443,8 +489,8 @@ def test_first_station_beyond_the_reserve_is_planned_not_rejected(client, upstre
     # Every mile is still paid for.
     assert body["summary"]["total_gallons_purchased"] == pytest.approx(ROUTE_MILES / 10, abs=0.05)
     assert any("first station" in w for w in body["warnings"])
-    assert body["pipeline"]["tank"]["reason"] == "first_station_beyond_reserve"
-    assert body["pipeline"]["tank"]["arrival_capped"] is False
+    assert body["details"]["pipeline"]["tank"]["reason"] == "first_station_beyond_reserve"
+    assert body["details"]["pipeline"]["tank"]["arrival_capped"] is False
 
 
 @pytest.mark.django_db
@@ -453,14 +499,15 @@ def test_short_trip_with_no_station_on_the_route(client, upstream):
     # "the destination is out of range" although the reserve covers it.
     add_stations([(1, 40.0, -80.0, "3.00")])  # data loaded, but far away
     upstream.respond((200, osrm_answer(LINE[:9], 27)))
-    response = client.get("/api/route", {"start": START, "finish": "35.0,-99.6"})
+    response = client.get("/api/route", {"start": START, "finish": "35.0,-99.6", "include": "details"})
     assert response.status_code == 200, response.json()
     body = response.json()
     assert body["fuel_stops"] == []
     assert body["summary"]["unpriced_fuel_gallons"] == pytest.approx(2.7)
     assert any("not priced" in w for w in body["warnings"])
-    assert body["pipeline"]["tank"]["reason"] == "no_station_on_route"
-    assert body["pipeline"]["corridor"]["candidates"] == 0 and body["pipeline"]["corridor"]["price_per_gallon"] is None
+    assert body["details"]["pipeline"]["tank"]["reason"] == "no_station_on_route"
+    assert body["details"]["pipeline"]["corridor"]["candidates"] == 0
+    assert body["summary"]["price_per_gallon_on_route"] is None
 
 
 @pytest.mark.django_db
@@ -480,12 +527,12 @@ def test_last_stretch_too_long_for_the_reserve_arrives_with_less(client, upstrea
     # 50-mile reserve is impossible (482 + 50 > 500). Regression: 422.
     add_stations([(1, 35.02, -99.3, "3.00"), (2, 35.02, -96.5, "3.00")])
     upstream.respond(OK_ROUTE)
-    response = get(client)
+    response = get(client, include="details")
     assert response.status_code == 200, response.json()
     summary = response.json()["summary"]
     assert summary["end_fuel_gallons"] == pytest.approx((500 - (ROUTE_MILES - mile_of(-96.5))) / 10, abs=0.1)
     assert summary["unpriced_fuel_gallons"] > 0
-    tank = response.json()["pipeline"]["tank"]
+    tank = response.json()["details"]["pipeline"]["tank"]
     assert tank["arrival_capped"] is True
     assert tank["required_end_fuel_gallons"] == pytest.approx(summary["end_fuel_gallons"], abs=0.01)
 
@@ -662,7 +709,7 @@ def test_answers_are_gzipped_for_clients_that_accept_it(client, upstream, statio
     zipped = client.get("/api/route", {"start": START, "finish": FINISH}, HTTP_ACCEPT_ENCODING="gzip, deflate")
     assert not plain.has_header("Content-Encoding")
     assert zipped["Content-Encoding"] == "gzip"
-    assert len(zipped.content) < len(plain.content) / 3
+    assert len(zipped.content) < len(plain.content) / 2
     assert json.loads(gzip.decompress(zipped.content))["fuel_stops"] == plain.json()["fuel_stops"]
     page = client.get("/api/route/map", HTTP_ACCEPT_ENCODING="gzip")
     assert page["Content-Encoding"] == "gzip"
@@ -672,22 +719,12 @@ def test_answers_are_gzipped_for_clients_that_accept_it(client, upstream, statio
 def test_trailing_slash_and_unknown_paths(client):
     assert client.get("/api/route/").json()["error"] == "invalid_request"  # same endpoint
     missing = client.get("/api/nope")
-    assert missing.status_code == 404 and missing.json()["error"] == "not_found"
-    assert client.get("/").json()["endpoints"]
-
-
-@pytest.mark.django_db
-def test_removed_endpoints_answer_a_json_404(client):
-    # The test runner and the stats endpoint were removed: their paths are now
-    # plain unknown paths, with the API's error body.
-    for response in (client.get("/api/tests"), client.post("/api/tests/run"), client.get("/api/stats")):
-        assert response.status_code == 404
-        body = response.json()
-        assert body["error"] == "not_found"
-        assert body["detail"] == (
-            f"No endpoint at {response.wsgi_request.path}. Use /api/route, /api/places or /api/about."
-        )
-        assert body["meta"] == {"external_api_calls": 0, "external_api_services": []}
+    assert missing.status_code == 404
+    assert missing.json() == {
+        "error": "not_found",
+        "detail": "No endpoint at /api/nope. Use /api/route, /api/places or /api/about.",
+        "meta": {"external_api_calls": 0, "external_api_services": []},
+    }
     assert set(client.get("/", HTTP_ACCEPT="*/*").json()["endpoints"]) == {
         "GET|POST /api/route", "GET /api/route/map", "GET /api/places", "GET /api/about",
     }

@@ -5,16 +5,16 @@ invalid request is answered in under a millisecond with 0 external calls.
 Everything that needs geocoding (place not found, same place written two ways,
 Alaska / Hawaii) is checked in ``services/planner.py``.
 
-The ``help_text`` of each field is published by ``/api/about`` (the planner page
-builds its parameter reference from it), with the default and the allowed range of
-the what-if settings.
+The ``help_text`` of each field is published by ``/api/about``, with the default and
+the allowed range of the truck settings.
 
-What-if settings (all optional): ``mpg``, ``max_range_miles``, ``corridor_miles``,
+Truck settings (all optional): ``mpg``, ``max_range_miles``, ``corridor_miles``,
 ``price_policy``, ``consolidate`` and ``safety_reserve_gal``. Missing, blank or
-null means the default (``settings.FUEL_PLANNER``), so a request without them plans
-exactly as before they existed; out of range is a 400 that says the range.
+null means the default (``settings.FUEL_PLANNER``); out of range is a 400 that says
+the range.
 """
 
+from django.conf import settings
 from rest_framework import serializers
 
 from .services.geocoding import has_letters, parse_coordinates
@@ -25,7 +25,7 @@ from .services.usa import region_of
 WHAT_IF_PARAMS = ("mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal")
 ALLOWED_PARAMS = ("start", "finish", "start_tank", "include", *WHAT_IF_PARAMS)
 # Optional extra blocks of the response, asked for with ?include=a,b.
-INCLUDE_VALUES = ("candidates",)
+INCLUDE_VALUES = ("details", "candidates")
 
 
 class SettingFloatField(serializers.FloatField):
@@ -84,22 +84,24 @@ class RouteRequestSerializer(serializers.Serializer):
         allow_blank=True,
         max_length=100,
         help_text=(
-            "Optional extra blocks, comma separated. 'candidates': every station within the corridor of the "
-            "route, with its price and mile marker (the planner page draws them). It does not change the plan "
-            "and shares its cache, so it costs no external call after the same trip was planned."
+            "Optional extra blocks, comma separated. 'details': how the plan was computed and the other "
+            "strategies it was compared with. 'candidates': every station near the route, with its price and "
+            "mile marker. Neither changes the plan; both share its cache, so they cost no external call after "
+            "the same trip was planned."
         ),
     )
-    # --- what-if settings: change the plan, never the route (0 external calls once routed) ---
+    # --- truck settings: change the plan, never the route (0 external calls once routed) ---
     mpg = _range_field(
-        "mpg", "What-if: the truck's fuel economy in miles per gallon. A thirstier truck buys more fuel."
+        "mpg", "Truck setting: miles per gallon. A thirstier truck buys more fuel."
     )
     max_range_miles = _range_field(
         "max_range_miles",
-        "What-if: how far a full tank goes, in miles. The tank size is this range divided by mpg.",
+        "Truck setting: how far a full tank goes, in miles. The tank size is this range divided by mpg.",
     )
     corridor_miles = _range_field(
         "corridor_miles",
-        "What-if: how far from the route a station may be, in miles. Wider means more stations to choose from.",
+        "Truck setting: how far from the route a station may be, in miles. Wider means more stations to choose "
+        "from.",
     )
     price_policy = serializers.ChoiceField(
         choices=list(PRICE_POLICIES),
@@ -107,7 +109,7 @@ class RouteRequestSerializer(serializers.Serializer):
         allow_blank=True,
         allow_null=True,
         help_text=(
-            "What-if: which price of a station to use when the file lists it several times. 'median' (default) "
+            "Truck setting: which price of a station to use when the file lists it several times. 'median' (default) "
             "is the price stored for it: the median of its quotes (the average of the two when there are two), "
             "unless load_stations ran with PRICE_POLICY=min; 'min' its cheapest quote (best case); 'max' its "
             "dearest (worst case)."
@@ -117,14 +119,15 @@ class RouteRequestSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
         help_text=(
-            "What-if: true (default) merges tiny stops into a neighbour when that costs at most a dollar; "
-            "false keeps the pure cheapest plan, small stops included."
+            "Truck setting: false (default) keeps the cheapest plan, small stops included; true merges a stop "
+            f"that buys less than {settings.FUEL_PLANNER['MIN_STOP_GALLONS']:g} gallons into a neighbour when that "
+            f"costs at most ${settings.FUEL_PLANNER['MAX_CONSOLIDATION_COST']:.2f} more."
         ),
     )
     safety_reserve_gal = SettingFloatField(
         0.0,
         help_text=(
-            "What-if: gallons that must always be left in the tank when the truck reaches any stop and the "
+            "Truck setting: gallons that must always be left in the tank when the truck reaches any stop and the "
             "destination. From 0 (default) to less than the tank. If no plan can keep it, the answer is a 422."
         ),
     )

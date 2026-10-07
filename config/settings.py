@@ -67,7 +67,7 @@ DATABASES = {
 
 # In-process caches. "default": finished plans (~60 KB each), Nominatim answers and
 # rate-limit counters. "routes": prepared routes (~100 KB for coast to coast), apart
-# so that many what-ifs (one plan each) cannot evict the route they are planned on,
+# so that many truck changes (one plan each) cannot evict the route they are planned on,
 # and kept longer (a road does not change in a day). Each process has its own; with
 # several workers use Redis (django.core.cache.backends.redis.RedisCache, plus
 # `pip install redis`) so they share them.
@@ -115,11 +115,12 @@ FUEL_PLANNER = {
     # first station, if that is further) and must arrive with the same amount, so
     # every mile driven is paid for. See planner._tank_rules.
     "START_RESERVE_MILES": float(_env("START_RESERVE_MILES", "50")),
-    # Stops that buy less than this are consolidated with a neighbour (optimizer),
-    # each fix costing at most MAX_CONSOLIDATION_COST dollars more than the optimum.
+    # consolidate=true (off by default): a stop that buys less than this is merged into a
+    # neighbour (optimizer._consolidate), each merge costing at most MAX_CONSOLIDATION_COST
+    # dollars more than the optimum.
     "MIN_STOP_GALLONS": float(_env("MIN_STOP_GALLONS", "10")),
     "MAX_CONSOLIDATION_COST": float(_env("MAX_CONSOLIDATION_COST", "1.0")),
-    # summary.comparison: the "quarter-tank driver" refuels at or below this fraction.
+    # details.comparison (include=details): the "quarter-tank driver" refuels at or below this fraction.
     "BASELINE_REFUEL_FRACTION": float(_env("BASELINE_REFUEL_FRACTION", "0.25")),
     # A station is a candidate if it is at most this far from the route line.
     # Station coordinates are city-level, so this also absorbs that error.

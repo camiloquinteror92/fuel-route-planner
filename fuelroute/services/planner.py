@@ -1,36 +1,33 @@
-"""Orchestrates one trip request; this is where the steps of "How it works" meet.
+"""Orchestrates one trip request: from two place names to the JSON answer.
 
     start, finish ──► geocode ──► checks ──► route ──► stations ──► tank ──► optimizer ──► JSON
-                     (offline)              (OSRM,    near route   rules    (greedy)      + GeoJSON
+                     (offline)              (OSRM,    near route   rules    (3 rules)     + GeoJSON
                                             1 call)   (numpy)
 
 1. ``geocode`` both inputs (0 external calls for "City, ST" and "lat,lon").
 2. Cheap checks BEFORE spending the routing call: same place, Alaska / Hawaii (no
    price data), station table loaded.
 3. Plan cache: the finished plan is cached by (station data version, rounded
-   coordinates, every what-if setting). A hit returns in a few ms with 0 external calls.
+   coordinates, every truck setting). A hit returns in a few ms with 0 external calls.
 4. ``get_route``: the one OSRM call (itself cached by coordinates), already
    resampled every mile and simplified.
 5. ``stations_along_route``: candidate stations within 10 miles, with mile markers.
 6. ``_tank_rules``: how much fuel the truck leaves with and must arrive with
    (``start_tank``, see the README "Assumptions").
 7. ``plan_fuel_stops``: where to stop and how much to buy.
-8. Build the response: stops (money computed in Decimal, so the stop costs add up
-   to the total to the cent), summary, warnings, GeoJSON, meta.
-9. Explain it (observational only, the plan is already decided):
-   ``summary.comparison`` prices the same trip for simple drivers that ignore
-   prices (same stations, same gallons); ``pipeline`` records how the plan was
-   computed (timings, the routing geometry, the corridor search funnel, the tank
-   rule, consolidation). Both are cached with the plan, so a cache hit still shows
-   what the first computation cost. ``include=candidates`` adds every corridor
-   station (for the map); it is kept compact in the cache and named on request.
+8. Build the answer: stops (money computed in Decimal, so the stop costs add up to
+   the total to the cent), summary, warnings, GeoJSON, meta. The summary compares
+   the plan with a driver who ignores prices (same stations, same gallons).
+9. ``details`` (sent only with ``include=details``): every strategy it was compared
+   with and how the plan was computed (timings, routing geometry, corridor counts,
+   tank rule, merges). Cached with the plan, so a cache hit still shows what the
+   first computation cost. ``include=candidates`` adds every corridor station.
 
-What-if settings (``PlanSettings``): mpg, range, corridor width, which price of a
-station to use, consolidation on/off and a safety reserve can be changed per
-request. They are part of the PLAN cache key but not of the ROUTE cache key, so a
-what-if on a trip already routed re-plans in milliseconds with 0 external calls.
-Their defaults are ``settings.FUEL_PLANNER``: a request without them plans exactly
-as before they existed.
+Truck settings (``PlanSettings``): mpg, range, corridor width, which price of a
+station to use, merging tiny stops and a safety reserve can be changed per request.
+They are part of the PLAN cache key but not of the ROUTE cache key, so another truck
+on a trip already routed is planned in milliseconds with 0 external calls. Their
+defaults are ``settings.FUEL_PLANNER``.
 """
 
 from __future__ import annotations
@@ -87,14 +84,14 @@ logger = logging.getLogger(__name__)
 
 START_EMPTY = "empty"
 START_FULL = "full"
-# Plain-language name and one-line meaning of each start_tank mode (``vehicle``).
-START_TANK_LABELS = {START_EMPTY: "Pay for every mile", START_FULL: "Start with a full tank"}
+# Plain-language name and one-line meaning of each start_tank mode (``/api/about``, the page).
+START_TANK_LABELS = {START_EMPTY: "Almost empty: pay for every mile", START_FULL: "Full: the first tank is free"}
 START_TANK_HELP = {
     START_EMPTY: (
-        "The truck borrows a small reserve at the start and must give it back at the end, "
-        "so the cost covers every mile driven."
+        "The truck leaves with just enough fuel to reach a truck stop and must arrive with the same amount. "
+        "So the bill is exactly the fuel the trip burns."
     ),
-    START_FULL: "The truck leaves with a full tank that costs nothing; only the fuel bought on the way is counted.",
+    START_FULL: "The truck leaves with a full tank that costs nothing. Only the fuel bought on the way is in the bill.",
 }
 
 # Why the truck leaves / arrives with that fuel (``pipeline.tank.reason``).
@@ -107,7 +104,7 @@ TANK_SAFETY_RESERVE = "safety_reserve"  # leaves with more to reach the first st
 TANK_LAST_STRETCH = "last_stretch"
 TANK_NO_STATION = "no_station_on_route"
 
-# Allowed range of each numeric what-if parameter of /api/route (validated by the
+# Allowed range of each numeric truck setting of /api/route (validated by the
 # serializer, published by /api/about). safety_reserve_gal: from 0 to less than the tank.
 WHAT_IF_RANGES = {
     "mpg": (3.0, 30.0),
@@ -144,7 +141,10 @@ class PlanSettings:
             max_range_miles=float(config["MAX_RANGE_MILES"]),
             corridor_miles=float(config["CORRIDOR_MILES"]),
             price_policy="median",
-            consolidate=True,
+            # Off: the plan is the pure cheapest one (the three rules). On, a stop that
+            # buys less than MIN_STOP_GALLONS is merged into a neighbour when that costs
+            # at most MAX_CONSOLIDATION_COST more.
+            consolidate=False,
             safety_reserve_gal=0.0,
         )
 
@@ -216,21 +216,19 @@ class PlanSettings:
         return {name: _param_text(getattr(self, name)) for name in self.changed()}
 
     def vehicle(self) -> dict:
-        """``vehicle`` block of the response: every effective setting."""
+        """``vehicle`` block of the response: every effective setting (``mpg`` of the
+        request is ``miles_per_gallon``; the other names are the request's)."""
         return {
-            "max_range_miles": self.max_range_miles,
             "miles_per_gallon": self.mpg,
             "tank_gallons": _round(self.tank_gallons, 2),
+            "max_range_miles": self.max_range_miles,
+            "safety_reserve_gal": self.safety_reserve_gal,
+            # How far a full tank goes while keeping the safety reserve.
+            "usable_range_miles": _round(self.usable_range_miles, 1),
             "start_tank": self.start_tank,
-            "start_tank_label": START_TANK_LABELS[self.start_tank],
-            "start_tank_help": START_TANK_HELP[self.start_tank],
-            # The what-if settings under their request names (``meta.settings_changed``).
-            "mpg": self.mpg,
+            "consolidate": self.consolidate,
             "corridor_miles": self.corridor_miles,
             "price_policy": self.price_policy,
-            "consolidate": self.consolidate,
-            "safety_reserve_gal": self.safety_reserve_gal,
-            "usable_range_miles": _round(self.usable_range_miles, 1),
         }
 
 
@@ -284,7 +282,7 @@ def _miles_text(miles: float) -> str:
 
 
 class _Timer:
-    """Milliseconds spent in each step, reported in ``meta.timings_ms``."""
+    """Milliseconds spent in each step, reported in ``details.timings_ms``."""
 
     def __init__(self):
         self.timings: dict[str, float] = {}
@@ -324,7 +322,7 @@ def plan_trip(
     every expected failure; ``views.py`` turns it into the HTTP error response.
     Pass ``client`` to read the number of external calls even when it raises.
     ``include``: optional extra blocks ("candidates"); they never change the plan
-    nor its cache key. ``what_if``: the optional settings of ``PlanSettings``
+    nor its cache key. ``what_if``: the optional truck settings of ``PlanSettings``
     (mpg, max_range_miles, corridor_miles, price_policy, consolidate,
     safety_reserve_gal); None or missing means the default.
 
@@ -353,8 +351,8 @@ def _plan_trip(
         raise StationDataNotLoaded("The station table is empty. Run `python manage.py load_stations` first.")
 
     # The route is cached apart (osrm.get_route), keyed by the coordinates only: a
-    # what-if misses this key but hits the route, so it costs no external call.
-    plan_key = f"plan:v6:{version}:{origin.as_param};{destination.as_param};{plan.cache_key()}"
+    # changed truck misses this key but hits the route, so it costs no external call.
+    plan_key = f"plan:v7:{version}:{origin.as_param};{destination.as_param};{plan.cache_key()}"
     cached_plan = cache.get(plan_key)  # the cache returns a fresh copy (unpickled)
     timer.lap("plan_cache_ms")
     if cached_plan is not None:
@@ -365,8 +363,9 @@ def _plan_trip(
         if "candidates" in include:
             cached_plan["candidates"] = _build_candidates(compact, cached_plan["fuel_stops"])
             timer.lap("candidates_ms")
-        # ``pipeline`` is left as it was: it describes the computation being reused.
-        cached_plan["meta"] = _meta(client, version, "hit", "hit", timer.timings, plan)
+        cached_plan["meta"] = _meta(client, "hit", "hit", plan)
+        # ``details.pipeline`` is left as it was: it describes the computation being reused.
+        cached_plan["details"].update(_request_details(client, version, timer))
         return cached_plan
 
     route, route_from_cache = get_route(origin, destination, client)
@@ -399,7 +398,6 @@ def _plan_trip(
             "distance_miles": _round(route.distance_miles, 1),
             "duration_hours": _round(route.duration_seconds / 3600, 2),
             "miles_outside_usa": _round(route.miles_outside_usa, 0),
-            "road_snap_miles": {"start": _round(route.snap_miles[0], 2), "finish": _round(route.snap_miles[1], 2)},
         },
         "vehicle": plan.vehicle(),
         "summary": summary,
@@ -412,13 +410,19 @@ def _plan_trip(
     }
     timer.lap("response_build_ms")
 
-    summary["comparison"] = _build_comparison(route, corridor, tank, fuel_plan, plan)
+    comparison = _build_comparison(route, corridor, tank, fuel_plan, plan)
+    summary["comparison"] = _short_comparison(comparison)
     timer.lap("comparison_ms")
 
-    result["meta"] = _meta(client, version, "hit" if route_from_cache else "miss", "miss", timer.timings, plan)
-    result["pipeline"] = _build_pipeline(
-        client, route, route_from_cache, funnel, corridor, tank, fuel_plan, total_cost, timer, plan
-    )
+    result["meta"] = _meta(client, "hit" if route_from_cache else "miss", "miss", plan)
+    result["details"] = {
+        **_request_details(client, version, timer),
+        "road_snap_miles": {"start": _round(route.snap_miles[0], 2), "finish": _round(route.snap_miles[1], 2)},
+        "comparison": comparison,
+        "pipeline": _build_pipeline(
+            client, route, route_from_cache, funnel, corridor, tank, fuel_plan, total_cost, timer, plan
+        ),
+    }
     result["_candidates"] = _compact_candidates(corridor)
     cache.set(plan_key, result)
     compact = result.pop("_candidates")  # private: kept in the cache, never sent
@@ -435,12 +439,22 @@ def _plan_trip(
     return result
 
 
+def _request_details(client: ExternalApiClient, version: str, timer: _Timer) -> dict:
+    """The parts of ``details`` that belong to THIS request (a cache hit replaces them).
+    ``timings_ms`` is the timer's own dict, so a step timed later (candidates) shows too."""
+    return {
+        "timings_ms": timer.timings,
+        "external_api_ms": _round(client.elapsed_ms, 1),
+        "station_data_version": version,
+    }
+
+
 def map_path(start: Location, finish: Location, plan: PlanSettings | str) -> str:
     """Relative URL of the HTML map for this trip (the view makes it absolute).
 
     It carries the same inputs as the API call, so while the plan is cached the map
     page makes no external call; after the cache expires it plans again (1 call).
-    What-if settings are added only when they differ from the defaults, so the link
+    Truck settings are added only when they differ from the defaults, so the link
     of a default plan is the same as before they existed.
     """
     if isinstance(plan, str):  # a bare start_tank
@@ -517,11 +531,11 @@ def _tank_rules(plan: PlanSettings, route: Route, corridor: list[CorridorStation
     )
     if plan.start_tank == START_FULL:
         note = (
-            f"The truck leaves with a full tank ({_short(capacity / mpg)} gal); that fuel is not included in the cost. "
-            "The plan buys only what it needs to reach the destination, so it may arrive nearly empty."
+            f"The truck leaves with a full tank ({_short(capacity / mpg)} gal) that costs nothing, so it is not in "
+            "the total. The plan buys only what it needs to reach the destination, so it may arrive nearly empty."
             if safety <= 0
-            else f"The truck leaves with a full tank ({_short(capacity / mpg)} gal); that fuel is not included in the "
-            "cost. The plan buys only what it needs to reach the destination with the safety reserve."
+            else f"The truck leaves with a full tank ({_short(capacity / mpg)} gal) that costs nothing, so it is not "
+            "in the total. The plan buys only what it needs to reach the destination with the safety reserve."
         )
         return TankRules(capacity, 0.0, note + safety_text, reason=TANK_FULL)
 
@@ -576,20 +590,19 @@ def _tank_rules(plan: PlanSettings, route: Route, corridor: list[CorridorStation
             f"{_gal((initial - final) / mpg)} gal burned on that stretch are not priced."
         )
     why = {
-        TANK_RESERVE: "the reserve",
-        TANK_FIRST_STATION: "enough to reach the first station",
+        TANK_RESERVE: f"{_miles_text(reserve)} miles of fuel, enough to reach a truck stop",
+        TANK_FIRST_STATION: f"enough to reach the first station of the price file, at mile {_miles_text(first)}",
         TANK_SAFETY_RESERVE: "enough to reach the first station with the safety reserve",
         TANK_LAST_STRETCH: (
-            f"less than the {_miles_text(reserve)}-mile reserve: the last station is {_miles_text(last_gap)} miles "
+            f"less than the usual {_miles_text(reserve)} miles: the last station is {_miles_text(last_gap)} miles "
             "before the destination, so that is all it can still have on arrival"
         ),
     }[reason]
     rules.note = (
-        f"Every mile driven is paid for: the truck leaves with {_gal(initial / mpg)} gal "
-        f"({why}) and must arrive "
-        "with the same amount, so the fuel bought equals the fuel burned"
+        f"The truck leaves with {_gal(initial / mpg)} gal ({why}) and must arrive with the same amount, "
+        "so the fuel bought is exactly the fuel the trip burns"
         + (" (except the unpriced fuel in 'warnings')" if rules.arrival_capped else "")
-        + ". That fuel is borrowed at the start and returned at the end; it is not a safety margin."
+        + "."
         + safety_text
     )
     return rules
@@ -605,13 +618,15 @@ def _optimize(route: Route, corridor: list[CorridorStation], tank: TankRules, pl
     safety = plan.safety_reserve_miles
     route_miles = route.distance_miles
     if not corridor and route_miles + max(tank.final, safety) > tank.initial + 1e-9:
+        full_tank_covers_it = route_miles <= plan.usable_range_miles and tank.initial < capacity
         raise NoFuelDataOnRoute(
             f"No station of the price file is within {plan.corridor_miles:g} miles of this "
             f"{route_miles:.0f}-mile route, so fuel cannot be bought or priced. The file has few or no "
-            "stations in some areas (for example only 8, all in the far south-east, in California). "
+            "stations in some areas (for example only 8, all in the far south-east, in California)."
             + (
-                f"With start_tank=full a trip under {_miles_text(plan.usable_range_miles)} miles needs no stop."
-                if route_miles <= plan.usable_range_miles and tank.initial < capacity
+                f" Leaving with a full tank (start_tank=full), a trip under {_miles_text(plan.usable_range_miles)} "
+                "miles needs no stop."
+                if full_tank_covers_it
                 else ""
             ),
             route_distance_miles=_round(route_miles, 1),
@@ -664,7 +679,7 @@ def _unreachable(exc: UnreachableError, route: Route, plan: PlanSettings) -> NoR
     hint = _NO_DATA_HINT
     if plan.changed():
         hint += (
-            " A larger range, a smaller safety reserve or a wider corridor (what-if settings) may make it plannable."
+            " A larger range, a smaller safety reserve or a wider corridor may make it plannable."
         )
     return NoReachableStation(
         f"{message} {hint}",
@@ -708,8 +723,12 @@ def _build_stops(
 ) -> tuple[list[dict], Decimal, Decimal]:
     """Stop rows with exact money (see ``_money_rows``) and why each stop is there."""
     opis_ids = [stop.candidate.ref.opis_id for stop in plan.stops]
-    stations = FuelStation.objects.in_bulk(opis_ids, field_name="opis_id")
-    if len(stations) != len(set(opis_ids)):
+    # The other stations a decision names: the cheaper one a stop buys fuel to reach,
+    # and the stops the merges removed.
+    named = [stop.cheaper_station.ref.opis_id for stop in plan.stops if stop.cheaper_station is not None]
+    named += [stop.candidate.ref.opis_id for stop in plan.before_consolidation]
+    stations = FuelStation.objects.in_bulk(set(opis_ids + named), field_name="opis_id")
+    if len(stations) != len(set(opis_ids + named)):
         # load_stations replaced the table while this request was running.
         raise StationDataChanged("The station data changed during the request; please send it again.")
 
@@ -732,11 +751,6 @@ def _build_stops(
                 "lat": station.latitude,
                 "lon": station.longitude,
                 "price_per_gallon": float(price),
-                "price_quotes": {
-                    "count": station.price_rows,
-                    "min": float(station.price_min),
-                    "max": float(station.price_max),
-                },
                 "mile_marker": _round(info.mile, 1),
                 "distance_from_route_miles": _round(info.offset_miles, 1),
                 # Rounded so that arrival + purchase never shows a tank above full
@@ -746,26 +760,49 @@ def _build_stops(
                 ),
                 "gallons": float(gallons),
                 "cost": float(cost),
-                "decision": _decision(stop, number, plan, route_miles, tank_gallons, stop_of_greedy),
+                "decision": _decision(
+                    stop, number, plan, route_miles, tank_gallons, stop_of_greedy, stations, plan_settings.consolidate
+                ),
             }
         )
     return stops, total_cost, total_gallons
 
 
+def _station_brief(candidate: Candidate, stations: dict) -> dict:
+    """A station a decision names: where it is and its price."""
+    station = stations[candidate.ref.opis_id]
+    return {
+        "name": station.name,
+        "city": station.city,
+        "state": station.state,
+        "mile": _round(candidate.mile, 1),
+        "price_per_gallon": float(Decimal(f"{candidate.price:.4f}")),
+    }
+
+
 def _decision(
-    stop: FuelStop, number: int, plan: FuelPlan, route_miles: float, tank_gallons: float, stop_of_greedy: dict
+    stop: FuelStop,
+    number: int,
+    plan: FuelPlan,
+    route_miles: float,
+    tank_gallons: float,
+    stop_of_greedy: dict,
+    stations: dict,
+    merges: bool,
 ) -> dict:
     """Why this stop of the FINAL plan exists and what its purchase covers.
 
-    * ``rule`` / ``cheaper_station_mile``: the greedy branch that created the stop.
-    * ``greedy_gallons``: what the greedy bought here. ``moved_in``: fuel the greedy
-      had planned at another station and consolidation moved here (``from_stop``:
-      that station's stop in this plan, null when the stop was removed);
-      ``moved_out``: fuel of this station's greedy purchase now bought at another
-      stop. ``consolidation_extra_cost``: what the fuel moved here costs more (or
-      less) at this price; summed over the stops it is the consolidation's cost.
+    * ``rule``: the rule that created the stop (``reach_cheaper``, ``finish``, ``fill_up``)
+      and, for ``reach_cheaper``, the ``cheaper_station`` it buys just enough to reach.
     * ``reaches``: where the fuel bought here takes the truck in the final plan, the
       next stop or the destination (``stop`` null). ``fills_tank``: leaves full.
+    * Merges (``consolidate=true`` only, ``merges``; the keys are left out otherwise):
+      ``consolidated`` says a merge changed this stop; ``greedy_gallons`` is what the three rules alone buy here;
+      ``moved_in`` is fuel the rules had planned at another station and the merge moved
+      here (``from_stop``: that station's stop in this plan, null when the merge removed
+      it); ``moved_out`` is fuel of this station now bought at another stop;
+      ``consolidation_extra_cost`` is what the fuel moved here costs more at this price.
+      Summed over the stops it is what the merges cost.
     """
     following = plan.stops[number] if number < len(plan.stops) else None
     greedy = plan.before_consolidation
@@ -777,28 +814,40 @@ def _decision(
             continue
         origin = greedy[k]
         extra += Decimal(f"{gallons:.6f}") * (price - Decimal(f"{origin.candidate.price:.4f}"))
+        place = stations[origin.candidate.ref.opis_id]
         moved_in.append(
-            {"mile": _round(origin.candidate.mile, 1), "gallons": _round(gallons), "from_stop": stop_of_greedy.get(k)}
+            {
+                "mile": _round(origin.candidate.mile, 1),
+                "city": place.city,
+                "state": place.state,
+                "gallons": _round(gallons),
+                "from_stop": stop_of_greedy.get(k),
+            }
         )
     moved_out = [
         {"mile": _round(other.candidate.mile, 1), "gallons": _round(other.sources[stop.greedy_index]), "to_stop": n}
         for n, other in enumerate(plan.stops, start=1)
         if other is not stop and other.sources.get(stop.greedy_index, 0.0) >= 0.005
     ]
-    return {
+    cheaper = stop.cheaper_station
+    decision = {
         "rule": stop.rule,
-        "cheaper_station_mile": None if stop.cheaper_station_mile is None else _round(stop.cheaper_station_mile, 1),
-        "consolidated": stop.consolidated,
-        "greedy_gallons": _round(stop.greedy_gallons),
-        "moved_in": moved_in,
-        "moved_out": moved_out,
-        "consolidation_extra_cost": float(_money(extra)),
+        "cheaper_station": None if cheaper is None else _station_brief(cheaper, stations),
         "reaches": {
             "stop": number + 1 if following else None,
             "mile": _round(following.candidate.mile if following else route_miles, 1),
         },
         "fills_tank": stop.fuel_on_arrival_gallons + stop.gallons >= tank_gallons - 0.005,
     }
+    if merges:
+        decision.update(
+            consolidated=stop.consolidated,
+            greedy_gallons=_round(stop.greedy_gallons),
+            moved_in=moved_in,
+            moved_out=moved_out,
+            consolidation_extra_cost=float(_money(extra)),
+        )
+    return decision
 
 
 def _build_summary(
@@ -806,18 +855,29 @@ def _build_summary(
 ) -> dict:
     mpg = plan_settings.mpg
     fuel_used = route.distance_miles / mpg
+    prices = _price_stats(corridor)
+    merged = None
+    if plan_settings.consolidate:
+        _, cost_before, _ = _money_rows(plan.before_consolidation)
+        merged = {
+            "stops_before": len(plan.before_consolidation),
+            "extra_cost": float(total_cost - cost_before),
+        }
     return {
         "total_fuel_cost": float(total_cost),
         "total_gallons_purchased": float(total_gallons),
+        "number_of_stops": len(stops),
+        "average_price_paid": _average_price(total_cost, total_gallons),
         "fuel_used_gallons": _round(fuel_used),
         "start_fuel_gallons": _round(tank.initial / mpg),
         "end_fuel_gallons": _round(plan.final_fuel_gallons),
         # Fuel burned that the total does not include: the free full tank in "full"
         # mode; normally 0 in "empty" mode (see warnings when it is not).
         "unpriced_fuel_gallons": _round(max(0.0, fuel_used - plan.total_gallons)),
-        "number_of_stops": len(stops),
-        "average_price_paid": _average_price(total_cost, total_gallons),
         "candidate_stations_on_route": len(corridor),
+        "price_per_gallon_on_route": None if prices is None else {"min": prices["min"], "max": prices["max"]},
+        # consolidate=true: how many stops the three rules alone make, and what merging costs.
+        "tiny_stops_merged": merged,
         "note": tank.note,
     }
 
@@ -882,22 +942,22 @@ def _build_comparison(
 
     if plan_settings.consolidate:
         label, rule = (
-            "This plan (optimized, consolidated)",
-            "Buys each mile of fuel at the cheapest station that can supply it, then fixes stops under "
-            f"{config['MIN_STOP_GALLONS']:g} gal when the fix costs at most ${config['MAX_CONSOLIDATION_COST']:.2f}.",
+            "This plan (tiny stops merged)",
+            "The three rules, then a stop that buys less than "
+            f"{config['MIN_STOP_GALLONS']:g} gal is merged into a neighbour when that costs at most "
+            f"${config['MAX_CONSOLIDATION_COST']:.2f} more.",
         )
     else:
         label, rule = (
-            "This plan (optimized, no consolidation)",
-            "Buys each mile of fuel at the cheapest station that can supply it; small stops are kept "
-            "(consolidate=false).",
+            "This plan (the three rules)",
+            "Buys each gallon at the cheapest station that can supply it; small stops are kept (consolidate=false).",
         )
     optimized, optimized_cost = _strategy(label, rule, plan.stops, with_stops=False)
     before, _ = _strategy(
-        "Pure optimum before consolidation",
+        "The three rules alone (before merging tiny stops)",
         (
-            "Buys each mile of fuel at the cheapest station that can supply it: just enough to reach a cheaper "
-            "station, or a full tank when none is within one tank."
+            "Buys each gallon at the cheapest station that can supply it: just enough to reach a cheaper "
+            "station, enough to finish, or a full tank when nothing within one tank is cheaper."
         ),
         plan.before_consolidation,
     )
@@ -951,6 +1011,21 @@ def _build_comparison(
         "corridor_average": corridor_average,
         "savings_vs_price_blind": savings_vs_price_blind,
         "savings_vs_corridor_average": _savings(average_cost, optimized_cost),
+    }
+
+
+def _short_comparison(comparison: dict | None) -> dict | None:
+    """``summary.comparison``: only the driver who ignores prices and what the plan saves
+    against it (the other strategies are in ``details.comparison``)."""
+    if comparison is None:
+        return None
+    blind = comparison["price_blind"]
+    return {
+        "price_blind": None if blind is None else {
+            key: blind[key]
+            for key in ("total_fuel_cost", "total_gallons_purchased", "number_of_stops", "average_price_paid")
+        },
+        "savings_vs_price_blind": comparison["savings_vs_price_blind"],
     }
 
 
@@ -1147,17 +1222,12 @@ def _build_geojson(route: Route, origin: Location, destination: Location, stops:
     }
 
 
-def _meta(
-    client: ExternalApiClient, version: str, route_cache: str, plan_cache: str, timings: dict, plan: PlanSettings
-) -> dict:
+def _meta(client: ExternalApiClient, route_cache: str, plan_cache: str, plan: PlanSettings) -> dict:
     return {
         "external_api_calls": client.call_count,
         "external_api_services": client.calls,
-        "external_api_ms": _round(client.elapsed_ms, 1),
         "route_cache": route_cache,
         "plan_cache": plan_cache,
-        "station_data_version": version,
-        "timings_ms": timings,
         # Settings of this plan that differ from the defaults (their values are in ``vehicle``).
         "settings_changed": plan.changed(),
     }

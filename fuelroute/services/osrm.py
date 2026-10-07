@@ -14,7 +14,7 @@ decodes it and prepares everything the planner needs from the geometry:
 
 Only that prepared route is cached (~100 KB for coast to coast, instead of the
 ~560 KB raw 35k-vertex geometry), keyed by the rounded coordinates, in its own cache
-(``CACHES["routes"]``): the plans live in the default cache, so a burst of what-ifs
+(``CACHES["routes"]``): the plans live in the default cache, so a burst of truck changes
 (one plan each) never evicts the route they are planned on. A per-key lock
 makes concurrent identical requests wait for the first one instead of all calling
 OSRM ("single flight").
@@ -116,11 +116,6 @@ def prepare_route(
         geometry_points=len(points),
         polyline_chars=int(polyline_chars),
     )
-
-
-def route_cache_key(start: Location, finish: Location) -> str:
-    """Key of the prepared route in the cache: the rounded coordinates only (no plan setting)."""
-    return _cache_key(start, finish)
 
 
 def _cache_key(start: Location, finish: Location) -> str:

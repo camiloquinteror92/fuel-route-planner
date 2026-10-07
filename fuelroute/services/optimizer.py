@@ -120,7 +120,7 @@ class FuelStop:
     cost: float
     fuel_on_arrival_gallons: float
     rule: str = ""
-    cheaper_station_mile: float | None = None  # RULE_REACH_CHEAPER: the station it reaches
+    cheaper_station: Candidate | None = None  # RULE_REACH_CHEAPER: the cheaper station it buys fuel to reach
     consolidated: bool = False  # consolidation changed the gallons bought here
     greedy_index: int = -1  # this station's position in FuelPlan.before_consolidation
     greedy_gallons: float = 0.0  # what the greedy bought here, before consolidation
@@ -162,7 +162,7 @@ class _Purchase:
     bought: float  # miles of range bought here
     arrival: float  # miles of range in the tank on arrival here
     rule: str = ""  # RULE_* of the greedy branch that created it
-    cheaper_mile: float | None = None  # RULE_REACH_CHEAPER: mile of the cheaper station
+    cheaper: Candidate | None = None  # RULE_REACH_CHEAPER: the cheaper station
     greedy_bought: float = 0.0  # ``bought`` as the greedy left it (before consolidation)
     index: int = -1  # position in the greedy's list of purchases
     sources: dict[int, float] = field(default_factory=dict)  # greedy index -> miles of this purchase
@@ -196,13 +196,13 @@ def _greedy(
         cheaper = next((i for i in ahead if stations[i].price < here.price), None)
         to_finish = route_miles - position + final_fuel
 
-        cheaper_mile = None
+        cheaper_station = None
         if cheaper is not None:
             # Any fuel bought here beyond what reaches the cheaper station would be
             # burned after it, where it costs less: buy only the shortfall (maybe 0).
             target, distance = cheaper, stations[cheaper].mile - position
             buy = max(0.0, distance - fuel)
-            rule, cheaper_mile = RULE_REACH_CHEAPER, stations[cheaper].mile
+            rule, cheaper_station = RULE_REACH_CHEAPER, stations[cheaper]
         elif to_finish <= capacity + _EPS:
             # This is the cheapest price left on the way: buy exactly what the rest of
             # the trip (plus the required arrival fuel) needs.
@@ -224,7 +224,7 @@ def _greedy(
         if buy > _EPS:
             k = len(purchases)
             purchases.append(
-                _Purchase(here, buy, fuel, rule, cheaper_mile, greedy_bought=buy, index=k, sources={k: buy})
+                _Purchase(here, buy, fuel, rule, cheaper_station, greedy_bought=buy, index=k, sources={k: buy})
             )
         fuel = fuel + buy - distance
         if target is None:
@@ -396,7 +396,7 @@ def _to_stops(purchases: list[_Purchase], miles_per_gallon: float, reserve_miles
                 cost=gallons * purchase.station.price,
                 fuel_on_arrival_gallons=(max(0.0, purchase.arrival) + reserve_miles) / miles_per_gallon,
                 rule=purchase.rule,
-                cheaper_station_mile=purchase.cheaper_mile,
+                cheaper_station=purchase.cheaper,
                 consolidated=abs(purchase.bought - purchase.greedy_bought) > _EPS,
                 greedy_index=purchase.index,
                 greedy_gallons=purchase.greedy_bought / miles_per_gallon,

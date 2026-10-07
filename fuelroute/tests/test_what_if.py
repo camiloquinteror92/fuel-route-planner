@@ -1,7 +1,7 @@
-"""What-if settings of /api/route (mpg, max_range_miles, corridor_miles, price_policy,
-consolidate, safety_reserve_gal): the defaults plan exactly as before they existed,
-each one changes the plan the way it should, on the cached route (0 external calls),
-and out-of-range values are a clear 400.
+"""Truck settings of /api/route (mpg, max_range_miles, corridor_miles, price_policy,
+consolidate, safety_reserve_gal): the plans match a golden file written before they
+existed, each one changes the plan the way it should, on the cached route (0 external
+calls), and out-of-range values are a clear 400.
 
 The synthetic route of test_api.py: east along latitude 35, about 680 road miles.
 """
@@ -24,12 +24,17 @@ from .conftest import osrm_answer
 from .test_api import FINISH, OK_ROUTE, ROUTE_MILES, START, add_stations, client, get, mile_of, stations  # noqa: F401
 
 GOLDEN = Path(__file__).parent / "data" / "default_plans.json"
-WHAT_IF = ("mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal")
-# Keys added to the response by the what-if settings (everything else must be unchanged).
-NEW_VEHICLE_KEYS = {
-    "start_tank_label", "start_tank_help", "mpg", "corridor_miles", "price_policy", "consolidate",
-    "safety_reserve_gal", "usable_range_miles",
-}
+SETTINGS = ("mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal")
+SUMMARY_KEYS = (
+    "total_fuel_cost", "total_gallons_purchased", "fuel_used_gallons", "start_fuel_gallons", "end_fuel_gallons",
+    "unpriced_fuel_gallons", "number_of_stops", "average_price_paid", "candidate_stations_on_route",
+)
+# What a stop IS in both versions of the answer (the wording and the explanation blocks changed).
+STOP_KEYS = (
+    "stop", "opis_id", "name", "address", "city", "state", "lat", "lon", "price_per_gallon", "mile_marker",
+    "distance_from_route_miles", "fuel_on_arrival_gallons", "gallons", "cost",
+)
+STRATEGY_STOP_KEYS = ("opis_id", "mile_marker", "price_per_gallon", "fuel_on_arrival_gallons", "gallons", "cost")
 
 
 def _ok(response) -> dict:
@@ -37,41 +42,67 @@ def _ok(response) -> dict:
     return response.json()
 
 
-def _without_new_keys(body: dict) -> dict:
-    """The response as it was before the what-if settings: new keys, timings and the data
-    version (row ids of the test database) removed."""
-    body = json.loads(json.dumps(body))
-    for key in ("timings_ms", "external_api_ms", "settings_changed", "station_data_version"):
-        body["meta"].pop(key, None)
-    for key in ("timings_ms", "external_api_ms", "computed_at"):
-        body["pipeline"].pop(key, None)
-    for key in NEW_VEHICLE_KEYS:
-        body["vehicle"].pop(key)
-    body["pipeline"]["tank"].pop("safety_reserve_gallons")
-    body["pipeline"]["tank"].pop("lowest_fuel_gallons")
-    body["pipeline"]["corridor"].pop("price_policy")
-    body["pipeline"]["corridor"].pop("stations_with_several_prices")
-    body["pipeline"]["optimizer"].pop("consolidate")
-    return body
+def _get_details(client, **params):
+    return get(client, include="details", **params)
 
 
-# --- defaults: identical to the API before the what-if settings ------------------------------------
+def _plan_of(body: dict) -> dict:
+    """The plan itself: where to stop, what to buy and pay, and the driver it is compared with."""
+    blind = (body["summary"]["comparison"] or {}).get("price_blind")
+    return {
+        "route": {key: body["route"][key] for key in ("distance_miles", "duration_hours", "miles_outside_usa")},
+        "summary": {key: body["summary"][key] for key in SUMMARY_KEYS},
+        "price_blind": blind and {key: blind[key] for key in ("total_fuel_cost", "number_of_stops")},
+        "stops": [
+            {
+                **{key: stop[key] for key in STOP_KEYS},
+                **{key: stop["decision"][key] for key in ("rule", "consolidated", "reaches", "fills_tank")},
+            }
+            for stop in body["fuel_stops"]
+        ],
+        "warnings": body["warnings"],
+        "geojson": body["map"]["geojson"],
+    }
+
+
+def _strategy_of(stops: list[dict]) -> list[dict]:
+    return [{key: stop[key] for key in STRATEGY_STOP_KEYS} for stop in stops]
+
+
+# --- the plans of the golden file ---------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "scenario", json.loads(GOLDEN.read_text(encoding="utf-8"))["scenarios"], ids=lambda scenario: scenario["name"]
 )
-def test_default_plans_are_identical_to_the_ones_before_what_if_settings(client, upstream, scenario):
-    """The golden file was written by the code of the commit before this feature (generated_from); a
-    scenario marked "revised" was regenerated after a deliberate change, explained in the file."""
+def test_plans_match_the_golden_file(client, upstream, scenario):
+    """The golden file was written by the code of the commit before the truck settings
+    (generated_from), when merging tiny stops was always on; a scenario marked "revised"
+    was regenerated after a deliberate change, explained in the file.
+
+    * With ``consolidate=true`` the plan is the golden plan, stop for stop and cent for cent.
+    * The default (``consolidate=false``) is the golden file's "pure optimum before
+      consolidation": the three rules alone.
+    """
     add_stations([tuple(row) for row in scenario["stations"]])
     upstream.respond((200, osrm_answer([tuple(p) for p in scenario["route"]["points"]], scenario["route"]["miles"])))
-    body = _ok(client.get("/api/route", scenario["request"]))
-    assert body["meta"]["settings_changed"] == (["start_tank"] if scenario["request"].get("start_tank") else [])
-    golden = dict(scenario["response"], meta=dict(scenario["response"]["meta"]))
-    golden["meta"].pop("station_data_version")
-    assert _without_new_keys(body) == golden
+    golden = scenario["response"]
+
+    merged = _ok(client.get("/api/route", {**scenario["request"], "consolidate": "true"}))
+    assert _plan_of(merged) == _plan_of(golden)
+
+    pure = _ok(client.get("/api/route", scenario["request"]))
+    assert pure["meta"]["settings_changed"] == (["start_tank"] if scenario["request"].get("start_tank") else [])
+    assert pure["meta"]["external_api_calls"] == 0  # the same road, from the cache
+    before = (golden["summary"]["comparison"] or {}).get("optimum_before_consolidation")
+    if before is None:
+        assert pure["fuel_stops"] == golden["fuel_stops"] == []
+    else:
+        assert _strategy_of(pure["fuel_stops"]) == _strategy_of(before["stops"])
+        assert pure["summary"]["total_fuel_cost"] == before["total_fuel_cost"]
+        assert pure["summary"]["number_of_stops"] == before["number_of_stops"]
+    assert len(upstream.calls) == 1
 
 
 @pytest.mark.django_db
@@ -80,7 +111,7 @@ def test_settings_equal_to_the_defaults_are_the_default_plan(client, upstream, s
     bare = _ok(get(client))
     explicit = _ok(
         get(client, mpg="10", max_range_miles="500.0", corridor_miles=10, price_policy="median",
-            consolidate="true", safety_reserve_gal="0")
+            consolidate="false", safety_reserve_gal="0")
     )
     assert explicit["meta"]["plan_cache"] == "hit"  # the same plan cache key
     assert explicit["meta"]["settings_changed"] == bare["meta"]["settings_changed"] == []
@@ -93,13 +124,13 @@ def test_settings_equal_to_the_defaults_are_the_default_plan(client, upstream, s
 @pytest.mark.parametrize("blank", ["", None])
 def test_blank_or_null_settings_mean_the_default(client, upstream, stations, blank):
     upstream.respond(OK_ROUTE)
-    settings = dict.fromkeys(WHAT_IF, blank)
+    settings = dict.fromkeys(SETTINGS, blank)
     if blank is None:
         body = _ok(client.post("/api/route", {"start": START, "finish": FINISH, **settings}, format="json"))
     else:
         body = _ok(get(client, **settings))
     assert body["meta"]["settings_changed"] == []
-    assert body["vehicle"]["mpg"] == 10 and body["vehicle"]["safety_reserve_gal"] == 0
+    assert body["vehicle"]["miles_per_gallon"] == 10 and body["vehicle"]["safety_reserve_gal"] == 0
 
 
 # --- every effective setting in the response ----------------------------------------------------------
@@ -110,25 +141,22 @@ def test_vehicle_lists_every_setting_and_meta_the_changed_ones(client, upstream,
     upstream.respond(OK_ROUTE)
     body = _ok(get(client))
     assert body["vehicle"] == {
-        "max_range_miles": 500.0, "miles_per_gallon": 10.0, "tank_gallons": 50.0,
-        "start_tank": "empty", "start_tank_label": "Pay for every mile",
-        "start_tank_help": body["vehicle"]["start_tank_help"],
-        "mpg": 10.0, "corridor_miles": 10.0, "price_policy": "median", "consolidate": True,
-        "safety_reserve_gal": 0.0, "usable_range_miles": 500.0,
+        "miles_per_gallon": 10.0, "tank_gallons": 50.0, "max_range_miles": 500.0, "safety_reserve_gal": 0.0,
+        "usable_range_miles": 500.0, "start_tank": "empty", "consolidate": False, "corridor_miles": 10.0,
+        "price_policy": "median",
     }
-    assert body["vehicle"]["start_tank_help"].endswith(".")
 
     changed = _ok(
         get(client, start_tank="full", mpg=8, max_range_miles=640, corridor_miles=12, price_policy="max",
-            consolidate="false", safety_reserve_gal=5)
+            consolidate="true", safety_reserve_gal=5)
     )
-    assert changed["meta"]["settings_changed"] == ["start_tank", *WHAT_IF]
+    assert changed["meta"]["settings_changed"] == ["start_tank", *SETTINGS]
     vehicle = changed["vehicle"]
-    assert (vehicle["mpg"], vehicle["max_range_miles"], vehicle["corridor_miles"]) == (8, 640, 12)
-    assert (vehicle["price_policy"], vehicle["consolidate"], vehicle["safety_reserve_gal"]) == ("max", False, 5)
+    assert (vehicle["miles_per_gallon"], vehicle["max_range_miles"], vehicle["corridor_miles"]) == (8, 640, 12)
+    assert (vehicle["price_policy"], vehicle["consolidate"], vehicle["safety_reserve_gal"]) == ("max", True, 5)
     assert vehicle["tank_gallons"] == 80 and vehicle["usable_range_miles"] == 600  # 640 - 5 gal x 8 mpg
-    assert vehicle["start_tank_label"] == "Start with a full tank"
-    assert all(name in vehicle for name in changed["meta"]["settings_changed"])
+    # Every changed setting is in vehicle, under the request's name (mpg is miles_per_gallon).
+    assert all(name in vehicle for name in changed["meta"]["settings_changed"] if name != "mpg")
 
 
 @pytest.mark.django_db
@@ -152,13 +180,13 @@ def test_settings_are_in_the_plan_cache_key_not_the_route_cache_key(client, upst
     assert first["meta"]["external_api_calls"] == 1
     variants = [
         {"mpg": 7}, {"max_range_miles": 350}, {"corridor_miles": 45}, {"price_policy": "min"},
-        {"consolidate": "false"}, {"safety_reserve_gal": 4}, {"start_tank": "full"},
+        {"consolidate": "true"}, {"safety_reserve_gal": 4}, {"start_tank": "full"},
     ]
     for params in variants:
-        body = _ok(get(client, **params))
+        body = _ok(_get_details(client, **params))
         assert body["meta"]["external_api_calls"] == 0, params
         assert (body["meta"]["route_cache"], body["meta"]["plan_cache"]) == ("hit", "miss"), params
-        assert body["pipeline"]["routing"]["from_route_cache"] is True
+        assert body["details"]["pipeline"]["routing"]["from_route_cache"] is True
         again = _ok(get(client, **params))
         assert again["meta"]["plan_cache"] == "hit", params
     assert len(upstream.calls) == 1  # one routing call for the whole session
@@ -167,7 +195,7 @@ def test_settings_are_in_the_plan_cache_key_not_the_route_cache_key(client, upst
 @pytest.mark.django_db
 def test_each_setting_changes_the_plan_with_no_external_call(client, upstream, stations):
     upstream.respond(OK_ROUTE)
-    base = _ok(get(client))
+    base = _ok(_get_details(client))
     stops = base["fuel_stops"]
 
     # mpg: every mile is still paid for, at the new consumption.
@@ -185,20 +213,24 @@ def test_each_setting_changes_the_plan_with_no_external_call(client, upstream, s
 
     # corridor_miles: the cheap station 40 miles off the route becomes a candidate and is used.
     assert 6 not in [s["opis_id"] for s in stops]
-    wide = _ok(get(client, corridor_miles=45))
+    wide = _ok(_get_details(client, corridor_miles=45))
     assert wide["summary"]["candidate_stations_on_route"] == base["summary"]["candidate_stations_on_route"] + 1
     assert 6 in [s["opis_id"] for s in wide["fuel_stops"]]
     assert wide["summary"]["total_fuel_cost"] < base["summary"]["total_fuel_cost"]
-    assert wide["pipeline"]["corridor"]["corridor_miles"] == 45
+    assert wide["details"]["pipeline"]["corridor"]["corridor_miles"] == 45
 
-    # consolidate=false: the pure optimum, small stops included, never dearer.
-    pure = _ok(get(client, consolidate="false"))
-    before = base["summary"]["comparison"]["optimum_before_consolidation"]
-    assert [s["opis_id"] for s in pure["fuel_stops"]] == [s["opis_id"] for s in before["stops"]]
-    assert pure["summary"]["total_fuel_cost"] == before["total_fuel_cost"] <= base["summary"]["total_fuel_cost"]
-    assert not any(s["decision"]["consolidated"] for s in pure["fuel_stops"])
-    assert pure["pipeline"]["optimizer"]["consolidate"] is False
-    assert "no consolidation" in pure["summary"]["comparison"]["optimized"]["label"]
+    # consolidate=true: tiny stops merged into a neighbour, at most a dollar more each.
+    assert not any("consolidated" in s["decision"] for s in stops)  # the default: the three rules alone
+    merged = _ok(_get_details(client, consolidate="true"))
+    before = merged["details"]["comparison"]["optimum_before_consolidation"]
+    assert [s["opis_id"] for s in stops] == [s["opis_id"] for s in before["stops"]]
+    assert base["summary"]["total_fuel_cost"] == before["total_fuel_cost"] <= merged["summary"]["total_fuel_cost"]
+    assert merged["summary"]["number_of_stops"] <= base["summary"]["number_of_stops"]
+    assert any(s["decision"]["consolidated"] for s in merged["fuel_stops"])
+    assert merged["details"]["pipeline"]["optimizer"]["consolidate"] is True
+    assert merged["summary"]["tiny_stops_merged"]["stops_before"] == base["summary"]["number_of_stops"]
+    assert "tiny stops merged" in merged["details"]["comparison"]["optimized"]["label"]
+    assert "the three rules" in base["details"]["comparison"]["optimized"]["label"]
 
 
 @pytest.mark.django_db
@@ -222,14 +254,14 @@ def test_price_policy_uses_the_cheapest_or_dearest_quote(client, upstream):
     quotes = {i: {"median": Decimal(p), "min": Decimal(low), "max": Decimal(high)} for i, _, _, p, low, high in rows}
     costs = {}
     for policy in ("median", "min", "max"):
-        body = _ok(get(client, price_policy=policy))
+        body = _ok(_get_details(client, price_policy=policy))
         for stop in body["fuel_stops"]:
             assert Decimal(str(stop["price_per_gallon"])) == quotes[stop["opis_id"]][policy], (policy, stop)
-        prices = body["pipeline"]["corridor"]["price_per_gallon"]
-        assert prices["min"] == float(min(q[policy] for q in quotes.values()))
-        assert body["pipeline"]["corridor"]["price_policy"] == policy
+        assert body["summary"]["price_per_gallon_on_route"]["min"] == float(min(q[policy] for q in quotes.values()))
+        corridor = body["details"]["pipeline"]["corridor"]
+        assert corridor["price_policy"] == policy
         # Only the stations whose quotes disagree can change price with the policy.
-        assert body["pipeline"]["corridor"]["stations_with_several_prices"] == 4
+        assert corridor["stations_with_several_prices"] == 4
         costs[policy] = body["summary"]["total_fuel_cost"]
     assert costs["min"] < costs["median"] < costs["max"]
     assert len(upstream.calls) == 1
@@ -242,13 +274,13 @@ def test_price_policy_uses_the_cheapest_or_dearest_quote(client, upstream):
 @pytest.mark.parametrize("tank", ["empty", "full"])
 def test_safety_reserve_is_kept_at_every_stop_and_at_the_destination(client, upstream, stations, tank):
     upstream.respond(OK_ROUTE)
-    base = _ok(get(client, start_tank=tank))
-    assert base["pipeline"]["tank"]["lowest_fuel_gallons"] < 8  # without it, the plan goes lower
-    body = _ok(get(client, start_tank=tank, safety_reserve_gal=8))
+    base = _ok(_get_details(client, start_tank=tank))
+    assert base["details"]["pipeline"]["tank"]["lowest_fuel_gallons"] < 8  # without it, the plan goes lower
+    body = _ok(_get_details(client, start_tank=tank, safety_reserve_gal=8))
     assert body["meta"]["external_api_calls"] == 0
     for stop in body["fuel_stops"]:
         assert stop["fuel_on_arrival_gallons"] >= 8 - 0.005, stop
-    summary, tank_info = body["summary"], body["pipeline"]["tank"]
+    summary, tank_info = body["summary"], body["details"]["pipeline"]["tank"]
     assert summary["end_fuel_gallons"] >= 8 - 0.005
     assert tank_info["safety_reserve_gallons"] == 8 and tank_info["lowest_fuel_gallons"] >= 8 - 0.005
     assert any("safety reserve" in text for text in (summary["note"],))
@@ -262,7 +294,7 @@ def test_safety_reserve_is_kept_at_every_stop_and_at_the_destination(client, ups
         assert summary["total_gallons_purchased"] == pytest.approx((ROUTE_MILES - 500) / 10 + 8, abs=0.05)
     # The simple drivers it is compared with keep the same reserve.
     for key in ("price_blind", "quarter_tank"):
-        strategy = body["summary"]["comparison"][key]
+        strategy = body["details"]["comparison"][key]
         if strategy:
             assert all(s["fuel_on_arrival_gallons"] >= 8 - 0.005 for s in strategy["stops"])
 
@@ -329,6 +361,7 @@ def test_out_of_range_settings_are_400(client, upstream, stations, params, field
 def test_plan_settings_guard_the_planner_too(settings):
     assert PlanSettings.resolve().changed() == []
     assert PlanSettings.resolve(mpg=None, consolidate=None).changed() == []
+    assert PlanSettings.defaults().consolidate is False  # the three rules alone, unless asked
     with pytest.raises(PlannerError):
         PlanSettings.resolve(safety_reserve_gal=50)  # = the default tank
     with pytest.raises(PlannerError):
@@ -338,8 +371,8 @@ def test_plan_settings_guard_the_planner_too(settings):
     for bad in ({"mpg": "ten"}, {"mpg": float("nan")}, {"corridor_miles": float("inf")}, {"max_range_miles": 0}):
         with pytest.raises(PlannerError):
             PlanSettings.resolve(**bad)
-    assert PlanSettings.resolve(consolidate="false").consolidate is False  # text, as in a query string
-    assert PlanSettings.resolve(consolidate="TRUE").changed() == []
+    assert PlanSettings.resolve(consolidate="true").consolidate is True  # text, as in a query string
+    assert PlanSettings.resolve(consolidate="FALSE").changed() == []
     # Defaults follow the configuration (environment variables of the README).
     settings.FUEL_PLANNER = {**settings.FUEL_PLANNER, "MILES_PER_GALLON": 8.0}
     assert PlanSettings.defaults().mpg == 8.0 and PlanSettings.resolve(mpg=8).changed() == []
@@ -373,15 +406,15 @@ def test_a_last_stretch_just_over_the_reserve_still_pays_every_mile(client, upst
     fields, rows = body["candidates"]["fields"], body["candidates"]["rows"]
     gap = body["route"]["distance_miles"] - max(row[fields.index("mile_marker")] for row in rows)
     max_range = round(gap + 49.6, 1)  # a full tank at the last station arrives with ~49.6 of the 50 miles
-    body = _ok(get(client, max_range_miles=max_range))
-    summary, tank = body["summary"], body["pipeline"]["tank"]
+    body = _ok(_get_details(client, max_range_miles=max_range))
+    summary, tank = body["summary"], body["details"]["pipeline"]["tank"]
     assert body["meta"]["external_api_calls"] == 0
     assert tank["reason"] == "last_stretch" and tank["arrival_capped"] is False
     assert summary["unpriced_fuel_gallons"] == 0 and body["warnings"] == []
     assert summary["start_fuel_gallons"] == summary["end_fuel_gallons"]
     assert summary["start_fuel_gallons"] == pytest.approx((max_range - gap) / 10, abs=0.02)
     assert summary["total_gallons_purchased"] == pytest.approx(summary["fuel_used_gallons"], abs=0.02)
-    assert "less than the 50-mile reserve" in summary["note"]
+    assert "less than the usual 50 miles" in summary["note"]
 
 
 @pytest.mark.django_db
@@ -390,13 +423,13 @@ def test_an_unpriced_last_stretch_names_two_different_amounts(client, upstream):
     # the first station, the truck arrives with less.
     add_stations([(1, 35.02, -99.3, "3.00"), (2, 35.02, -96.5, "3.00")])
     upstream.respond(OK_ROUTE)
-    body = _ok(get(client))
+    body = _ok(_get_details(client))
     (warning,) = [text for text in body["warnings"] if "last station" in text]
     found = re.search(r"arrive with ([\d.]+) gal instead of ([\d.]+): ([\d.]+) gal", warning)
     arrive, left, unpriced = map(float, found.groups())
     assert arrive < left and unpriced == pytest.approx(left - arrive, abs=0.011)
     assert unpriced == pytest.approx(body["summary"]["unpriced_fuel_gallons"], abs=0.011)
-    assert body["pipeline"]["tank"]["arrival_capped"] is True
+    assert body["details"]["pipeline"]["tank"]["arrival_capped"] is True
 
 
 @pytest.mark.django_db
@@ -433,8 +466,8 @@ def test_almost_no_usable_range_is_said_with_a_decimal(client, upstream, station
 
 @pytest.mark.django_db
 def test_a_flood_of_plans_does_not_evict_the_route(client, upstream, stations):
-    """Plans and routes live in separate caches: what-ifs (one plan each) can fill the plan
-    cache without evicting the route they are planned on, so a what-if stays free."""
+    """Plans and routes live in separate caches: truck changes (one plan each) can fill the plan
+    cache without evicting the route they are planned on, so a truck change stays free."""
     upstream.respond(OK_ROUTE)
     _ok(get(client))
     plans = caches["default"]

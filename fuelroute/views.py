@@ -1,6 +1,6 @@
 """HTTP layer of the JSON API: validates the input, calls the planner, shapes the response.
 
-* ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``), with optional what-if settings
+* ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``), with optional truck settings
 * ``GET /api/places``     -> type-ahead of US places from the offline index (``PlacesView``)
 * ``GET /api/about``      -> versions, truck defaults, loaded data, error codes (``AboutView``)
 * ``GET /``               -> browsers: redirect to the planner page; API clients: a small JSON index
@@ -38,7 +38,7 @@ def no_calls_meta() -> dict:
     return {"external_api_calls": 0, "external_api_services": []}
 
 
-# meta.timings_ms key -> Server-Timing metric name, in the order of the pipeline.
+# details.timings_ms key -> Server-Timing metric name, in the order of the pipeline.
 # The external calls are listed right after "routing" (one entry per service).
 _TIMING_ENTRIES = (
     ("geocoding_ms", "geocoding"),
@@ -71,7 +71,9 @@ def _external_entries(meta: dict, calls: list[tuple[str, float]] | None) -> list
 
 
 def server_timing(meta: dict, calls: list[tuple[str, float]] | None = None) -> str:
-    """``Server-Timing`` value from ``meta.timings_ms`` and the external calls.
+    """``Server-Timing`` value from the timings of the steps and the external calls.
+
+    ``meta``: ``{"timings_ms", "external_api_calls", "external_api_ms"}``.
 
     e.g. ``geocoding;dur=0.4, plan-cache;dur=0.6, routing;dur=812.3, osrm;dur=790.1;desc="1 call", ...``
     The middleware appends ``render`` and ``total``.
@@ -87,7 +89,9 @@ def server_timing(meta: dict, calls: list[tuple[str, float]] | None = None) -> s
 
 
 def _plan_from(data) -> tuple[dict | None, dict | None, int, dict, ExternalApiClient | None]:
-    """Validate ``data`` and plan the trip: (result, error_body, status, headers, client)."""
+    """Validate ``data`` and plan the trip: (result, error_body, status, headers, client).
+
+    The planner always returns ``details``; it is sent only with ``include=details``."""
     serializer = RouteRequestSerializer(data=data)
     if not serializer.is_valid():
         return None, {"error": "invalid_request", "detail": serializer.errors, "meta": no_calls_meta()}, 400, {}, None
@@ -99,13 +103,15 @@ def _plan_from(data) -> tuple[dict | None, dict | None, int, dict, ExternalApiCl
         body["meta"] = {"external_api_calls": client.call_count, "external_api_services": client.calls}
         body["_timings_ms"] = getattr(exc, "timings_ms", {})  # private: popped before sending
         return None, body, exc.status_code, exc.headers, client
+    if "details" not in serializer.validated_data.get("include", frozenset()):
+        result["_details"] = result.pop("details")  # private: only its timings reach the header
     return result, None, 200, {}, client
 
 
 class RoutePlanView(APIView):
     """Plan a trip and its cheapest fuel stops.
 
-    GET  /api/route?start=New York, NY&finish=Los Angeles, CA[&start_tank=empty|full][&include=candidates]
+    GET  /api/route?start=New York, NY&finish=Los Angeles, CA[&start_tank=empty|full][&include=details]
     POST /api/route  {"start": "...", "finish": "...", "start_tank": "empty"}
     """
 
@@ -129,8 +135,9 @@ class RoutePlanView(APIView):
             response = Response(error, status=status, headers=headers)
         else:
             result["map"]["map_url"] = self.request.build_absolute_uri(result["map"]["map_url"])
+            details = result.pop("_details", None) or result["details"]
+            meta = {**result["meta"], "timings_ms": details["timings_ms"], "external_api_ms": details["external_api_ms"]}
             response = Response(result)
-            meta = result["meta"]
         timing = server_timing(meta, calls)
         if timing:  # an invalid request has no step to report (the middleware adds the total)
             response["Server-Timing"] = timing
@@ -186,9 +193,9 @@ def index(request):
             "service": "Spotter fuel route API",
             "endpoints": {
                 "GET|POST /api/route": (
-                    "start, finish ('City, ST' or 'lat,lon'), start_tank (empty|full), include (candidates); "
-                    "what-if: mpg, max_range_miles, corridor_miles, price_policy (median|min|max), consolidate, "
-                    "safety_reserve_gal"
+                    "start, finish ('City, ST' or 'lat,lon'), start_tank (empty|full); "
+                    "truck settings: mpg, max_range_miles, safety_reserve_gal, consolidate, corridor_miles, "
+                    "price_policy (median|min|max); include (details, candidates)"
                 ),
                 "GET /api/route/map": "same parameters, the planner page (HTML)",
                 "GET /api/places": "q (the start of a US place name, 'chi' or 'chi, il'), limit: type-ahead",

@@ -120,6 +120,16 @@ h2[tabindex="-1"]:focus:not(:focus-visible) { outline: none; }
 body.is-loading .stepper-bar::after { opacity: 1; animation: sweep 1.1s linear infinite; }
 @keyframes sweep { from { background-position: -40% 0; } to { background-position: 140% 0; } }
 
+/* Where you are ("Step 3 of 6: Fuel stops · Next: Cost"), and why a locked step does not open. */
+.step-status { margin: 0 auto; padding-bottom: 8px; font-size: 0.86rem; color: var(--muted); min-height: 0; }
+.step-status:empty { display: none; }
+.step-status[data-kind="locked"] { color: #5c3d00; font-weight: 650; }
+.step-status[data-kind="locked"]::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--mid); vertical-align: 1px;
+}
+.btn.is-pulse { animation: pulse-btn 0.8s ease-out 2; }
+@keyframes pulse-btn { 0% { box-shadow: 0 0 0 0 rgb(47 143 78 / 60%); } 100% { box-shadow: 0 0 0 14px rgb(47 143 78 / 0%); } }
+
 /* --- strips over the steps ------------------------------------------------------------------ */
 
 .strips:has(.strip:not([hidden])) { padding-top: 12px; }
@@ -143,6 +153,8 @@ body.is-loading .stepper-bar::after { opacity: 1; animation: sweep 1.1s linear i
 .step-card h2 { font-size: 1.35rem; margin-bottom: 10px; overflow-wrap: anywhere; scroll-margin-top: calc(var(--stepper-h) + 12px); }
 .step-card h3 { font-size: 1.05rem; margin: 22px 0 8px; }
 .lead { font-size: 1.05rem; }
+.note { font-size: 0.92rem; background: var(--warn-soft); border: 1px solid #f0d58f; color: #5c3d00; border-radius: var(--radius-small); padding: 6px 10px; }
+.tip { font-size: 0.95rem; background: var(--accent-soft); border: 1px solid #a9c6f2; color: #123a75; border-radius: var(--radius-small); padding: 8px 12px; }
 body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; transition: opacity 0.2s; }
 
 .step-nav {
@@ -258,6 +270,12 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .rule-effect { font-weight: 600; }
 .why-line { background: var(--surface-2); border-radius: var(--radius-small); padding: 10px 12px; font-size: 0.95rem; }
 .play-hint { color: var(--muted); font-size: 0.92rem; margin-top: 14px; }
+/* The line under the map, copied next to the list of stops (phones only: on a wide
+   screen the map and the list are side by side). */
+.play-now {
+  position: sticky; top: calc(var(--stepper-h) + 4px); z-index: 5; margin: 0 0 8px; padding: 8px 10px; font-size: 0.88rem;
+  background: #fffaf2; border: 1px solid var(--trail); border-radius: var(--radius-small); box-shadow: var(--shadow);
+}
 
 .stop-cards { list-style: none; margin: 8px 0 12px; padding: 0; display: grid; gap: 8px; }
 .stop-card { border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--surface); scroll-margin: calc(var(--stepper-h) + 12px) 0 12px; }
@@ -274,6 +292,7 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .stop-card.is-current .stop-num { background: var(--trail); }
 .stop-main { display: grid; gap: 3px; min-width: 0; }
 .stop-place { overflow-wrap: anywhere; }
+.stop-name { font-size: 0.82rem; color: var(--muted); overflow-wrap: anywhere; }
 .stop-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .stop-line { font-size: 0.9rem; font-variant-numeric: tabular-nums; color: #33404f; }
 .stop-why { margin: 0; padding: 0 12px 10px 50px; font-size: 0.9rem; color: #33404f; }
@@ -340,6 +359,8 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .option:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .option input { margin: 4px 0 0; accent-color: var(--accent); }
 .option-help { display: block; color: var(--muted); font-size: 0.86rem; line-height: 1.35; margin-top: 2px; }
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.switch input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 .quick-list { display: grid; gap: 6px; }
 .btn-try { justify-content: flex-start; text-align: left; background: var(--surface); color: var(--accent-strong); border-color: #a9c6f2; font-weight: 600; }
 .btn-try:hover { background: var(--accent-soft); color: var(--accent-strong); }
@@ -356,6 +377,9 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .compare-table .diff.is-worse { color: var(--danger); }
 .compare-table .diff.is-better { color: var(--ok); }
 .compare-calls { margin: 8px 0 0; font-size: 0.92rem; }
+.compare-why-title { margin: 10px 0 4px; font-size: 0.92rem; }
+.compare-why { margin: 0; padding-left: 18px; font-size: 0.92rem; }
+.compare-why li { margin: 2px 0; }
 
 /* --- step: assignment -------------------------------------------------------------------- */
 
@@ -372,7 +396,19 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
   display: flex; flex-direction: column; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line);
   box-shadow: var(--shadow); background: #dfe6ec;
 }
-#map { height: 45vh; min-height: 260px; }
+#map { height: 45vh; min-height: 260px; scroll-margin-top: calc(var(--stepper-h) + 8px); }
+.map-legend {
+  display: none; flex-wrap: wrap; gap: 4px 14px; margin: 0; padding: 6px 12px; font-size: 0.82rem; color: var(--muted);
+  background: var(--surface); border-top: 1px solid var(--line);
+}
+.map-card.has-trip .map-legend { display: flex; }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.legend-stops { display: none; }
+.map-card.has-stops .legend-stops { display: inline-flex; }
+.legend-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #ffffff; box-shadow: 0 0 0 1px #9aa5b1; }
+.legend-start { background: var(--ok); }
+.legend-finish { background: var(--danger); }
+.legend-stop { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 2px solid #ffffff; box-shadow: 0 0 0 1px #9aa5b1; }
 .leaflet-container { font: 13px/1.4 var(--font); }
 .map-missing { margin: 0; padding: 24px 16px; color: var(--muted); text-align: center; }
 .map-reframe {
@@ -424,6 +460,8 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .gauge-e { left: 4px; }
 .gauge-f { right: 4px; }
 .gauge-reserve { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #18202a; z-index: 1; }
+.gauge-note { font-size: 0.78rem; font-weight: 700; color: var(--trail-line); text-transform: uppercase; letter-spacing: 0.04em; }
+.gauge-note:empty { display: none; }
 .cost-value { font-size: 1.05rem; }
 .player-event { margin: 0; font-size: 0.88rem; color: #33404f; min-height: 1.4em; }
 .player-event .mark { display: inline-flex; vertical-align: top; }
@@ -478,6 +516,15 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
   body.step-trip:not(.has-gap) .map-col { display: none; }
 }
 
+@media (min-width: 960px) {
+  .play-now { display: none; }
+}
+
+/* On a wide screen every step shows its name: only a locked step's message is said. */
+@media (min-width: 760px) {
+  .step-status[data-kind="where"] { display: none; }
+}
+
 /* --- phones ------------------------------------------------------------------------------------ */
 
 @media (max-width: 759.98px) {
@@ -493,6 +540,8 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
   .fact { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; }
   .fact dd { margin: 0; text-align: right; }
   .stop-why { padding-left: 12px; }
+  /* A popup never wider than the phone's map (Leaflet sets its width inline; max-width wins). */
+  .leaflet-popup-content { max-width: calc(100vw - 130px); }
   .bill-total { font-size: 2rem; }
   .gauge-track { width: 110px; }
   /* The assignment table becomes one card per row. */

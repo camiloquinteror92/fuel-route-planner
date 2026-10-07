@@ -2,7 +2,8 @@
 // only renders the shell; this module calls the public JSON API (the same
 // GET /api/route that Postman uses), keeps the trip in the URL (?start&finish&
 // start_tank and the truck settings; the step in the #hash) and fills every step
-// from the answer, /api/about and the browser's own timing.
+// from the answer, the standard truck's answer for the same trip, /api/about and the
+// browser's own timing.
 
 import { createClient, routeUrl, tripQuery } from './api.js';
 import { bind, derive, el, flattenErrors, fmt, plural, present, replace } from './format.js';
@@ -10,24 +11,30 @@ import { createMap } from './map.js';
 import * as plan from './plan.js';
 import { createPlayer } from './player.js';
 import { createCombobox } from './places.js';
-import { SETTING_NAMES, sameSettings, settingsFromQuery } from './settings.js';
+import { sameSettings, settingsFromQuery } from './settings.js';
 import { STEPS, createStepper } from './steps.js';
 import { answerText, createTruck, quickTrySettings, renderCompare } from './whatif.js';
 
 const CLIENT_TIMEOUT_MS = 40000;
-const FIELD_NAMES = ['start', 'finish', 'start_tank', ...SETTING_NAMES];
+const FIELD_NAMES = ['start', 'finish', 'start_tank', 'mpg', 'tank_gal', 'safety_reserve_gal', 'consolidate'];
+// The API judges the range; the page asks for the tank that gives it.
+const FIELD_OF = { max_range_miles: 'tank_gal' };
 const WIDE = '(min-width: 960px)';
+const PULSE_MS = 1600;
 
 const $ = (selector) => document.querySelector(selector);
 const config = JSON.parse($('#page-config').textContent);
 const client = createClient(config);
+const STANDARD = { start_tank: 'empty', settings: {} };
 
 const state = {
   route: null, // the last answer with a plan: {ok, status, body, serverMs, ...}
   params: null, // {start, finish, start_tank, settings} of that answer
   error: null, // the last failed request: {result, card: 'trip' | 'truck', params, usableRange}
   about: config.about || {},
-  baselines: new Map(), // trip -> the standard truck's plan of that trip, to compare
+  baselines: new Map(), // trip -> the standard truck's plan of that trip
+  calls: new Map(), // trip -> requests to the routing service so far, for every truck tried
+  nextTruck: null, // the truck a new trip uses, when it is not the one on screen ("Plan another trip")
   sayCompare: false, // announce "What changed" when it is ready
 };
 
@@ -37,7 +44,8 @@ const buttons = { trip: $('#plan-btn'), truck: $('#truck-apply') };
 const boxes = {
   trip: $('#trip-error'), truck: $('#truck-error'), compare: $('#truck-compare'), pending: $('#truck-pending'),
   warnings: $('#route-warnings'), cards: $('#stop-cards'), checks: $('#cost-checks'), bars: $('#cost-bars'),
-  json: $('#json-link'), yourTruck: $('#your-truck'), stale: $('#stale'), player: $('#player'),
+  json: $('#json-link'), yourTruck: $('#your-truck'), yourTruckLead: $('#your-truck-lead'), stale: $('#stale'),
+  player: $('#player'), playNow: $('#play-now'), mapCard: $('.map-card'),
 };
 
 function announce(text) {
@@ -47,6 +55,12 @@ function announce(text) {
 const isStandard = (params) => params.start_tank !== 'full' && !Object.keys(params.settings || {}).length;
 const tripKey = (params) => `${params.start.trim().toLowerCase()}|${params.finish.trim().toLowerCase()}`;
 const sameTruck = (a, b) => a.start_tank === b.start_tank && sameSettings(a.settings, b.settings);
+const osrmCalls = (body) => (body?.meta?.external_api_services || []).filter((name) => name === 'osrm').length;
+
+function countCalls(params, body) {
+  const key = tripKey(params);
+  state.calls.set(key, (state.calls.get(key) || 0) + osrmCalls(body));
+}
 
 // --- the form and the address -----------------------------------------------------------
 
@@ -74,17 +88,11 @@ function hashStep() {
 }
 
 const COORDS = /^\s*-?\d+(\.\d+)?\s*[, ]\s*-?\d+(\.\d+)?\s*$/;
-const STATE_AFTER_COMMA = /,\s*([A-Za-z]{2})\s*$/;
 
 // A hint while typing; the API decides (the same rules, server side).
 function courtesyHint(value) {
   if (!value || COORDS.test(value)) return '';
   if (value.length < 3 || !/[a-z]/i.test(value)) return 'Use “City, ST”, like “Dallas, TX”.';
-  const codes = state.about?.api?.state_codes;
-  const tail = value.match(STATE_AFTER_COMMA);
-  if (tail && Array.isArray(codes) && !codes.includes(tail[1].toUpperCase())) {
-    return `“${tail[1].toUpperCase()}” is not a US state. Start and finish must be in the USA.`;
-  }
   return '';
 }
 
@@ -100,10 +108,11 @@ function fieldInput(name) {
   return inputs[name] || $(`#set-${name}`);
 }
 
-function showFieldError(name, message) {
+function showFieldError(apiName, message) {
+  const name = FIELD_OF[apiName] || apiName;
   const node = $(`#${name}-error`);
   if (!node) return false;
-  node.textContent = message;
+  node.textContent = apiName === 'max_range_miles' ? `Range on a full tank (tank × miles per gallon): ${message}` : message;
   node.hidden = false;
   if (inputs[name]) $(`#${name}-hint`).hidden = true; // the server's message says it better
   fieldInput(name)?.setAttribute('aria-invalid', 'true');
@@ -170,10 +179,12 @@ async function planTrip(params, { card = 'trip', target = null, history = 'push'
   }
   if (controller !== current) return;
   controller = null;
+  countCalls(params, result.body);
   if (result.ok && result.body) {
     const step = target || (card === 'truck' ? 'truck' : 'route');
     state.route = result;
     state.params = params;
+    state.nextTruck = null;
     const url = `${window.location.pathname}?${tripQuery(params)}#${step}`;
     if (history === 'push') window.history.pushState({ params }, '', url);
     else if (history === 'replace') window.history.replaceState({ params }, '', url);
@@ -195,8 +206,9 @@ async function planTrip(params, { card = 'trip', target = null, history = 'push'
   if (card === 'truck') (state.error ? boxes.truck : boxes.compare).scrollIntoView({ block: 'nearest' });
 }
 
-// The standard truck's plan of the same trip, to compare a new truck with. It reuses the
-// road the server just saved, so it costs no request to OSRM.
+// The standard truck's plan of the same trip: "What changed" compares with it and the
+// "For Spotter" step shows it. It reuses the road the server just saved, so it costs
+// no request to OSRM.
 async function rememberBaseline(params, body) {
   const key = tripKey(params);
   if (isStandard(params)) {
@@ -206,22 +218,38 @@ async function rememberBaseline(params, body) {
   const known = state.baselines.get(key);
   if (known && known.status !== 'error') return;
   state.baselines.set(key, { status: 'loading' });
-  const r = await client.plan({ start: params.start, finish: params.finish, start_tank: 'empty', settings: {} });
+  const r = await client.plan({ start: params.start, finish: params.finish, ...STANDARD });
+  countCalls(params, r.body);
   state.baselines.set(key, r.ok && r.body ? { status: 'ok', body: r.body } : { status: 'error' });
-  renderTruck();
+  update();
 }
 
 // --- drawing ---------------------------------------------------------------------------------
 
+function standardBody() {
+  if (!state.params) return null;
+  const known = state.baselines.get(tripKey(state.params));
+  return known?.status === 'ok' ? known.body : null;
+}
+
 function context() {
   const r = state.route;
-  return { route: r?.ok ? r.body : null, about: state.about, client: { server_ms: r?.serverMs ?? null }, derived: derive(state) };
+  const standard = standardBody();
+  const tripCalls = state.params ? state.calls.get(tripKey(state.params)) ?? null : null;
+  return {
+    route: r?.ok ? r.body : null,
+    standard,
+    about: state.about,
+    client: { server_ms: r?.serverMs ?? null },
+    derived: derive({ ...state, standard, tripCalls }),
+  };
 }
 
 function update() {
   bind(document, context());
   updateStrips();
   renderTruck();
+  if (state.params) boxes.json.setAttribute('href', routeUrl(config.api.route, { start: state.params.start, finish: state.params.finish, ...STANDARD }));
 }
 
 function renderPlan() {
@@ -229,7 +257,6 @@ function renderPlan() {
   plan.renderWarnings(boxes.warnings, body);
   plan.renderStopCards(boxes.cards, body, state.about, { onSelect: (n) => selectStop(n, 'list') });
   plan.renderCost({ checks: boxes.checks, bars: boxes.bars }, body);
-  boxes.json.setAttribute('href', routeUrl(config.api.route, state.params));
   player.load(body);
   document.title = `${body.start.label} → ${body.finish.label} · Fuel Route Planner`;
 }
@@ -242,12 +269,24 @@ function selectStop(n, source) {
   else if (source === 'map') mapCtl.selectStop(n);
 }
 
-// The strips over the steps: "Showing your truck", results of an older trip, and
-// "Not planned yet" in the Truck step.
+// The truck the next new trip is planned with: "Plan another trip" chooses the standard
+// one; otherwise the one of the plan on screen (changes not yet planned in the Truck
+// step stay there), or the one of the link before any plan.
+function currentTruck() {
+  if (state.nextTruck) return state.nextTruck;
+  return state.params ? { start_tank: state.params.start_tank, settings: state.params.settings } : truck.read();
+}
+
+// The strips over the steps: "Showing your truck" (in the Trip step: "Your next trip
+// uses your truck"), results of an older trip, and "Not planned yet" in the Truck step.
 function updateStrips() {
-  const later = Boolean(state.route) && stepper.current() !== 'trip';
+  const step = stepper.current();
+  const later = Boolean(state.route) && step !== 'trip';
   const d = derive(state);
-  boxes.yourTruck.hidden = !(later && d.is_your_truck);
+  const nextChanged = Boolean(state.route) && !isStandard(currentTruck());
+  const onTrip = step === 'trip';
+  boxes.yourTruck.hidden = onTrip ? !nextChanged : !(later && d.is_your_truck && step !== 'assignment');
+  boxes.yourTruckLead.textContent = onTrip ? 'Your next trip uses your truck' : 'Showing your truck';
   const stale = Boolean(state.params) && (inputs.start.value.trim() !== state.params.start || inputs.finish.value.trim() !== state.params.finish);
   boxes.stale.hidden = !(later && stale);
   boxes.pending.hidden = !(state.params && !sameTruck(truck.read(), state.params));
@@ -271,11 +310,13 @@ function showMapFor(step) {
   const error = state.error;
   const gap = Boolean(error?.usableRange) && error.card === step;
   document.body.classList.toggle('has-gap', gap);
+  const body = state.route?.body;
+  boxes.mapCard.classList.toggle('has-trip', !gap && step !== 'trip' && Boolean(body));
+  boxes.mapCard.classList.toggle('has-stops', !gap && step !== 'trip' && step !== 'route' && Boolean(body?.fuel_stops?.length));
   if (gap) {
     mapCtl.renderGap(error.result.body, { usableRange: error.usableRange });
     return;
   }
-  const body = state.route?.body;
   if (step === 'trip' || !body) mapCtl.showUsa();
   else if (step === 'route') mapCtl.showRouteOnly(body);
   else mapCtl.showStops(body);
@@ -287,6 +328,13 @@ function onStep(step, previous) {
   boxes.player.hidden = !(step === 'stops' && state.route && window.L);
   showMapFor(step);
   updateStrips();
+}
+
+// A locked step was asked for: point at what unlocks it.
+function onLocked() {
+  buttons.trip.classList.add('is-pulse');
+  setTimeout(() => buttons.trip.classList.remove('is-pulse'), PULSE_MS);
+  if (!inputs.start.value.trim()) inputs.start.focus();
 }
 
 // --- errors ----------------------------------------------------------------------------------
@@ -334,12 +382,24 @@ function standardTruckButton() {
   return el('button', { type: 'button', class: 'btn', dataset: { action: 'standard-truck' } }, 'Back to the standard truck');
 }
 
+// No truck stop near a road that a full tank covers: plan it leaving full (the road is
+// already saved, so this costs no request to the routing service).
+function fullTankButton(params, card) {
+  return el('button', {
+    type: 'button', class: 'btn',
+    onclick: () => planTrip({ ...params, start_tank: 'full' }, { card }),
+  }, 'Try leaving with a full tank');
+}
+
 function renderError() {
   const { result, params, card } = state.error;
   const body = result.body && typeof result.body === 'object' ? result.body : {};
   const code = result.failure || body.error || (result.status ? `http_${result.status}` : 'error');
   const asked = { ...truck.defaults(), ...params.settings };
   const settingsAsked = !isStandard(params);
+  // How far a tank goes: the range asked for, less the safety fuel it must keep.
+  const safety = Number(asked.safety_reserve_gal) || 0;
+  const usable = asked.max_range_miles - safety * asked.mpg;
 
   // Messages under the fields the API named.
   const fields = [];
@@ -359,16 +419,27 @@ function renderError() {
   if (WAIT_TITLES[code]) title = WAIT_TITLES[code](Number.isFinite(wait) ? wait : '—');
   if (truckFields) title = 'Please check the truck';
   if (result.status === 422 && settingsAsked) title = 'This truck cannot make the trip.';
-  if (code === 'no_reachable_fuel_station' && body.gap_end) {
-    // How far a tank goes: the range asked for, less the safety fuel it must keep.
-    const usable = asked.max_range_miles - (Number(asked.safety_reserve_gal) || 0) * asked.mpg;
-    state.error.usableRange = present(usable) ? usable : null;
-    lines = [`No truck stop between mile ${fmt.dec1(body.from_mile)} and mile ${fmt.dec1(body.gap_end.mile)} (${fmt.miles(body.gap_miles)}). `
-      + `A full tank only lasts ${fmt.miles_short(usable)}. The map shows that stretch.`];
-  }
   let action = null;
-  if (RETRY.has(code) || result.status === 502) action = retryButton(wait);
-  else if ((truckFields || result.status === 422) && settingsAsked) action = standardTruckButton();
+  if (code === 'no_reachable_fuel_station' && body.gap_end) {
+    state.error.usableRange = present(usable) ? usable : null;
+    const tank = safety > 0 ? 'The fuel above the safety fuel lasts only' : 'A full tank lasts only';
+    lines = [`No truck stop between mile ${fmt.dec1(body.from_mile)} and mile ${fmt.dec1(body.gap_end.mile)} (${fmt.miles(body.gap_miles)}). `
+      + `${tank} ${fmt.miles_short(usable)}. The map shows that stretch.`];
+  }
+  if (code === 'no_fuel_data_on_route') {
+    const corridor = asked.corridor_miles ?? state.about.vehicle?.corridor_miles;
+    const distance = body.route_distance_miles;
+    const ca = derive(state).ca_stations;
+    lines = [`The price file has no truck stop within ${fmt.miles_short(corridor)} of this ${fmt.miles(distance)} road, `
+      + 'so the fuel cannot be bought or priced.'];
+    if (present(ca)) lines.push(`Some states have very few truck stops in the file: California has only ${fmt.int(ca)}, all in its south-east corner.`);
+    if (params.start_tank !== 'full' && present(distance) && distance <= usable) {
+      lines.push(`A full tank lasts ${fmt.miles_short(usable)}, so leaving with a full tank covers this trip with no stop.`);
+      action = fullTankButton(params, card);
+    }
+  }
+  if (!action && (RETRY.has(code) || result.status === 502)) action = retryButton(wait);
+  else if (!action && (truckFields || result.status === 422) && settingsAsked) action = standardTruckButton();
 
   const box = boxes[card];
   replace(box, el('div', { class: 'error-card', role: 'alert' },
@@ -383,12 +454,6 @@ function renderError() {
 }
 
 // --- actions --------------------------------------------------------------------------------
-
-// The truck a new trip is planned with: the one of the plan on screen (changes not yet
-// planned in the Truck step stay there), or the one of the link before any plan.
-function currentTruck() {
-  return state.params ? { start_tank: state.params.start_tank, settings: state.params.settings } : truck.read();
-}
 
 function submitTrip() {
   const start = inputs.start.value.trim();
@@ -409,14 +474,34 @@ function applyTruck() {
   planTrip({ start: state.params.start, finish: state.params.finish, ...truck.read() }, { card: 'truck' });
 }
 
-// "Back to the standard truck": every setting cleared (those of a link too), and the trip
-// planned again (the one that failed, if the button sits in an error).
+// "Back to the standard truck": every setting cleared (those of a link too). In the Trip
+// step it only sets the truck of the next trip; elsewhere the trip on screen (or the one
+// that failed) is planned again.
 function standardTruck() {
   truck.write({});
+  const step = stepper.current();
+  if (step === 'trip' && state.route && !state.error) {
+    state.nextTruck = { ...STANDARD };
+    updateStrips();
+    announce('The next trip uses the standard truck.');
+    return;
+  }
   const trip = state.error?.params || state.params;
   if (!trip) return;
-  const step = stepper.current();
   planTrip({ start: trip.start, finish: trip.finish }, { card: step === 'truck' ? 'truck' : 'trip', target: step === 'trip' ? 'route' : step });
+}
+
+// "Plan another trip": empty fields, the standard truck, the cursor in From.
+function planAnother() {
+  truck.write({});
+  state.nextTruck = { ...STANDARD };
+  inputs.start.value = '';
+  inputs.finish.value = '';
+  clearErrors();
+  stepper.go('trip');
+  updateHints();
+  updateStrips();
+  inputs.start.focus();
 }
 
 function tryQuick(quickTry) {
@@ -452,10 +537,11 @@ const player = createPlayer(boxes.player, {
     mapCtl.map?.closePopup();
     mapCtl.reframe();
   },
+  mirror: boxes.playNow,
 });
 const truck = createTruck({ root: panels.truck, getAbout: () => state.about, onChange: updateStrips, onApply: applyTruck });
 truck.renderTries($('#quick-tries'), tryQuick);
-const stepper = createStepper({ nav: $('.stepper-bar'), panels, top: $('#main'), onChange: onStep, announce });
+const stepper = createStepper({ nav: $('.stepper-bar'), panels, top: $('#main'), status: $('#step-status'), onChange: onStep, onLocked, announce });
 for (const name of ['start', 'finish']) {
   createCombobox(inputs[name], $(`#${name}-listbox`), {
     fetchPlaces: (q, options) => client.places(q, options),
@@ -495,11 +581,7 @@ for (const chip of document.querySelectorAll('.chip[data-start]')) {
 document.addEventListener('click', (event) => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (action === 'standard-truck') standardTruck();
-  else if (action === 'plan-another') {
-    stepper.go('trip');
-    inputs.start.focus();
-    inputs.start.select();
-  }
+  else if (action === 'plan-another') planAnother();
 });
 window.addEventListener('popstate', () => {
   const params = paramsFromUrl();

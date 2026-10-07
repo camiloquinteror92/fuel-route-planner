@@ -49,9 +49,12 @@
   </div>
 
   <ul class="fine-print">
-    <li>Fuel prices: <span data-live="about.data.geocoded" data-format="int">—</span> truck stops in
-      <span data-live="about.data.states" data-format="int">—</span> states, from the price file given with the assignment.</li>
-    <li>Standard truck (from the assignment): <span data-live="about.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon,
+    <li>Fuel prices: <span data-live="about.data.geocoded" data-format="int">—</span> truck stops across the
+      <span data-live="about.data.states" data-format="int">—</span> mainland states (none in Alaska or Hawaii), from the price file Spotter gave.</li>
+    <li data-live-if="derived.ca_stations">Some states have very few: California has only
+      <span data-live="derived.ca_stations" data-format="int">—</span>, all in its south-east corner, so some trips inside California cannot be priced.</li>
+    <li>Standard truck: <span data-live="about.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon and a
+      <span data-live="about.vehicle.tank_gallons" data-format="gal">—</span> tank, so
       <span data-live="about.vehicle.max_range_miles" data-format="miles_short">—</span> on a full tank. You can change it in the Truck step.</li>
   </ul>
 

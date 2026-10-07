@@ -4,7 +4,7 @@ files, and the guards behind its rules.
 * Rendering the page costs 0 external calls; the browser calls ``/api/route`` with
   exactly the parameters a Postman request carries.
 * The page is a guided tour in six steps (Trip, Route, Fuel stops, Cost, Truck,
-  Assignment), accessible, in plain words.
+  For Spotter), accessible, in plain words.
 * CSS and ES modules are served with the right types (DEBUG off, no collectstatic).
 * "No number is written by hand": visible text has no digits unless it is a live
   value (``data-live``) or a fixed literal (``data-literal``), and the JavaScript
@@ -33,9 +33,12 @@ from .test_api import FINISH, OK_ROUTE, START, get, stations  # noqa: F401  (sta
 PAGE = "/api/route/map"
 JS_DIR = web.STATIC_DIR / "fuelroute" / "js"
 TEMPLATES = Path(web.__file__).resolve().parent / "templates" / "fuelroute"
-ALLOWED_ROOTS = {"route", "about", "client", "derived"}
+ALLOWED_ROOTS = {"route", "standard", "about", "client", "derived"}
 STEPS = ["trip", "route", "stops", "cost", "truck", "assignment"]
-CONTROLS = {"mpg", "max_range_miles", "safety_reserve_gal"}
+# Number boxes (with a slider) of the Truck step; the tank sets max_range_miles (tank x mpg).
+NUMBER_CONTROLS = {"mpg", "tank_gal", "safety_reserve_gal"}
+# The API settings the Truck step controls.
+CONTROLLED = {"mpg", "max_range_miles", "safety_reserve_gal", "consolidate"}
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 JARGON = (
     "greedy", "consolidat", "corridor", "cache", "pipeline", "OPIS", "GeoJSON", "polyline", "price-blind", "what-if",
@@ -271,18 +274,23 @@ def test_page_text_has_no_jargon(client):
 def test_truck_step_offers_only_the_essential_settings(client):
     page = Page(client.get(PAGE).content.decode())
     ids = set(page.by_id())
-    for name in CONTROLS:
+    for name in NUMBER_CONTROLS:
         assert {f"set-{name}", f"set-{name}-range", f"{name}-error"} <= ids, name
+    # People think in tank size: the range is shown, not asked (regression: 8 mpg grew the tank).
+    assert "set-max_range_miles" not in ids and "set-range" in ids
+    assert page.find(id="set-consolidate")[0]["type"] == "checkbox"
     for value in ("empty", "full"):
         # The start tank belongs to the trip form (also submitted without JavaScript).
         assert page.find(type="radio", name="start_tank", value=value)[0]["form"] == "trip-form"
-    for name in set(WHAT_IF_PARAMS) - CONTROLS:
+    for name in set(WHAT_IF_PARAMS) - CONTROLLED:
         assert f"set-{name}" not in ids and not page.find(name=name), f"{name} should have no control"
     # The page still knows all of the API's settings: a link that brings one keeps it.
     settings_js = js_sources()["settings.js"]
     assert sorted(re.findall(r"^    name: '(\w+)'", settings_js, re.M)) == sorted(web.WHAT_IF_PARAMS)
-    assert set(re.findall(r"^    name: '(\w+)', control: true", settings_js, re.M)) == CONTROLS
+    assert set(re.findall(r"^    name: '(\w+)', control: true", settings_js, re.M)) == CONTROLLED
     assert web.WHAT_IF_PARAMS == WHAT_IF_PARAMS  # the API's own list
+    # Regression: the quick tries silently undid the user's changes. They say they start over.
+    assert "Try one change on the standard truck:" in " ".join(page.all_text)
 
 
 @pytest.mark.django_db
@@ -362,7 +370,7 @@ def test_the_map_keeps_the_trip_framed_until_the_user_moves_it():
 
 
 def _quick_tries() -> list[dict]:
-    """The quick tries of whatif.js: [{"id", "set": {param: value}, "keep_tank"}]."""
+    """The quick tries of whatif.js: [{"id", "set": {param: value}, "keep_tank"}] (values as text)."""
     source = js_sources()["whatif.js"]
     block = source.split("export const QUICK_TRIES = [", 1)[1].split("\n];", 1)[0]
     found = []
@@ -413,7 +421,7 @@ def test_every_quick_try_is_planned_without_an_external_call(client, upstream, s
     from fuelroute.services.planner import SETTING_NAMES, PlanSettings
 
     tries = _quick_tries()
-    assert [t["id"] for t in tries] == ["thirsty", "safety", "full"]
+    assert [t["id"] for t in tries] == ["thirsty", "safety", "full", "merge"]
     upstream.respond(OK_ROUTE)
     assert get(client).status_code == 200
     defaults = PlanSettings.defaults()
@@ -437,6 +445,7 @@ def test_every_quick_try_is_planned_without_an_external_call(client, upstream, s
     assert {"mpg": "8"} == tries[0]["set"] and tries[0]["keep_tank"]
     assert defaults.tank_gallons * 8 == 400
     assert {"safety_reserve_gal": "5"} == tries[1]["set"]
+    assert {"consolidate": "true"} == tries[3]["set"]
 
 
 # --- city suggestions, play trip ------------------------------------------------------------------
@@ -474,3 +483,54 @@ def test_play_trip_replays_the_apis_numbers():
 def test_the_javascript_never_parses_html_strings():
     for name, text in js_sources().items():
         assert "innerHTML" not in text and "insertAdjacentHTML" not in text, name
+
+
+# --- regressions found by walking through the tour ------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_for_spotter_step_always_shows_the_standard_truck(client):
+    """Regression: after "A thirstier truck" the table said "at 10 miles per gallon" next to
+    the 8 mpg total. Its proof now reads the standard truck's answer, never the one on screen."""
+    page = client.get(PAGE).content.decode()
+    panel = page.split('id="panel-assignment"', 1)[1].split("</section>", 1)[0]
+    paths = re.findall(r'data-live(?:-if)?="([^"]+)"', panel)
+    assert paths and not [p for p in paths if p.startswith("route.")]
+    assert any(p.startswith("standard.") for p in paths) and any(p.startswith("derived.standard.") for p in paths)
+    main = js_sources()["main.js"]
+    assert "const standard = standardBody();" in main and "derived: derive({ ...state, standard, tripCalls })" in main
+
+
+def test_plan_another_trip_starts_clean():
+    """Regression: a changed truck went on to the next trip without a word, with the old places."""
+    main = js_sources()["main.js"]
+    body = main.split("function planAnother() {", 1)[1].split("\n}", 1)[0]
+    for line in ("truck.write({});", "state.nextTruck = { ...STANDARD };", "inputs.start.value = '';",
+                 "inputs.finish.value = '';", "inputs.start.focus();"):
+        assert line in body, line
+    # In the Trip step the strip says the next trip uses a changed truck.
+    assert "'Your next trip uses your truck'" in main
+
+
+def test_a_road_without_truck_stops_offers_a_full_tank():
+    """Regression: San Francisco -> Los Angeles ended in an error with no way out and the
+    API's own words ("start_tank=full")."""
+    main = js_sources()["main.js"]
+    assert "'Try leaving with a full tank'" in main
+    assert "planTrip({ ...params, start_tank: 'full' }, { card })" in main
+    block = main.split("if (code === 'no_fuel_data_on_route') {", 1)[1].split("\n  }\n", 1)[0]
+    assert "start_tank=" not in block
+
+
+def test_a_locked_step_says_why():
+    """Regression: clicking a step before planning did nothing visible."""
+    steps = js_sources()["steps.js"]
+    assert "showStatus(LOCKED_TEXT, 'locked');" in steps and "onLocked?.();" in steps
+    assert "Step ${index + 1} of ${STEPS.length}: ${label(currentStep)}" in steps
+
+
+def test_whole_trip_button_does_not_cover_the_popups():
+    """Regression: "Whole trip" sat on top of the first stop's popup title."""
+    map_js = js_sources()["map.js"]
+    assert "L.control({ position: 'bottomleft' })" in map_js
+    assert "autoPanPaddingTopLeft" in map_js and map_js.count(", POPUP)") == 2

@@ -4,9 +4,10 @@
   The planner page (fuelroute/web.py::planner_page), served at /api/route/map.
 
   A guided tour in six steps, one card at a time: Trip, Route, Fuel stops, Cost,
-  Truck and Assignment (partials/_step_*.html). The map stays on the right from
-  960px (on top on a phone). The step is kept in the address hash (#trip, #route,
-  #stops, #cost, #truck, #assignment) and the trip in the query string.
+  Truck and For Spotter (partials/_step_*.html; the last one's id is "assignment").
+  The map stays on the right from 960px (on top on a phone). The step is kept in the
+  address hash (#trip, #route, #stops, #cost, #truck, #assignment) and the trip in
+  the query string.
 
   The server renders only this shell: the form pre-filled from the query string
   (escaped by the template engine), and the page configuration with /api/about
@@ -16,10 +17,10 @@
 
   Rule: the visible text has no digits. Every value is a
   <span data-live="root.path" data-format="..."> filled by JavaScript from the API
-  answer (route), /api/about (about), browser timings (client) or pure functions
-  of them (derived), or shows a dash when missing. The step numbers come from a CSS
-  counter. Fixed literals are marked data-literal. fuelroute/tests/test_web.py
-  enforces it.
+  answer (route), the standard truck's answer for the same trip (standard), /api/about
+  (about), browser timings (client) or pure functions of them (derived), or shows a
+  dash when missing. The step numbers come from a CSS counter. Fixed literals are
+  marked data-literal. fuelroute/tests/test_web.py enforces it.
 {% endcomment %}
 <html lang="en">
 <head>
@@ -48,13 +49,14 @@
       <li><button type="button" class="step-btn" id="step-btn-stops" data-step="stops" aria-controls="panel-stops" aria-disabled="true" title="Plan a trip first."><span class="step-label">Fuel stops</span></button></li>
       <li><button type="button" class="step-btn" id="step-btn-cost" data-step="cost" aria-controls="panel-cost" aria-disabled="true" title="Plan a trip first."><span class="step-label">Cost</span></button></li>
       <li><button type="button" class="step-btn" id="step-btn-truck" data-step="truck" aria-controls="panel-truck" aria-disabled="true" title="Plan a trip first."><span class="step-label">Truck</span></button></li>
-      <li><button type="button" class="step-btn" id="step-btn-assignment" data-step="assignment" aria-controls="panel-assignment" aria-disabled="true" title="Plan a trip first."><span class="step-label">Assignment</span></button></li>
+      <li><button type="button" class="step-btn" id="step-btn-assignment" data-step="assignment" aria-controls="panel-assignment" aria-disabled="true" title="Plan a trip first."><span class="step-label">For Spotter</span></button></li>
     </ol>
+    <p id="step-status" class="step-status wrap" role="status"></p>
   </nav>
 
   <div class="strips wrap">
     <p id="your-truck" class="strip strip-truck" hidden>
-      <span>Showing your truck: <span data-live="derived.your_truck_text">—</span>.</span>
+      <span><span id="your-truck-lead">Showing your truck</span>: <span data-live="derived.your_truck_text">—</span>.</span>
       <button type="button" class="btn btn-small btn-ghost" data-action="standard-truck">Back to the standard truck</button>
     </p>
     <p id="stale" class="strip strip-stale" role="status" hidden>You changed the trip. Press “Find fuel stops” to see the new one.</p>
@@ -72,6 +74,11 @@
     <div class="map-col">
       <section class="map-card" aria-label="Map of the trip">
         <div id="map"></div>
+        <p class="map-legend" aria-hidden="true">
+          <span class="legend-item"><span class="legend-dot legend-start"></span>start</span>
+          <span class="legend-item"><span class="legend-dot legend-finish"></span>finish</span>
+          <span class="legend-item legend-stops"><span class="legend-stop"></span>fuel stop, numbered in order</span>
+        </p>
         <div id="player" class="player" role="group" aria-label="Play the trip on the map" hidden></div>
       </section>
     </div>

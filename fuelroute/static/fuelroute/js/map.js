@@ -5,7 +5,7 @@
 //
 // Framing: the trip stays framed when the box changes size (window resize, phone
 // rotation, a step that shows the map again) until the user pans or zooms; "Whole
-// trip" frames it again.
+// trip" (bottom left, away from the popups) frames it again.
 
 import { el, fmt } from './format.js';
 
@@ -15,6 +15,9 @@ const PHONE = '(max-width: 959.98px)';
 // Zoom step of the fit only (the +/- buttons keep the map's half steps).
 const FIT_SNAP = 0.1;
 const EDGE = 28;
+// A popup opened near an edge pans the map so it clears the zoom buttons (top left)
+// and "Whole trip" (bottom left).
+const POPUP = { maxWidth: 300, autoPanPaddingTopLeft: [56, 24], autoPanPaddingBottomRight: [24, 48] };
 
 function token(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -61,8 +64,8 @@ export function createMap(container, { onStop, why } = {}) {
     const snap = map.options.zoomSnap;
     map.options.zoomSnap = FIT_SNAP;
     try {
-      // Room on the left for the zoom buttons and "Whole trip".
-      map.fitBounds(lastBounds, { paddingTopLeft: [EDGE + 36, EDGE], paddingBottomRight: [EDGE, EDGE], animate: false });
+      // Room for the zoom buttons (top left) and "Whole trip" (bottom left).
+      map.fitBounds(lastBounds, { paddingTopLeft: [EDGE + 36, EDGE], paddingBottomRight: [EDGE, EDGE + 24], animate: false });
     } finally {
       map.options.zoomSnap = snap;
       framing = false;
@@ -88,7 +91,7 @@ export function createMap(container, { onStop, why } = {}) {
     frame();
   }
 
-  const whole = L.control({ position: 'topleft' });
+  const whole = L.control({ position: 'bottomleft' });
   whole.onAdd = () => {
     const button = el('button', { type: 'button', class: 'map-reframe', title: 'Show the whole trip' }, 'Whole trip');
     L.DomEvent.disableClickPropagation(button);
@@ -128,7 +131,7 @@ export function createMap(container, { onStop, why } = {}) {
       const marker = L.circleMarker([lat, lon], {
         radius: 8, color: '#ffffff', weight: 2, fillOpacity: 1,
         fillColor: kind === 'start' ? token('--ok') : token('--danger'),
-      }).bindPopup(el('div', { class: 'popup' }, el('strong', {}, kind === 'start' ? 'Start' : 'Finish'), ': ', f.properties.label));
+      }).bindPopup(el('div', { class: 'popup' }, el('strong', {}, kind === 'start' ? 'Start' : 'Finish'), ': ', f.properties.label), POPUP);
       marker.addTo(map);
       roadLayers.push(marker);
     }
@@ -143,7 +146,7 @@ export function createMap(container, { onStop, why } = {}) {
         popupAnchor: [0, -12],
       });
       const marker = L.marker([s.lat, s.lon], { icon, zIndexOffset: 1000, title: `Stop ${s.stop}: ${s.city}, ${s.state}`, alt: `Stop ${s.stop}` });
-      marker.bindPopup(stopPopup(s, why ? why(s, body) : null), { maxWidth: 300 });
+      marker.bindPopup(stopPopup(s, why ? why(s, body) : null), POPUP);
       marker.on('click', () => onStop?.(s.stop, 'map'));
       marker.addTo(stopsLayer);
       stopMarkers.set(s.stop, marker);
@@ -200,19 +203,22 @@ export function createMap(container, { onStop, why } = {}) {
     }
   }
 
-  // A stop chosen in the list: light it up, open its popup and bring it into view.
+  // A stop chosen in the list: light it up, open its popup and bring it into view. On a
+  // phone the map sits above the list: scroll up to it (CSS scroll-margin keeps it below
+  // the steps bar), unless all of it is already on screen.
   function focusStop(n) {
     const marker = stopMarkers.get(n);
     if (!marker) return;
     selectStop(n);
+    userMoved = true; // the user asked for this stop: a resize must not undo it
+    marker.openPopup();
     if (window.matchMedia(PHONE).matches) {
       const rect = container.getBoundingClientRect();
-      if (rect.bottom < 60 || rect.top > window.innerHeight) {
+      const bar = document.querySelector('.stepper-bar')?.getBoundingClientRect().bottom ?? 0;
+      if (rect.top < bar || rect.bottom > window.innerHeight) {
         container.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
       }
     }
-    userMoved = true; // the user asked for this stop: a resize must not undo it
-    marker.openPopup();
   }
 
   // The selected stop (a ring around its number).

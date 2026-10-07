@@ -1,7 +1,7 @@
 """The browser page at ``/api/route/map``: a client of the public JSON API.
 
 * ``planner_page`` renders only the shell of a guided tour in six steps (Trip,
-  Route, Fuel stops, Cost, Truck, Assignment): the trip form pre-filled from the
+  Route, Fuel stops, Cost, Truck, For Spotter): the trip form pre-filled from the
   query string (the truck settings included), the page configuration and
   ``/api/about`` embedded as JSON. It never plans and never calls an external
   service; the page's JavaScript calls the same ``GET /api/route`` that Postman
@@ -40,9 +40,9 @@ def _url(name: str) -> str | None:
         return None
 
 
-# Optional settings of /api/route (the API validates them; the page only carries what
-# the URL says, so a shared link opens the same plan). The Truck step has a control for
-# four of them; the other ones are kept when a link brings them.
+# Optional truck settings of /api/route (the API validates them; the page only carries
+# what the URL says, so a shared link opens the same plan). The Truck step has a control
+# for four of them; the other ones are kept when a link brings them.
 # fuelroute/tests/test_web.py checks it is the serializer's list.
 WHAT_IF_PARAMS = ("mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal")
 

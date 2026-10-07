@@ -1,21 +1,36 @@
 {% comment %}
-  Step "Truck": the four settings a newcomer needs, three one-click tries, and what
-  changed against the standard truck. The inputs are named like the parameters of
-  /api/route; their defaults ("Assignment: ...") and limits come from /api/about at
-  run time, so the visible text has no digits, and the server validates every value
-  again. The other settings of the API (corridor_miles, price_policy, consolidate)
-  have no control: a link that brings them keeps them, and the page names them.
-  The start-tank radios belong to the trip form (form="trip-form"); their label and
-  help are the API's own (/api/about api.start_tank_modes).
+  Step "Truck": the settings a newcomer needs, in the words a driver uses: miles per
+  gallon and the tank size (the range is computed and shown, and sent to the API as
+  max_range_miles = tank × miles per gallon), safety fuel, the tank when leaving and
+  "Skip tiny stops" (consolidate). First four one-click tries (each starts from the
+  standard truck), then "What changed" against the standard truck, and why, then the
+  settings to set by hand.
+
+  Defaults ("Default: ...") and limits come from /api/about at run time, so the
+  visible text has no digits, and the server validates every value again. The other
+  settings of the API (corridor_miles, price_policy) have no control: a link that
+  brings them keeps them, and the page names them. The start-tank radios belong to
+  the trip form (form="trip-form"); their label and help are the API's own (/api/about
+  api.start_tank_modes).
 {% endcomment %}
 <section id="panel-truck" class="step-card" aria-labelledby="truck-title" tabindex="-1" hidden>
   <h2 id="truck-title" tabindex="-1">Try another truck</h2>
-  <p class="lead">Change the truck and plan again. The road is already saved, so the new plan needs no new request to OSRM.</p>
+  <p class="lead">Try one change, or set the truck yourself. The road is already saved, so a new truck needs no new request to the
+    routing service.</p>
 
+  <div class="quick-tries">
+    <h3 id="quick-title">Try one change on the standard truck:</h3>
+    <div id="quick-tries" class="quick-list" role="group" aria-labelledby="quick-title"></div>
+  </div>
+
+  <div id="truck-error" class="error-box" hidden></div>
+  <div id="truck-compare" class="compare" hidden></div>
+
+  <h3>Or set the truck yourself</h3>
   <div class="setting-card" data-setting="mpg">
     <div class="setting-head">
       <label for="set-mpg">Miles per gallon</label>
-      <span class="chip-default">Assignment: <span data-default="mpg">—</span></span>
+      <span class="chip-default">Default: <span data-default="mpg">—</span></span>
     </div>
     <p class="setting-help" id="mpg-help">How far the truck goes on one gallon of fuel.</p>
     <div class="setting-input">
@@ -26,28 +41,28 @@
     <p class="field-error" id="mpg-error" hidden></p>
   </div>
 
-  <div class="setting-card" data-setting="max_range_miles">
+  <div class="setting-card" data-setting="tank_gal">
     <div class="setting-head">
-      <label for="set-max_range_miles">Miles on a full tank</label>
-      <span class="chip-default">Assignment: <span data-default="max_range_miles">—</span></span>
+      <label for="set-tank_gal">Tank size (gallons)</label>
+      <span class="chip-default">Default: <span data-default="tank_gal">—</span></span>
     </div>
-    <p class="setting-help" id="max_range_miles-help">How far one full tank lasts. Tank size:
-      <output id="set-tank" for="set-mpg set-max_range_miles">—</output> (miles ÷ miles per gallon).</p>
+    <p class="setting-help" id="tank_gal-help">How much fuel the tank holds. Range on a full tank:
+      <output id="set-range" for="set-mpg set-tank_gal">—</output> (tank × miles per gallon).</p>
     <div class="setting-input">
-      <label for="set-max_range_miles-range" class="sr-only">Miles on a full tank, slider</label>
-      <input type="range" id="set-max_range_miles-range" tabindex="-1">
-      <input type="number" id="set-max_range_miles" inputmode="decimal" aria-describedby="max_range_miles-help max_range_miles-error">
+      <label for="set-tank_gal-range" class="sr-only">Tank size, slider</label>
+      <input type="range" id="set-tank_gal-range" tabindex="-1">
+      <input type="number" id="set-tank_gal" inputmode="decimal" aria-describedby="tank_gal-help tank_gal-error">
     </div>
-    <p class="field-error" id="max_range_miles-error" hidden></p>
+    <p class="field-error" id="tank_gal-error" hidden></p>
   </div>
 
   <div class="setting-card" data-setting="safety_reserve_gal">
     <div class="setting-head">
       <label for="set-safety_reserve_gal">Safety fuel (gallons)</label>
-      <span class="chip-default">Assignment: <span data-default="safety_reserve_gal">—</span></span>
+      <span class="chip-default">Default: <span data-default="safety_reserve_gal">—</span></span>
     </div>
     <p class="setting-help" id="safety_reserve_gal-help">Fuel that must always stay in the tank, at every stop and at the finish.
-      With none, the truck may reach a station on empty.</p>
+      With none, the truck may reach a truck stop on empty.</p>
     <div class="setting-input">
       <label for="set-safety_reserve_gal-range" class="sr-only">Safety fuel, slider</label>
       <input type="range" id="set-safety_reserve_gal-range" tabindex="-1">
@@ -68,9 +83,16 @@
     <p class="field-error" id="start_tank-error" hidden></p>
   </fieldset>
 
-  <div class="quick-tries">
-    <h3 id="quick-title">Or try one change:</h3>
-    <div id="quick-tries" class="quick-list" role="group" aria-labelledby="quick-title"></div>
+  <div class="setting-card setting-switch" data-setting="consolidate">
+    <div class="setting-head">
+      <label class="switch" for="set-consolidate"><input type="checkbox" id="set-consolidate" aria-describedby="consolidate-help consolidate-error">
+        Skip tiny stops</label>
+      <span class="chip-default">Default: off</span>
+    </div>
+    <p class="setting-help" id="consolidate-help">A stop that would buy less than
+      <span data-live="about.vehicle.min_stop_gallons" data-format="gal">—</span> is merged into a nearby stop, if that costs at most
+      <span data-live="about.vehicle.max_consolidation_cost" data-format="money">—</span> more. Off, the plan is the three rules alone: the cheapest.</p>
+    <p class="field-error" id="consolidate-error" hidden></p>
   </div>
 
   <div class="truck-actions">
@@ -83,11 +105,8 @@
   </div>
   <p id="hidden-settings" class="hidden-settings" hidden></p>
 
-  <div id="truck-error" class="error-box" hidden></div>
-  <div id="truck-compare" class="compare" hidden></div>
-
   <div class="step-nav">
     <button type="button" class="btn btn-ghost" data-go="cost">Back</button>
-    <button type="button" class="btn" data-go="assignment">Next: the assignment</button>
+    <button type="button" class="btn" data-go="assignment">Next: for Spotter</button>
   </div>
 </section>

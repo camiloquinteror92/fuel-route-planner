@@ -5,10 +5,10 @@
 // that differ from the server's defaults, so a trip with the standard truck is
 // exactly the request Postman sends, and the URL of the page stays short.
 //
-// `control`: the Truck step has a control for it. The others (corridor_miles,
-// price_policy, consolidate) have none, but a link may bring them: they are read
-// from the URL, sent to the API as they are (so the page shows the same plan as the
-// JSON) and named on the page.
+// `control`: the Truck step has a control for it (max_range_miles through the tank
+// size: range = tank x miles per gallon). The others (corridor_miles, price_policy)
+// have none, but a link may bring them: they are read from the URL, sent to the API
+// as they are (so the page shows the same plan as the JSON) and named on the page.
 //
 // Defaults come from /api/about (what the server uses when a parameter is left out);
 // `fallback` is the API contract's default, used only when /api/about does not say.
@@ -30,7 +30,7 @@ export const SETTINGS = [
   },
   {
     name: 'corridor_miles', control: false, kind: 'number', min: 1, max: 50, step: 1, fallback: 10,
-    fromAbout: (about) => pick(about, 'planner', 'corridor_miles'),
+    fromAbout: (about) => pick(about, 'vehicle', 'corridor_miles'),
   },
   {
     name: 'safety_reserve_gal', control: true, kind: 'number', min: 0, step: 0.5, fallback: 0,
@@ -38,11 +38,11 @@ export const SETTINGS = [
   },
   {
     name: 'price_policy', control: false, kind: 'choice', choices: PRICE_POLICIES, fallback: 'median',
-    fromAbout: (about) => pick(about, 'planner', 'price_policy'),
+    fromAbout: () => null,
   },
   {
-    name: 'consolidate', control: false, kind: 'bool', fallback: true,
-    fromAbout: (about) => pick(about, 'vehicle', 'consolidate') ?? pick(about, 'planner', 'consolidate'),
+    name: 'consolidate', control: true, kind: 'bool', fallback: false,
+    fromAbout: () => null,
   },
 ];
 
@@ -111,6 +111,23 @@ export function rangeOf(name, about, values = {}) {
     if (tank) max = Math.max(min, Math.ceil(tank / s.step) * s.step - s.step);
   }
   return { min, max, step: s.step };
+}
+
+// The tank size control (gallons). The API takes the range, so the tank's limits are
+// the range's divided by miles per gallon.
+export const TANK_STEP = 0.5;
+export function tankLimits(about, mpg) {
+  const { min, max } = rangeOf('max_range_miles', about);
+  const m = asNumber(mpg);
+  if (!m) return { min: TANK_STEP, max: null, step: TANK_STEP };
+  return { min: Math.ceil(min / m / TANK_STEP) * TANK_STEP, max: Math.floor(max / m / TANK_STEP) * TANK_STEP, step: TANK_STEP };
+}
+
+// The range a tank and a miles per gallon give, as the API takes it (to the hundredth).
+export function rangeOfTank(tank, mpg) {
+  const t = asNumber(tank);
+  const m = asNumber(mpg);
+  return t !== null && m !== null ? Math.round(t * m * 100) / 100 : null;
 }
 
 function same(name, a, b) {

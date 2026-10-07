@@ -12,21 +12,24 @@
 
   <ul id="cost-checks" class="checks" aria-label="Checks of this total"></ul>
 
-  <h3>Is it really cheaper?</h3>
-  <p>Compare with a driver who ignores prices: they stop only when the tank would not reach the next station, and fill up there.</p>
-  <div id="cost-bars" class="bars"></div>
-  <p class="saves" data-live-if="derived.savings_not_negative">You save <strong data-live="derived.savings_amount" data-format="money">—</strong>
-    (<span data-live="derived.savings_pct" data-format="pct">—</span>).</p>
-  <p data-live-if="derived.extra_stops_positive">The trade-off: <span data-live="derived.extra_stops_text">—</span>.
-    Buying just enough to reach cheaper fuel means more, smaller stops.</p>
-  <p data-live-if="derived.fewer_stops">And <span data-live="derived.fewer_stops_text">—</span>.</p>
-  <p data-live-if="derived.savings_negative">On this trip the plan costs <strong data-live="derived.costs_more" data-format="money">—</strong> more:
-    merging tiny stops cost more than the cheaper fuel saved.</p>
+  <div data-live-if="derived.has_price_blind">
+    <h3>Is it really cheaper?</h3>
+    <p>Compare with a driver who ignores prices: they stop only when the tank would not reach the next truck stop, and fill up there.</p>
+    <div id="cost-bars" class="bars"></div>
+    <p data-live-if="derived.same_gallons">Both drivers buy the same <strong data-live="route.summary.total_gallons_purchased" data-format="gal">—</strong>
+      and end the trip with the same fuel. Only where they buy changes.</p>
+    <p class="saves" data-live-if="derived.savings_not_negative">You save <strong data-live="derived.savings_amount" data-format="money">—</strong>
+      (<span data-live="derived.savings_pct" data-format="pct">—</span>).</p>
+    <p data-live-if="derived.extra_stops_positive">The trade-off: <span data-live="derived.extra_stops_text">—</span>.
+      Buying just enough to reach cheaper fuel means more, smaller stops.<span data-live-if="derived.has_tiny_stops">
+      Want fewer? Turn on “Skip tiny stops” in the Truck step.</span></p>
+    <p data-live-if="derived.fewer_stops">And <span data-live="derived.fewer_stops_text">—</span>.</p>
+    <p data-live-if="derived.savings_negative">On this trip the plan costs <strong data-live="derived.costs_more" data-format="money">—</strong> more:
+      skipping tiny stops cost more than the cheaper fuel saved.</p>
+    <p class="muted small">This driver is a simple yardstick: it shows what choosing where to stop is worth on this road.</p>
+  </div>
   <p data-live-if="derived.price_blind_infeasible">A driver who ignores prices could not even finish this trip.</p>
   <p data-live-if="derived.no_purchase">No fuel was bought, so there is nothing to compare.</p>
-
-  <p class="json-link"><a id="json-link" target="_blank" rel="noopener">See the API answer (JSON)</a>
-    <small class="muted">It is the same <code>GET /api/route</code> request that Postman sends.</small></p>
 
   <div class="step-nav">
     <button type="button" class="btn btn-ghost" data-go="stops">Back</button>

@@ -131,7 +131,7 @@ export function createCombobox(input, listbox, { fetchPlaces, announce = () => {
       },
       el('span', { class: 'combo-label' }, highlight(place.label, typed).map(([text, bold]) => (bold ? el('strong', {}, text) : text))),
       priced ? null : el('span', { class: 'combo-tag' }, 'no price data'),
-      place.population ? el('small', { class: 'combo-meta' }, `pop. ${fmt.int(place.population)}`) : null);
+      place.population ? el('small', { class: 'combo-meta' }, `${fmt.int(place.population)} people`) : null);
     }));
     if (!items.length) {
       close();

@@ -1,24 +1,42 @@
 // The guided tour: six steps, one card at a time. The step lives in the address
 // hash (#trip, #route, #stops, #cost, #truck, #assignment), so a link opens the same
 // step; the trip lives in the query string (main.js). Steps after "trip" stay locked
-// until a plan exists.
+// until a plan exists. A line under the steps says where you are and what comes next
+// ("Step 3 of 6: Fuel stops · Next: Cost"), and why a locked step does not open.
 
 export const STEPS = ['trip', 'route', 'stops', 'cost', 'truck', 'assignment'];
 const LOCKED_TITLE = 'Plan a trip first.';
+const LOCKED_TEXT = 'Plan a trip first: type a start and a finish, then press “Find fuel stops”.';
+const LOCKED_SECONDS = 5;
 
 // nav: the <nav> with one button[data-step] per step; panels: {name: <section>};
-// top: the element a new step scrolls back to. onChange(name, previous) runs after
-// every change of step.
-export function createStepper({ nav, panels, top = null, onChange, announce = () => {} }) {
+// top: the element a new step scrolls back to; status: the line under the steps.
+// onChange(name, previous) runs after every change of step; onLocked() when a locked
+// step is asked for.
+export function createStepper({ nav, panels, top = null, status = null, onChange, onLocked, announce = () => {} }) {
   let currentStep = 'trip';
   let unlocked = false;
+  let lockedTimer = null;
   const buttons = Object.fromEntries(STEPS.map((name) => [name, nav.querySelector(`[data-step="${name}"]`)]));
+  const label = (name) => buttons[name]?.querySelector('.step-label')?.textContent.trim() || name;
 
-  // The step a hash names; an unknown or old one (#plan, #tests…) opens the plan or the form.
+  // The step a hash names; an unknown or old one opens the route or the form.
   function fromHash(hash = window.location.hash) {
     const name = String(hash || '').replace(/^#/, '');
     if (STEPS.includes(name) && (unlocked || name === 'trip')) return name;
     return unlocked ? 'route' : 'trip';
+  }
+
+  function where() {
+    const index = STEPS.indexOf(currentStep);
+    const next = STEPS[index + 1];
+    return `Step ${index + 1} of ${STEPS.length}: ${label(currentStep)}${next ? ` · Next: ${label(next)}` : ''}`;
+  }
+
+  function showStatus(text, kind = 'where') {
+    if (!status) return;
+    status.textContent = text;
+    status.dataset.kind = kind;
   }
 
   function paint() {
@@ -45,6 +63,7 @@ export function createStepper({ nav, panels, top = null, onChange, announce = ()
     }
     document.body.className = document.body.className.replace(/\bstep-\w+\b/g, '').trim();
     document.body.classList.add(`step-${currentStep}`);
+    if (!lockedTimer) showStatus(where());
     // On a phone the bar scrolls sideways: keep the current step in view.
     const list = buttons[currentStep].closest('ol');
     const item = buttons[currentStep].parentElement;
@@ -53,11 +72,23 @@ export function createStepper({ nav, panels, top = null, onChange, announce = ()
     }
   }
 
+  // A locked step was asked for: say why, visibly, for a few seconds.
+  function locked() {
+    clearTimeout(lockedTimer);
+    showStatus(LOCKED_TEXT, 'locked');
+    announce(LOCKED_TEXT);
+    onLocked?.();
+    lockedTimer = setTimeout(() => {
+      lockedTimer = null;
+      showStatus(where());
+    }, LOCKED_SECONDS * 1000);
+  }
+
   // Show a step. focus: move the focus to its title (and say it), as a page change does.
   function go(name, { focus = true, updateHash = true } = {}) {
     if (!STEPS.includes(name)) name = fromHash('');
     if (!unlocked && name !== 'trip') {
-      announce(LOCKED_TITLE);
+      locked();
       return currentStep;
     }
     const previous = currentStep;

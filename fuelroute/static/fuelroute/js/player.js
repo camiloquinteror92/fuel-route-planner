@@ -8,6 +8,10 @@
 // cost in integer cents, so it ends EXACTLY on the API's total_fuel_cost (and says
 // so). The whole replay takes about ten to fifteen seconds, whatever the trip. With
 // prefers-reduced-motion the final state is shown at once, without animation.
+//
+// The gauge says "start" and "finish" at both ends, and before Play the line under it
+// says what the truck leaves with (and must arrive with). Every line under the map is
+// also copied to `mirror` (next to the list of stops, for a phone).
 
 import { el, fmt, mark, plural, replace, present } from './format.js';
 import { RULES, ruleOf } from './plan.js';
@@ -87,7 +91,7 @@ function truckIcon() {
   return el('span', { class: 'truck-body' }, svg);
 }
 
-export function createPlayer(container, { getMap, markStop, clearMarks, stopLatLng, onStop, announce, reframe }) {
+export function createPlayer(container, { getMap, markStop, clearMarks, stopLatLng, onStop, announce, reframe, mirror = null }) {
   let trip = null; // everything derived from the answer
   let s = null; // the playback state
   let frame = null;
@@ -110,6 +114,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     nodes.gaugeTrack = el('div', { class: 'gauge-track', role: 'meter', 'aria-label': 'Fuel in the tank', 'aria-valuemin': '0' },
       el('span', { class: 'gauge-e', 'aria-hidden': 'true' }, 'E'), nodes.gaugeFill, nodes.reserve, el('span', { class: 'gauge-f', 'aria-hidden': 'true' }, 'F'));
     nodes.gaugeValue = el('span', { class: 'gauge-value' });
+    nodes.gaugeNote = el('span', { class: 'gauge-note' });
     nodes.cost = el('strong', { class: 'cost-value' });
     nodes.costOf = el('span', { class: 'muted' });
     nodes.event = el('p', { class: 'player-event' });
@@ -119,7 +124,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
         el('div', { class: 'player-progress' }, nodes.track,
           el('p', { class: 'progress-label' }, 'Mile ', nodes.mile, ' ', nodes.of))),
       el('div', { class: 'player-row player-readouts' },
-        el('div', { class: 'gauge' }, el('span', { class: 'gauge-title' }, 'Tank'), nodes.gaugeTrack, nodes.gaugeValue),
+        el('div', { class: 'gauge' }, el('span', { class: 'gauge-title' }, 'Tank'), nodes.gaugeTrack, nodes.gaugeValue, nodes.gaugeNote),
         el('div', { class: 'cost' }, el('span', { class: 'gauge-title' }, 'Fuel bought'), nodes.cost, nodes.costOf)),
       nodes.event);
   }
@@ -160,8 +165,19 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     };
   }
 
+  // The line under the map (and its copy next to the list of stops).
+  function setEvent(...children) {
+    nodes.event.replaceChildren(...children);
+    if (!mirror) return;
+    mirror.replaceChildren(...children.map((child) => (child instanceof Node ? child.cloneNode(true) : child)));
+    mirror.hidden = !nodes.event.textContent;
+  }
+
   function idleText() {
-    return trip.stops.length ? `Press Play: ${plural(trip.stops.length, 'stop')} on the way.` : 'Press Play: no stop needed on this trip.';
+    const leaves = `The truck leaves with ${fmt.gal(trip.startFuel)}`;
+    const back = trip.sameBack ? ` and must arrive with ${fmt.gal(trip.endFuel)} too` : '';
+    const stops = trip.stops.length ? `${plural(trip.stops.length, 'stop')} on the way` : 'no stop needed';
+    return `Press Play. ${leaves}${back}: ${stops}.`;
   }
 
   // A new answer: ready to play, nothing on the map yet.
@@ -183,6 +199,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
       reserve: Number(v.safety_reserve_gal) || 0,
       startFuel: Number(body.summary?.start_fuel_gallons) || 0,
       endFuel: body.summary?.end_fuel_gallons,
+      sameBack: v.start_tank !== 'full' && Math.abs((body.summary?.end_fuel_gallons ?? 0) - (body.summary?.start_fuel_gallons ?? 0)) < 0.005,
       totalCents: cents(body.summary?.total_fuel_cost ?? 0),
       line: measureLine(line.geometry.coordinates, distance),
       milesPerSecond: distance / driving,
@@ -198,7 +215,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     nodes.of.textContent = `of ${fmt.miles(distance)}`;
     nodes.costOf.textContent = ` of ${fmt.money(trip.totalCents / 100)}`;
     s = initialState();
-    nodes.event.textContent = idleText();
+    setEvent(idleText());
     draw();
     playLabel();
   }
@@ -210,7 +227,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     clearMarks?.();
     if (!trip) return;
     s = initialState();
-    nodes.event.textContent = idleText();
+    setEvent(idleText());
     draw();
     playLabel();
   }
@@ -281,7 +298,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     markStop?.(stop.stop, 'current');
     onStop?.(stop.stop);
     gain(stop);
-    nodes.event.replaceChildren(...eventText(stop));
+    setEvent(...eventText(stop));
     announce?.(`Stop ${stop.stop}, ${stop.city}: arrives with ${fmt.gal(arrival)}, buys ${fmt.gal(stop.gallons)} for ${fmt.money(stop.cost)}.`);
   }
 
@@ -304,7 +321,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     s.exact = s.costCents === trip.totalCents;
     s.costCents = trip.totalCents;
     onStop?.(null);
-    nodes.event.replaceChildren(
+    setEvent(
       el('strong', {}, 'Arrived. '),
       `${plural(trip.stops.length, 'stop')}, ${fmt.gal(trip.body.summary?.total_gallons_purchased ?? 0)} bought for ${fmt.money(trip.totalCents / 100)}. `,
       mark(s.exact, s.exact ? 'The stops add up to the total, to the cent.' : 'The stops do not add up to the total.'));
@@ -358,6 +375,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     nodes.gaugeFill.classList.toggle('is-mid', level >= 0.25 && level < 0.5);
     nodes.gaugeTrack.setAttribute('aria-valuenow', Math.max(0, s.fuel).toFixed(2));
     nodes.gaugeValue.textContent = `${fmt.dec1(Math.max(0, s.fuel))} / ${fmt.dec1(trip.capacity ?? 0)} gal`;
+    nodes.gaugeNote.textContent = s.phase === 'done' ? 'finish' : s.mile === 0 && !s.atStop ? 'start' : '';
     nodes.cost.textContent = fmt.money((s.shownCents ?? s.costCents) / 100);
     container.classList.toggle('is-playing', s.phase === 'playing');
   }
@@ -413,7 +431,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     }
     s.next = trip.stops.length;
     finish();
-    nodes.event.append(el('span', { class: 'player-list' }, trip.stops.map((stop) => ` · Stop ${stop.stop}: +${fmt.gal(stop.gallons)} · +${fmt.money(stop.cost)}`)));
+    setEvent(...nodes.event.childNodes, el('span', { class: 'player-list' }, trip.stops.map((stop) => ` · Stop ${stop.stop}: +${fmt.gal(stop.gallons)} · +${fmt.money(stop.cost)}`)));
     draw();
   }
 

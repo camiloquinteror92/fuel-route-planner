@@ -1,9 +1,6 @@
-"""/api/about: versions, data counts, requirements -> code and tests, the last test run, errors."""
+"""/api/about: versions, truck defaults, the parameters of /api/route, deliverables, data counts, errors."""
 
-import os
 import platform
-import re
-import time
 from decimal import Decimal
 
 import django
@@ -21,28 +18,13 @@ from fuelroute.services.stations import data_version
 
 from .test_api import stations  # noqa: F401  (a fixture)
 
-REQUIREMENT_IDS = [
-    "usa_inputs", "route_map", "cost_effective_stops", "range_multiple_stops", "total_cost_mpg", "price_file",
-    "free_routing_api", "django_version", "fast", "few_routing_calls", "deliverables",
-    "exact_money", "robust_errors", "messy_data", "production_ready", "tested",
-]
-CONTRACT_CODE_LINKS = {
-    "serializers.request", "geocoding.geocode", "places.index", "usa.in_usa", "planner.plan_trip",
-    "planner.check_endpoints", "planner.tank_rules", "planner.build_stops", "planner.build_geojson",
-    "planner.comparison", "osrm.get_route", "osrm.decode_polyline", "osrm.prepare_route", "http.client",
-    "stations.stations_along_route", "optimizer.greedy", "optimizer.consolidate", "optimizer.plan_price_blind",
-    "station_loader.load_stations", "station_loader.resolve_homonym", "middleware.response_time",
-    "middleware.rate_limit", "planner.settings", "optimizer.plan_fuel_stops", "places.search",
+# The contract the planner page reads (fuelroute/web.py embeds the same dict).
+CONTRACT_KEYS = {
+    "service", "versions", "vehicle", "planner", "external_services", "api", "deliverables", "data", "errors",
+    "endpoints",
 }
-
-JUNIT = """<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" \
-errors="0" failures="1" skipped="1" tests="4" time="1.5" timestamp="2026-01-02T03:04:05.000000-05:00" hostname="h">\
-<testcase classname="fuelroute.tests.test_api" name="test_invalid_input_returns_400[params0-start]" time="0.01" />\
-<testcase classname="fuelroute.tests.test_api" name="test_invalid_input_returns_400[params1-finish]" time="0.01" />\
-<testcase classname="fuelroute.tests.test_api" name="test_invalid_input_returns_400[params2-start_tank]" time="0.01">\
-<failure message="boom">trace</failure></testcase>\
-<testcase classname="fuelroute.tests.test_optimizer" name="test_short_trip_with_full_tank_needs_no_stop" time="0.0">\
-<skipped message="skip" /></testcase></testsuite></testsuites>"""
+# Removed on purpose: git state, test results, links into the code and the requirement texts.
+REMOVED_KEYS = {"build", "tests", "test_index", "code_links", "requirements", "pinned"}
 
 
 @pytest.fixture(autouse=True)
@@ -68,12 +50,12 @@ def test_about_reports_running_versions_and_data_counts(stations):
     assert response.status_code == 200
     body = response.json()
 
+    assert set(body) == CONTRACT_KEYS
+    assert not REMOVED_KEYS & set(body)
     assert body["service"] == "Spotter fuel route API"
     assert body["versions"]["django"] == django.get_version()
     assert body["versions"]["python"] == platform.python_version()
     assert body["versions"]["numpy"] == np.__version__
-    requirements = (project_settings.BASE_DIR / "requirements.txt").read_text(encoding="utf-8")
-    assert f"Django=={body['pinned']['Django']}" in requirements
 
     data = body["data"]
     assert data["version"] == data_version()
@@ -103,14 +85,22 @@ def test_about_reports_running_versions_and_data_counts(stations):
     vehicle = body["vehicle"]
     config = project_settings.FUEL_PLANNER
     assert vehicle["max_range_miles"] == config["MAX_RANGE_MILES"]
+    assert vehicle["miles_per_gallon"] == config["MILES_PER_GALLON"]
     assert vehicle["tank_gallons"] == config["MAX_RANGE_MILES"] / config["MILES_PER_GALLON"]
+    assert vehicle["min_stop_gallons"] == config["MIN_STOP_GALLONS"]
+    assert vehicle["max_consolidation_cost"] == config["MAX_CONSOLIDATION_COST"]
     assert body["planner"]["corridor_miles"] == config["CORRIDOR_MILES"]
     assert body["planner"]["quarter_tank_fraction"] == config["BASELINE_REFUEL_FRACTION"]
+
+    api = body["api"]
+    assert set(api) == {
+        "include_values", "params", "state_codes", "what_if_params", "price_policies", "start_tank_modes",
+    }
     what_if = ["mpg", "max_range_miles", "corridor_miles", "price_policy", "consolidate", "safety_reserve_gal"]
-    params = {p["name"]: p for p in body["api"]["params"]}
+    params = {p["name"]: p for p in api["params"]}
     assert list(params) == ["start", "finish", "start_tank", "include", *what_if]
     assert all(p["help_text"] for p in params.values())
-    assert body["api"]["what_if_params"] == what_if == [name for name, p in params.items() if p["what_if"]]
+    assert api["what_if_params"] == what_if == [name for name, p in params.items() if p["what_if"]]
     # Defaults come from the configuration; ranges from the serializer.
     assert params["mpg"]["default"] == config["MILES_PER_GALLON"]
     assert (params["mpg"]["min"], params["mpg"]["max"]) == (3, 30)
@@ -120,92 +110,27 @@ def test_about_reports_running_versions_and_data_counts(stations):
     assert params["price_policy"]["choices"] == ["median", "min", "max"]
     assert params["consolidate"]["default"] is True and params["safety_reserve_gal"]["default"] == 0
     assert params["start_tank"]["default"] == "empty" and params["start"]["default"] is None
-    assert [m["label"] for m in body["api"]["start_tank_modes"]] == ["Pay for every mile", "Start with a full tank"]
-    assert body["api"]["include_values"] == ["candidates"]
+    assert [m["label"] for m in api["start_tank_modes"]] == ["Pay for every mile", "Start with a full tank"]
+    assert api["include_values"] == ["candidates"]
+    assert api["state_codes"] == sorted(api["state_codes"]) and "TX" in api["state_codes"]
     assert {s["name"] for s in body["external_services"]} == {"osrm", "nominatim", "openstreetmap_tiles"}
     assert {e["path"] for e in body["endpoints"]} == {"/api/route", "/api/route/map", "/api/places", "/api/about", "/"}
 
-    build = body["build"]
-    if build["commit"]:  # a git checkout (always, except in an exported tarball)
-        assert re.fullmatch(r"[0-9a-f]{40}", build["commit"])
-        assert build["history"][0]["commit"] == build["commit"]
-        assert isinstance(build["dirty"], bool) and isinstance(build["pushed"], bool)
-        for commit in build["history"]:  # only commits GitHub has are linked
-            assert commit["url"] == (f"{build['repo_url']}/commit/{commit['commit']}" if commit["pushed"] else None)
-    deliverables = body["deliverables"]
-    assert deliverables["postman_collection"] == "postman/collection.json"
-    assert (project_settings.BASE_DIR / deliverables["postman_collection"]).is_file()
-    assert deliverables["release_check"]["django_latest_stable"] == config["DJANGO_LATEST_STABLE"]
-    assert body["api"]["state_codes"] == sorted(body["api"]["state_codes"]) and "TX" in body["api"]["state_codes"]
-
 
 @pytest.mark.django_db
-def test_every_requirement_points_to_existing_tests_and_code():
-    body = about.build_about()
-    requirements = body["requirements"]
-    assert [r["id"] for r in requirements] == REQUIREMENT_IDS
-    assert {r["kind"] for r in requirements[:11]} == {"explicit"}
-    assert {r["kind"] for r in requirements[11:]} == {"implicit"}
-    assert CONTRACT_CODE_LINKS <= set(body["code_links"])
-    for requirement in requirements:
-        assert requirement["brief"] and requirement["how"]
-        for source in requirement["sources"]:
-            assert source in body["code_links"], (requirement["id"], source)
-        for test in requirement["tests"]:
-            assert test in body["test_index"], (requirement["id"], test)
-    for key, link in body["code_links"].items():
-        assert link["start_line"] and link["end_line"] >= link["start_line"], key
-        if link["url"]:  # null while the symbol is not on GitHub yet
-            start, end = link["url_lines"]
-            assert link["url"].startswith(f"{body['build']['repo_url']}/blob/")
-            assert link["url"].endswith(f"/{link['path']}#L{start}-L{end}")
-    assert all(entry["line"] > 0 and entry["path"].startswith("fuelroute/tests/") for entry in body["test_index"].values())
-    assert "fuelroute/tests/test_about.py::test_every_requirement_points_to_existing_tests_and_code" in body["test_index"]
-
-
-def test_requirement_texts_have_no_digits():
-    # Numbers come from the configuration (placeholders), never from the text itself.
-    for requirement in about.REQUIREMENTS:
-        for field in ("brief", "how"):
-            text = re.sub(r"\{[a-z_]+\}", "", requirement[field])
-            assert not re.search(r"\d", text), (requirement["id"], field, text)
-
-
-@pytest.mark.django_db
-def test_test_report_is_parsed_and_flagged_stale(tmp_path, settings, monkeypatch):
-    report = tmp_path / "pytest.xml"
-    report.write_text(JUNIT, encoding="utf-8")
-    monkeypatch.setitem(settings.FUEL_PLANNER, "TEST_REPORT_FILE", report)
-    long_ago = time.time() - 10 * 365 * 24 * 3600
-    os.utime(report, (long_ago, long_ago))
-
-    body = about.build_about()
-    assert body["tests"] == {
-        "report": "found",
-        "ran_at": "2026-01-02T08:04:05+00:00",
-        "duration_seconds": 1.5,
-        "total": 4,
-        "passed": 2,
-        "failed": 1,
-        "errors": 0,
-        "skipped": 1,
-        "stale": True,  # the code is newer than that report
+def test_deliverables_link_the_repository_postman_and_loom(settings, monkeypatch):
+    monkeypatch.setitem(settings.FUEL_PLANNER, "REPO_URL", "https://github.com/someone/fuel-route-planner/")
+    monkeypatch.setitem(settings.FUEL_PLANNER, "LOOM_URL", "")
+    deliverables = about.build_about()["deliverables"]
+    assert deliverables == {
+        "repo_url": "https://github.com/someone/fuel-route-planner",  # without the trailing slash
+        "postman_url": "https://github.com/someone/fuel-route-planner/blob/main/postman/collection.json",
+        "loom_url": None,  # until the video exists
     }
-    entry = body["test_index"]["fuelroute/tests/test_api.py::test_invalid_input_returns_400"]
-    assert (entry["cases"], entry["passed"], entry["failed"]) == (3, 2, 1)
-    skipped = body["test_index"]["fuelroute/tests/test_optimizer.py::test_short_trip_with_full_tank_needs_no_stop"]
-    assert (skipped["cases"], skipped["passed"], skipped["failed"]) == (1, 0, 0)
-    not_run = body["test_index"]["fuelroute/tests/test_geo.py::test_us_mask"]
-    assert (not_run["cases"], not_run["passed"], not_run["failed"]) == (0, 0, 0)
+    assert (project_settings.BASE_DIR / "postman" / "collection.json").is_file()
 
-    in_the_future = time.time() + 3600
-    os.utime(report, (in_the_future, in_the_future))
-    assert about.build_about()["tests"]["stale"] is False
-
-    monkeypatch.setitem(settings.FUEL_PLANNER, "TEST_REPORT_FILE", tmp_path / "missing.xml")
-    body = about.build_about()
-    assert body["tests"]["report"] == "missing" and body["tests"]["total"] is None
-    assert all(entry["cases"] is None for entry in body["test_index"].values())
+    monkeypatch.setitem(settings.FUEL_PLANNER, "LOOM_URL", "https://www.loom.com/share/abc")
+    assert about.build_about()["deliverables"]["loom_url"] == "https://www.loom.com/share/abc"
 
 
 def _subclasses(cls):
@@ -224,71 +149,5 @@ def test_error_catalog_lists_every_planner_error():
     for code, status, _ in about.HTTP_ERRORS:
         assert by_code[code]["status"] == status
     assert catalog == sorted(catalog, key=lambda error: (error["status"], error["code"]))
-
-
-@pytest.mark.django_db
-def test_about_tolerates_missing_git(monkeypatch):
-    def no_git(*args, **kwargs):
-        raise FileNotFoundError("git")
-
-    monkeypatch.setattr(about.subprocess, "run", no_git)
-    body = about.build_about()
-    assert body["build"] == {
-        "repo_url": body["build"]["repo_url"],
-        "commit": None,
-        "commit_short": None,
-        "commit_time": None,
-        "subject": None,
-        "dirty": None,
-        "pushed": None,
-        "linked_commit": None,
-        "linked_commit_short": None,
-        "commits_not_on_github": None,
-        "history": [],
-    }
-    assert all("/blob/main/" in link["url"] for link in body["code_links"].values())
-
-
-@pytest.mark.django_db
-def test_links_point_to_what_github_has_not_to_the_local_checkout(monkeypatch):
-    # Regression: before a push the links went to blob/main with the LOCAL line numbers:
-    # most opened the wrong line, and new files, symbols and commits gave a 404.
-    head, pushed = "a" * 40, "b" * 40
-    log = (
-        f"{head}\x1f2026-10-06T07:00:00-05:00\x1ffeat: not pushed\n"
-        f"{pushed}\x1f2026-10-06T06:00:00-05:00\x1fdocs: pushed\n"
-    )
-    answers = {"log": log, "status": "", "rev-list": f"{pushed}\n"}
-    monkeypatch.setattr(about, "_git", lambda *args, **kwargs: answers[args[0]])
-    asked = []
-
-    def blobs(commit, paths):
-        asked.append(commit)
-        texts = dict.fromkeys(paths)  # every file missing at that commit...
-        texts["fuelroute/services/optimizer.py"] = "\n" * 9 + "def _greedy():\n    pass\n"  # ...but this one
-        texts["fuelroute/tests/test_api.py"] = "def test_invalid_input_returns_400():\n    pass\n"
-        return texts
-
-    monkeypatch.setattr(about, "_git_blobs", blobs)
-    body = about.build_about()
-    build = body["build"]
-    assert (build["commit"], build["pushed"], build["linked_commit"], build["commits_not_on_github"]) == (
-        head, False, pushed, 1,
-    )
-    assert [c["url"] for c in build["history"]] == [None, f"{build['repo_url']}/commit/{pushed}"]
-    greedy = body["code_links"]["optimizer.greedy"]
-    assert greedy["url"] == f"{build['repo_url']}/blob/{pushed}/fuelroute/services/optimizer.py#L10-L11"
-    assert greedy["url_lines"] == [10, 11] and greedy["start_line"] != 10  # GitHub's lines, not the local ones
-    assert body["code_links"]["places.search"]["url"] is None  # not on GitHub yet
-    tests = body["test_index"]
-    assert tests["fuelroute/tests/test_api.py::test_invalid_input_returns_400"]["url"].endswith("/test_api.py#L1")
-    assert tests["fuelroute/tests/test_geo.py::test_us_mask"]["url"] is None
-    assert asked == [pushed]  # every file in one git call
-    about.build_about()
-    assert asked == [pushed]  # a commit never changes: cached for good
-
-
-def test_conventional_commit_types_are_parsed():
-    assert about._CONVENTIONAL.match("feat(api): Server-Timing").group(1) == "feat"
-    assert about._CONVENTIONAL.match("fix!: breaking").group(1) == "fix"
-    assert about._CONVENTIONAL.match("Merge pull request #1") is None
+    # The page's test runner and its errors were removed.
+    assert not {code for code in by_code if code.startswith("test_run")}

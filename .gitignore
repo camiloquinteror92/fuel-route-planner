@@ -5,4 +5,3 @@ db.sqlite3
 .pytest_cache/
 .env
 data/raw/
-.reports/

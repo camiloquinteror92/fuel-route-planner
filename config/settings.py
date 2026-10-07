@@ -144,16 +144,10 @@ FUEL_PLANNER = {
     # /api/places and /api/about never leave the server and are not limited. Protects the
     # free upstream services from a loop or a Postman runner.
     "RATE_LIMIT_PER_MINUTE": int(_env("RATE_LIMIT_PER_MINUTE", "60")),
-    # /api/about: links to the code on GitHub, and the JUnit report of the last
-    # local pytest run (pytest.ini writes it there).
+    # /api/about links to the repository, its Postman collection and the Loom video
+    # (null until LOOM_URL is set).
     "REPO_URL": _env("REPO_URL", "https://github.com/camiloquinteror92/fuel-route-planner"),
-    "TEST_REPORT_FILE": Path(_env("TEST_REPORT_FILE", str(BASE_DIR / ".reports" / "pytest.xml"))),
-    # The Loom video of the deliverables, linked from the page once it exists.
     "LOOM_URL": _env("LOOM_URL", ""),
-    # "Latest stable Django": what PyPI said and when it was checked. The running and
-    # pinned versions are read at run time; this is the only part that needs a date.
-    "DJANGO_LATEST_STABLE": _env("DJANGO_LATEST_STABLE", "6.1.1"),
-    "DJANGO_LATEST_CHECKED_ON": _env("DJANGO_LATEST_CHECKED_ON", "2026-10-06"),
     # Data files (committed; see scripts/ for how they are built)
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
     "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",

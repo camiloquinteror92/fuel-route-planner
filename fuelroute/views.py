@@ -169,8 +169,9 @@ class PlacesView(APIView):
 
 
 class AboutView(APIView):
-    """GET /api/about: versions, configuration, loaded data, requirements -> code and tests,
-    the last pytest run and the error catalog (``services/about.py``). 0 external calls."""
+    """GET /api/about: versions, truck and planner defaults, the parameters of /api/route,
+    links to the deliverables, loaded data and the error catalog (``services/about.py``).
+    0 external calls."""
 
     def get(self, request):
         return Response(build_about(), headers={"Cache-Control": "no-cache"})

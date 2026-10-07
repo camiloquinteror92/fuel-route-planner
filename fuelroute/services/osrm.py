@@ -166,10 +166,7 @@ def _fetch(start: Location, finish: Location, client: ExternalApiClient) -> Rout
 
 
 def route_from_payload(status: int, payload) -> Route:
-    """A prepared ``Route`` from an OSRM /route answer; raises the API's routing errors.
-
-    Also used by ``manage.py benchmark`` with the answer it keeps on disk.
-    """
+    """A prepared ``Route`` from an OSRM /route answer; raises the API's routing errors."""
     code = payload.get("code") if isinstance(payload, dict) else None
     if code in ("NoRoute", "NoSegment"):
         raise NoRouteFound("No drivable route between the two locations.", upstream_code=code)

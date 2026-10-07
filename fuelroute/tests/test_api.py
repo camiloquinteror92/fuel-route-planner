@@ -677,6 +677,23 @@ def test_trailing_slash_and_unknown_paths(client):
 
 
 @pytest.mark.django_db
+def test_removed_endpoints_answer_a_json_404(client):
+    # The test runner and the stats endpoint were removed: their paths are now
+    # plain unknown paths, with the API's error body.
+    for response in (client.get("/api/tests"), client.post("/api/tests/run"), client.get("/api/stats")):
+        assert response.status_code == 404
+        body = response.json()
+        assert body["error"] == "not_found"
+        assert body["detail"] == (
+            f"No endpoint at {response.wsgi_request.path}. Use /api/route, /api/places or /api/about."
+        )
+        assert body["meta"] == {"external_api_calls": 0, "external_api_services": []}
+    assert set(client.get("/", HTTP_ACCEPT="*/*").json()["endpoints"]) == {
+        "GET|POST /api/route", "GET /api/route/map", "GET /api/places", "GET /api/about",
+    }
+
+
+@pytest.mark.django_db
 def test_errors_report_the_external_calls_already_made(client, upstream, stations):
     # Free text goes to Nominatim (filtered to the USA), which finds nothing.
     upstream.respond((200, []))

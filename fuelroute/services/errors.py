@@ -118,26 +118,3 @@ class StationDataChanged(PlannerError):
     status_code = 503
     code = "station_data_changed"
 
-
-# --- the test runner of the page (``POST /api/tests/run``) -------------------------------------
-
-
-class SuiteRunnerUnavailable(PlannerError):
-    """The test runner only works for a request from the machine running the server."""
-
-    status_code = 403
-    code = "test_runner_unavailable"
-
-
-class SuiteRunInProgress(PlannerError):
-    """A test run is already going on this server: one at a time."""
-
-    status_code = 409
-    code = "test_run_in_progress"
-
-
-class SuiteRunFailed(PlannerError):
-    """pytest could not run or did not finish in time (a failing test is NOT this error)."""
-
-    status_code = 500
-    code = "test_run_failed"

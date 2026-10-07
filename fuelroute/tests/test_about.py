@@ -32,9 +32,7 @@ CONTRACT_CODE_LINKS = {
     "planner.comparison", "osrm.get_route", "osrm.decode_polyline", "osrm.prepare_route", "http.client",
     "stations.stations_along_route", "optimizer.greedy", "optimizer.consolidate", "optimizer.plan_price_blind",
     "station_loader.load_stations", "station_loader.resolve_homonym", "middleware.response_time",
-    "middleware.rate_limit", "metrics.route_metrics",
-    "planner.settings", "optimizer.plan_fuel_stops", "places.search", "testrunner.run_tests",
-    "testrunner.runner_status", "benchmark.run_benchmark",
+    "middleware.rate_limit", "planner.settings", "optimizer.plan_fuel_stops", "places.search",
 }
 
 JUNIT = """<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" \
@@ -125,9 +123,7 @@ def test_about_reports_running_versions_and_data_counts(stations):
     assert [m["label"] for m in body["api"]["start_tank_modes"]] == ["Pay for every mile", "Start with a full tank"]
     assert body["api"]["include_values"] == ["candidates"]
     assert {s["name"] for s in body["external_services"]} == {"osrm", "nominatim", "openstreetmap_tiles"}
-    assert {e["path"] for e in body["endpoints"]} >= {
-        "/api/route", "/api/route/map", "/api/places", "/api/stats", "/api/about", "/api/tests", "/api/tests/run",
-    }
+    assert {e["path"] for e in body["endpoints"]} == {"/api/route", "/api/route/map", "/api/places", "/api/about", "/"}
 
     build = body["build"]
     if build["commit"]:  # a git checkout (always, except in an exported tarball)
@@ -283,10 +279,10 @@ def test_links_point_to_what_github_has_not_to_the_local_checkout(monkeypatch):
     greedy = body["code_links"]["optimizer.greedy"]
     assert greedy["url"] == f"{build['repo_url']}/blob/{pushed}/fuelroute/services/optimizer.py#L10-L11"
     assert greedy["url_lines"] == [10, 11] and greedy["start_line"] != 10  # GitHub's lines, not the local ones
-    assert body["code_links"]["metrics.route_metrics"]["url"] is None  # not on GitHub yet
+    assert body["code_links"]["places.search"]["url"] is None  # not on GitHub yet
     tests = body["test_index"]
     assert tests["fuelroute/tests/test_api.py::test_invalid_input_returns_400"]["url"].endswith("/test_api.py#L1")
-    assert tests["fuelroute/tests/test_web.py::test_tabs_are_accessible"]["url"] is None
+    assert tests["fuelroute/tests/test_geo.py::test_us_mask"]["url"] is None
     assert asked == [pushed]  # every file in one git call
     about.build_about()
     assert asked == [pushed]  # a commit never changes: cached for good

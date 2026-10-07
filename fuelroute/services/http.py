@@ -89,7 +89,7 @@ class ExternalApiClient:
         self.calls: list[str] = []
         self.elapsed_ms = 0.0
         # (service, milliseconds) of every attempt, failed ones included: the
-        # Server-Timing header and /api/stats break the external time down with it.
+        # Server-Timing header breaks the external time down with it.
         self.call_log: list[tuple[str, float]] = []
 
     @property

@@ -2,11 +2,7 @@
 
 * ``GET|POST /api/route`` -> JSON plan (``RoutePlanView``), with optional what-if settings
 * ``GET /api/places``     -> type-ahead of US places from the offline index (``PlacesView``)
-* ``GET /api/stats``      -> requests, external calls and latency since start, and the
-                             last ``manage.py benchmark`` (``StatsView``)
-* ``GET /api/about``      -> versions, config, data, requirements, tests, errors (``AboutView``)
-* ``GET /api/tests``      -> the test inventory and the last run (``SuiteView``)
-* ``POST /api/tests/run`` -> run pytest on this machine, local requests only (``SuiteRunView``)
+* ``GET /api/about``      -> versions, truck defaults, loaded data, error codes (``AboutView``)
 * ``GET /``               -> browsers: redirect to the planner page; API clients: a small JSON index
 * anything else under ``/api/`` -> JSON 404
 
@@ -30,12 +26,9 @@ from rest_framework.views import APIView
 from rest_framework.views import exception_handler as drf_exception_handler
 
 from .serializers import PlacesRequestSerializer, RouteRequestSerializer
-from .services import testrunner
 from .services.about import build_about
-from .services.benchmark import load_benchmark
 from .services.errors import PlannerError
 from .services.http import ExternalApiClient
-from .services.metrics import route_metrics
 from .services.places import get_place_index
 from .services.planner import plan_trip
 
@@ -134,40 +127,14 @@ class RoutePlanView(APIView):
                 "timings_ms": error.pop("_timings_ms", {}),
             }
             response = Response(error, status=status, headers=headers)
-            response.fuel_error = error["error"]
         else:
             result["map"]["map_url"] = self.request.build_absolute_uri(result["map"]["map_url"])
             response = Response(result)
             meta = result["meta"]
-            response.fuel_error = None
         timing = server_timing(meta, calls)
         if timing:  # an invalid request has no step to report (the middleware adds the total)
             response["Server-Timing"] = timing
-        # Read by ResponseTimeMiddleware for /api/stats (never sent to the client).
-        response.fuel_meta = meta
-        response.fuel_calls = calls
         return response
-
-
-class StatsView(APIView):
-    """GET /api/stats: what this server process has answered on /api/route since it started.
-
-    Request counts by status and outcome, external calls by service, latency
-    percentiles and the last requests (without locations), plus ``benchmark``: the
-    results of the last ``python manage.py benchmark`` (data/benchmark.json), or
-    null. 0 external calls.
-    """
-
-    def get(self, request):
-        body = route_metrics.snapshot()
-        body["benchmark"] = load_benchmark()
-        return Response(body, headers={"Cache-Control": "no-store"})
-
-
-def _error_response(exc: PlannerError) -> Response:
-    body = exc.as_dict()
-    body["meta"] = no_calls_meta()
-    return Response(body, status=exc.status_code, headers=exc.headers)
 
 
 class PlacesView(APIView):
@@ -201,45 +168,6 @@ class PlacesView(APIView):
         )
 
 
-class SuiteView(APIView):
-    """GET /api/tests: the test inventory (files, functions, one-line descriptions), the
-    last run (of this process, else of the last local ``pytest``) and whether this
-    request may start a run (``runner``)."""
-
-    def get(self, request):
-        last_run = testrunner.last_run()
-        if not testrunner.is_local(request):
-            last_run = testrunner.redacted(last_run)  # no failure messages or local paths for other machines
-        return Response(
-            {
-                "runner": {
-                    **testrunner.runner_status(request),
-                    "running": testrunner.is_running(),
-                    "command": testrunner.display_command(),
-                },
-                "last_run": last_run,
-                "inventory": testrunner.inventory(),
-            },
-            headers={"Cache-Control": "no-store"},
-        )
-
-
-class SuiteRunView(APIView):
-    """POST /api/tests/run: run the whole pytest suite now and answer its results.
-
-    Local requests sent by the page only (403 otherwise), one run at a time (409), a
-    fixed command: nothing in the request body or query is read.
-    """
-
-    def post(self, request):
-        try:
-            testrunner.check_allowed(request)
-            result = testrunner.run_tests()
-        except PlannerError as exc:
-            return _error_response(exc)
-        return Response(result, headers={"Cache-Control": "no-store"})
-
-
 class AboutView(APIView):
     """GET /api/about: versions, configuration, loaded data, requirements -> code and tests,
     the last pytest run and the error catalog (``services/about.py``). 0 external calls."""
@@ -263,10 +191,7 @@ def index(request):
                 ),
                 "GET /api/route/map": "same parameters, the planner page (HTML)",
                 "GET /api/places": "q (the start of a US place name, 'chi' or 'chi, il'), limit: type-ahead",
-                "GET /api/stats": "requests, external calls and latency since the server started, and the benchmark",
-                "GET /api/about": "versions, configuration, loaded data, requirements, tests and error codes",
-                "GET /api/tests": "the test inventory and the last run",
-                "POST /api/tests/run": "runs the test suite (only when the server runs on your machine)",
+                "GET /api/about": "versions, truck defaults, loaded data and error codes",
             },
             "example": request.build_absolute_uri("/api/route?start=New+York,+NY&finish=Los+Angeles,+CA"),
         }
@@ -278,7 +203,7 @@ def api_not_found(request, *args, **kwargs):
         {
             "error": "not_found",
             "detail": (
-                f"No endpoint at {request.path}. Use /api/route, /api/places, /api/stats, /api/about or /api/tests."
+                f"No endpoint at {request.path}. Use /api/route, /api/places or /api/about."
             ),
             "meta": no_calls_meta(),
         },

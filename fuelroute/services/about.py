@@ -94,13 +94,9 @@ CODE_LINKS: dict[str, tuple[str, str]] = {
     "station_loader.resolve_homonym": ("fuelroute/services/station_loader.py", "_resolve_homonym"),
     "middleware.response_time": ("fuelroute/middleware.py", "ResponseTimeMiddleware"),
     "middleware.rate_limit": ("fuelroute/middleware.py", "RateLimitMiddleware"),
-    "metrics.route_metrics": ("fuelroute/services/metrics.py", "RouteMetrics"),
     "planner.settings": ("fuelroute/services/planner.py", "PlanSettings"),
     "optimizer.plan_fuel_stops": ("fuelroute/services/optimizer.py", "plan_fuel_stops"),
     "places.search": ("fuelroute/services/places.py", "PlaceIndex.search"),
-    "testrunner.run_tests": ("fuelroute/services/testrunner.py", "run_tests"),
-    "testrunner.runner_status": ("fuelroute/services/testrunner.py", "runner_status"),
-    "benchmark.run_benchmark": ("fuelroute/services/benchmark.py", "run_benchmark"),
 }
 
 # The assessment, requirement by requirement. ``brief`` / ``how`` are templates
@@ -244,18 +240,15 @@ REQUIREMENTS: list[dict] = [
             "Offline geocoding, one routing call with a compact polyline, a numpy corridor search in three passes, "
             "a reused HTTPS connection, a route cache and a plan cache (a repeated trip makes no external call), "
             "one routing call for identical concurrent trips, and gzip on the wire. Every response carries "
-            "X-Response-Time-ms and a Server-Timing breakdown, and manage.py benchmark measures cached plans, "
-            "what-if re-plans and the planner itself on this machine (published by /api/stats)."
+            "X-Response-Time-ms and a Server-Timing breakdown."
         ),
         "sources": [
             "osrm.get_route", "stations.stations_along_route", "planner.plan_trip", "middleware.response_time",
-            "benchmark.run_benchmark",
         ],
         "tests": [
             "test_api::test_second_request_uses_the_plan_cache",
             "test_api::test_identical_concurrent_requests_make_one_routing_call",
             "test_api::test_server_timing_header_breaks_down_the_request",
-            "test_benchmark::test_committed_benchmark_has_the_documented_shape",
             "test_places::test_search_is_fast_on_the_real_index",
         ],
     },
@@ -267,10 +260,9 @@ REQUIREMENTS: list[dict] = [
             "One OSRM call per new trip, {retry_rule}. A repeated trip, the other start_tank mode, every what-if "
             "setting and the planner page reuse the cached plan (kept {ttl_text}) or route (kept {route_ttl_text}, "
             "in a cache of its own so that what-ifs never push it out) in each server process, with no call. "
-            "meta.external_api_calls counts the calls on every response, errors included, and /api/stats counts "
-            "them per service since the server started."
+            "meta.external_api_calls counts the calls on every response, errors included."
         ),
-        "sources": ["osrm.get_route", "http.client", "metrics.route_metrics"],
+        "sources": ["osrm.get_route", "http.client"],
         "tests": [
             "test_api::test_route_returns_plan_map_and_uses_one_external_call",
             "test_api::test_second_request_uses_the_plan_cache",
@@ -346,11 +338,9 @@ REQUIREMENTS: list[dict] = [
         "how": (
             "Station data lives in numpy arrays reloaded when the data version changes; plans are cached for "
             "{ttl} s and routes for {route_ttl} s, in separate caches; identical concurrent trips share one routing "
-            "call; a pooled HTTPS client with timeouts; a rate limit; key=value logs; Server-Timing, /api/stats and "
-            "/api/about; the page's test runner is off unless the server is the local development server or it is "
-            "turned on explicitly."
+            "call; a pooled HTTPS client with timeouts; a rate limit; key=value logs; Server-Timing and /api/about."
         ),
-        "sources": ["osrm.get_route", "http.client", "middleware.rate_limit", "metrics.route_metrics"],
+        "sources": ["osrm.get_route", "http.client", "middleware.rate_limit"],
         "tests": [
             "test_api::test_identical_concurrent_requests_make_one_routing_call",
             "test_api::test_rate_limited_upstream_returns_503_with_retry_after",
@@ -364,18 +354,13 @@ REQUIREMENTS: list[dict] = [
         "how": (
             "A pytest suite that cannot touch the network (an autouse fixture makes any real HTTP call fail; the "
             "routing service is faked): the greedy against an exact dynamic-programming solution, the corridor "
-            "search against brute force, the price file loader, the API end to end and this page's contract. The "
-            "page reads the report of the last local run and, when the server runs on your own machine, runs the "
-            "whole suite itself (POST /api/tests/run, only under the development server and only from the page "
-            "on that machine) and shows every test with what it checks. The page's own arithmetic (contract "
-            "checks, what-if answers) is tested in Node.js when it is installed."
+            "search against brute force, the price file loader, the API end to end and the page. The page's own "
+            "arithmetic is tested in Node.js when it is installed."
         ),
-        "sources": ["testrunner.run_tests", "testrunner.runner_status"],
+        "sources": ["optimizer.greedy"],
         "tests": [
-            "test_testrunner::test_run_answers_every_test_grouped_by_file",
-            "test_testrunner::test_runner_answers_403_unless_the_request_is_local",
-            "test_testrunner::test_the_runner_is_opt_in",
-            "test_js_logic::test_contract_checks_see_the_safety_reserve_and_a_full_tank_without_slack",
+            "test_api::test_the_suite_cannot_reach_the_network",
+            "test_optimizer::test_greedy_matches_exact_dp",
         ],
     },
 ]
@@ -394,10 +379,7 @@ ENDPOINTS = [
     {"method": "GET|POST", "path": "/api/route", "description": "Plan a trip: route, cheapest fuel stops, total cost and map (JSON)."},
     {"method": "GET", "path": "/api/route/map", "description": "The planner page (HTML), a client of /api/route."},
     {"method": "GET", "path": "/api/places", "description": "Type-ahead of US places (offline index, no external call)."},
-    {"method": "GET", "path": "/api/stats", "description": "Requests, external calls and latency since this server process started, and the last benchmark."},
     {"method": "GET", "path": "/api/about", "description": "Versions, configuration, loaded data, requirements, tests and errors."},
-    {"method": "GET", "path": "/api/tests", "description": "The test inventory and the last test run."},
-    {"method": "POST", "path": "/api/tests/run", "description": "Run the test suite (only when the server runs on your own machine)."},
     {"method": "GET", "path": "/", "description": "Browsers are sent to the planner page; API clients get a JSON index."},
 ]
 

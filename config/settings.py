@@ -11,7 +11,6 @@ signs nothing that must survive a restart: no sessions, no auth).
 
 import os
 import secrets
-import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,10 +22,6 @@ def _env(name: str, default: str) -> str:
 
 def _env_list(name: str, default: str) -> list[str]:
     return [item.strip() for item in _env(name, default).split(",") if item.strip()]
-
-
-def _env_flag(name: str) -> bool:
-    return _env(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or secrets.token_urlsafe(50)
@@ -146,11 +141,9 @@ FUEL_PLANNER = {
     # Nominatim's policy asks for an identifying User-Agent; add a contact URL/email.
     "USER_AGENT": _env("HTTP_USER_AGENT", "spotter-fuel-route/1.0 (coding assessment)"),
     # Requests per minute per client IP on /api/route (0 = no limit); the planner page,
-    # /api/stats and /api/about never leave the server and are not limited. Protects the free
-    # upstream services from a loop or a Postman runner.
+    # /api/places and /api/about never leave the server and are not limited. Protects the
+    # free upstream services from a loop or a Postman runner.
     "RATE_LIMIT_PER_MINUTE": int(_env("RATE_LIMIT_PER_MINUTE", "60")),
-    # /api/stats keeps the latency of the last STATS_WINDOW requests per outcome.
-    "STATS_WINDOW": int(_env("STATS_WINDOW", "500")),
     # /api/about: links to the code on GitHub, and the JUnit report of the last
     # local pytest run (pytest.ini writes it there).
     "REPO_URL": _env("REPO_URL", "https://github.com/camiloquinteror92/fuel-route-planner"),
@@ -165,26 +158,7 @@ FUEL_PLANNER = {
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
     "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",
     "FUEL_PRICES_FILE": BASE_DIR / "data" / "fuel-prices-for-be-assessment.csv",
-    # `manage.py benchmark` writes its results here (committed; /api/stats publishes
-    # them) and keeps the OSRM answer it measures with in the route file.
-    "BENCHMARK_FILE": Path(_env("BENCHMARK_FILE", str(BASE_DIR / "data" / "benchmark.json"))),
-    "BENCHMARK_ROUTE_FILE": Path(_env("BENCHMARK_ROUTE_FILE", str(BASE_DIR / "data" / "benchmark_route.json"))),
 }
-
-# Test runner of the planner page (POST /api/tests/run runs pytest on this machine).
-# Opt-in: on by default only under Django's development server (`manage.py runserver`,
-# never a deployment) or with DJANGO_DEBUG=true; ENABLE_TEST_RUNNER=1 turns it on under
-# any server, DISABLE_TEST_RUNNER=1 turns it off. Even when on, it only answers a request
-# from this machine (loopback address and host name, no proxy header) that the page
-# itself sent (Origin / Sec-Fetch-Site): see fuelroute/services/testrunner.py.
-def _test_runner_enabled(argv: list[str], debug: bool) -> bool:
-    if _env_flag("DISABLE_TEST_RUNNER"):
-        return False
-    return _env_flag("ENABLE_TEST_RUNNER") or debug or (len(argv) > 1 and argv[1] == "runserver")
-
-
-TEST_RUNNER_ENABLED = _test_runner_enabled(sys.argv, DEBUG)
-TEST_RUNNER_TIMEOUT_SECONDS = float(_env("TEST_RUNNER_TIMEOUT_SECONDS", "180"))
 
 LOGGING = {
     "version": 1,

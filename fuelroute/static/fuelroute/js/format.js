@@ -1,12 +1,13 @@
 // Formatting, safe DOM building and data binding shared by every module.
 //
 // Rule of the page: no number is written by hand. Values come from the API
-// response (route), /api/stats (stats), /api/about (about), the browser's own
-// measurements (client) or pure functions of those (derived). The template marks
-// each value with data-live="<root>.<path>"; bind() fills it, or shows a dash.
+// answer (route), /api/about (about), the browser's own measurements (client) or
+// pure functions of those (derived). The template marks each value with
+// data-live="<root>.<path>"; bind() fills it, or shows a dash.
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
-export const ROOTS = new Set(['route', 'stats', 'about', 'client', 'derived']);
+import { longestStretch } from './checks.js';
+
+export const ROOTS = new Set(['route', 'about', 'client', 'derived']);
 export const DASH = '—';
 const MINUS = '−';
 
@@ -19,61 +20,34 @@ function nf(min, max) {
   return cache.get(key);
 }
 
-const KILO = 1024;
-
 export const fmt = {
   text: (v) => String(v),
   money: (v) => `${v < 0 ? MINUS : ''}$${nf(2, 2).format(Math.abs(v))}`,
   money_signed: (v) => `${v > 0 ? '+' : v < 0 ? MINUS : ''}$${nf(2, 2).format(Math.abs(v))}`,
-  // Prices: always three decimals on screen (the exact value goes in a title).
+  // Prices: always three decimals on screen.
   price: (v) => `$${nf(3, 3).format(v)}`,
-  price_exact: (v) => `$${nf(3, 4).format(v)}`,
   gal: (v) => `${nf(2, 2).format(v)} gal`,
-  // Distances: always one decimal, so short and long ones line up in a column.
+  // Distances along the road: always one decimal, so they line up.
   miles: (v) => `${nf(1, 1).format(v)} mi`,
-  // Configured distances (the range, the corridor) are whole numbers: no decimal.
-  miles_round: (v) => `${nf(0, 0).format(v)} mi`,
+  // Settings (the range, the corridor): no decimal unless the value has one.
+  miles_short: (v) => `${nf(0, 1).format(v)} mi`,
   ms: (v) => `${nf(v >= 100 ? 0 : 1, v >= 100 ? 0 : 1).format(v)} ms`,
-  bytes: (v) => {
-    if (v < KILO) return `${nf(0, 0).format(v)} B`;
-    if (v < KILO * KILO) return `${nf(1, 1).format(v / KILO)} KB`;
-    return `${nf(2, 2).format(v / KILO / KILO)} MB`;
-  },
   pct: (v) => `${nf(1, 1).format(v)}%`,
   int: (v) => nf(0, 0).format(v),
   dec1: (v) => nf(1, 1).format(v),
   num: (v) => nf(0, 2).format(v),
-  ratio: (v) => `${nf(0, v >= 10 ? 0 : 1).format(v)}×`,
-  time: (v) => new Date(v).toLocaleTimeString('en-US', { hour12: false }),
-  datetime: (v) =>
-    new Date(v).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short', hour12: false }),
-  date: (v) => new Date(v).toLocaleDateString('en-US', { dateStyle: 'medium' }),
-  duration: (seconds) => {
-    const s = Math.max(0, Math.round(seconds));
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    if (h) return m ? `${h} h ${m} min` : `${h} h`;
-    if (m) return `${m} min ${s % 60} s`;
-    return `${s} s`;
-  },
-  ago: (v) => {
-    const seconds = (Date.now() - new Date(v).getTime()) / 1000;
-    if (!Number.isFinite(seconds)) return DASH;
-    if (seconds < 60) return 'just now';
-    if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
-    if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
-    return `${Math.round(seconds / 86400)} days ago`;
-  },
-  yesno: (v) => (v ? 'yes' : 'no'),
 };
 
-// The count and the word in agreement: one call, two calls, no calls.
+// The count and the word in agreement: one stop, two stops, no stops.
 export function plural(count, word, many = `${word}s`) {
   return `${nf(0, 0).format(count)} ${Number(count) === 1 ? word : many}`;
 }
 
-// Percentiles from few samples say little (p95 of five values is the maximum).
-export const MIN_SAMPLES_FOR_P95 = 20;
+// "a", "a and b", "a, b and c".
+export function joinAnd(items) {
+  if (items.length < 2) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
 
 export function present(value) {
   return value !== null && value !== undefined && value !== '' && !(typeof value === 'number' && !Number.isFinite(value));
@@ -82,7 +56,7 @@ export function present(value) {
 export function format(kind, value) {
   if (!present(value)) return DASH;
   const fn = fmt[kind] || fmt.text;
-  if (fn !== fmt.text && fn !== fmt.yesno && typeof value !== 'number' && !['time', 'datetime', 'date', 'ago'].includes(kind)) {
+  if (fn !== fmt.text && typeof value !== 'number') {
     const number = Number(value);
     return Number.isFinite(number) ? fn(number) : String(value);
   }
@@ -107,9 +81,7 @@ function appendChildren(node, children) {
 // el('a', {href, class, text, dataset, css, onclick, 'aria-label'}, ...children)
 // Text is always inserted as text (never parsed as HTML).
 export function el(tag, attrs, ...children) {
-  const node = tag.startsWith('svg:')
-    ? document.createElementNS(SVG_NS, tag.slice(4))
-    : document.createElement(tag);
+  const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
     if (value === null || value === undefined || value === false) continue;
     if (key === 'text') node.textContent = String(value);
@@ -123,26 +95,16 @@ export function el(tag, attrs, ...children) {
   return node;
 }
 
-export function svg(tag, attrs, ...children) {
-  return el(`svg:${tag}`, attrs, ...children);
-}
-
-export function clear(node) {
-  while (node && node.firstChild) node.removeChild(node.firstChild);
-  return node;
-}
-
 export function replace(node, ...children) {
-  clear(node);
+  while (node.firstChild) node.removeChild(node.firstChild);
   appendChildren(node, children);
   return node;
 }
 
-// A check / cross / dot drawn with CSS (never an emoji), always next to a word.
+// A check / cross / dot drawn with CSS (never an emoji), always next to words.
 export function mark(ok, words) {
   const kind = ok === true ? 'ok' : ok === false ? 'bad' : 'na';
-  const fallback = ok === true ? 'pass' : ok === false ? 'fail' : 'n/a';
-  return el('span', { class: `mark mark-${kind}` }, el('span', { class: 'mark-icon', 'aria-hidden': 'true' }), words ?? fallback);
+  return el('span', { class: `mark mark-${kind}` }, el('span', { class: 'mark-icon', 'aria-hidden': 'true' }), el('span', {}, words));
 }
 
 // --- data binding -----------------------------------------------------------------
@@ -162,10 +124,8 @@ export function bind(root, ctx) {
   for (const node of root.querySelectorAll('[data-live]')) {
     const value = lookup(ctx, node.dataset.live);
     node.textContent = present(value) ? format(node.dataset.format || 'text', value) : DASH;
-    node.classList.toggle('is-missing', !present(value));
   }
   for (const node of root.querySelectorAll('[data-live-if]')) node.hidden = !truthy(lookup(ctx, node.dataset.liveIf));
-  for (const node of root.querySelectorAll('[data-live-unless]')) node.hidden = truthy(lookup(ctx, node.dataset.liveUnless));
   for (const node of root.querySelectorAll('[data-href]')) {
     const value = lookup(ctx, node.dataset.href);
     if (value) node.setAttribute('href', value);
@@ -173,9 +133,7 @@ export function bind(root, ctx) {
   }
 }
 
-// --- errors, text -------------------------------------------------------------------
-
-// Port of the server's old _messages(): a DRF error dict / list / string as lines.
+// A DRF error dict / list / string as lines ("mpg: Ensure this value is ...").
 export function flattenErrors(detail) {
   if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
     return Object.entries(detail).flatMap(([field, value]) =>
@@ -186,302 +144,122 @@ export function flattenErrors(detail) {
   return detail === null || detail === undefined ? [] : [String(detail)];
 }
 
-export function slug(text) {
-  return String(text || '')
-    .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-export function sum(values) {
-  return values.reduce((total, v) => total + (Number(v) || 0), 0);
-}
-
-// Nearest-rank percentile of a list of numbers.
-export function percentile(values, p) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const rank = Math.max(1, Math.ceil((p / 100) * sorted.length));
-  return sorted[rank - 1];
-}
-
-export function median(values) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-// --- about helpers --------------------------------------------------------------------
-
-export function codeLink(about, key) {
-  const link = about?.code_links?.[key];
-  return link?.url ? link : null;
-}
-
-// Test index lookup: exact "<path>::<func>" key, else by function name and file.
-export function testEntry(about, key) {
-  const index = about?.test_index || {};
-  if (index[key]) return { key, ...index[key] };
-  const [file, func] = String(key).split('::');
-  const base = (file || '').split('/').pop();
-  for (const [k, v] of Object.entries(index)) {
-    const [kFile, kFunc] = k.split('::');
-    if (kFunc === func && (!base || kFile.endsWith(base) || kFile.endsWith(base.replace(/\.py$/, '')))) {
-      return { key: k, ...v };
-    }
-  }
-  return null;
-}
-
-// "12/12 passed", "failing", "not in last run", "missing" for one test function.
-export function testBadge(about, key, { short = false } = {}) {
-  const entry = testEntry(about, key);
-  const func = String(key).split('::').pop();
-  const label = short ? func : key;
-  if (!entry) return el('span', { class: 'badge badge-bad', title: `${label}: not found in the test index` }, 'missing');
-  const report = about?.tests?.report;
-  const notOnGitHub = entry.url ? null : el('span', { class: 'tag tag-local', title: 'This test is not on GitHub yet: push to link it.' }, 'not on GitHub yet');
-  let badge;
-  if (entry.failed) badge = el('span', { class: 'badge badge-bad' }, el('span', { class: 'mark-icon mark-bad-icon', 'aria-hidden': 'true' }), 'failing');
-  else if (entry.cases) badge = el('span', { class: 'badge badge-ok' }, `${entry.passed ?? 0}/${entry.cases} passed`);
-  else badge = el('span', { class: 'badge badge-na' }, report === 'found' ? 'not in last run' : 'no test report');
-  // Short form reads as a sentence: test_cache_hit_is_free -> "cache hit is free".
-  const text = short ? func.replace(/^test_/, '').replace(/_/g, ' ') : entry.key;
-  const link = entry.url
-    ? el('a', { href: entry.url, target: '_blank', rel: 'noopener', class: 'test-link', title: entry.key }, text)
-    : el('code', { title: `${entry.key} (line ${entry.line})` }, text);
-  return el('span', { class: 'test-ref' }, link, ' ', badge, notOnGitHub ? [' ', notOnGitHub] : null);
-}
-
-export function serverTimingDur(headers, name) {
-  const entry = (headers?.serverTiming || []).find((e) => e.name === name);
-  return entry && Number.isFinite(entry.dur) ? entry.dur : null;
-}
-
 // --- derived values -------------------------------------------------------------------
 //
-// Pure functions of the page state, exposed to the template as derived.*. They
-// never introduce a number of their own: everything is arithmetic on API fields,
-// /api/stats, /api/about or browser measurements.
+// Pure functions of the page state, exposed to the template as derived.*. They never
+// introduce a number of their own: everything is arithmetic on API fields, /api/about
+// or browser measurements.
 
-const TANK_REASONS = {
-  full_tank: 'leaves with a full tank it did not pay for, and buys only what it needs to arrive',
-  last_stretch: 'leaves with less than the reserve: the last station is so far from the destination that this is all it can still have on arrival, and it must arrive with what it left with',
-  reserve: 'leaves with the reserve and must arrive with the same amount (borrowed and returned: not a safety margin)',
-  first_station_beyond_reserve: 'leaves with enough fuel to reach the first station, and must arrive with the same amount',
-  safety_reserve: 'leaves with enough fuel to reach the first station with the safety reserve still in the tank, and must arrive with the same amount',
-  no_station_on_route: 'no station on this route: only a trip the reserve covers works',
-};
-const CAPPED = '; capped: the last stretch is too long to arrive with that much, and the difference is unpriced';
-
-function sameName(a, b) {
-  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+// The truck settings without a control in the Truck step, in words (a link may bring them).
+export function hiddenSettingsText(settings = {}) {
+  const parts = [];
+  if ('corridor_miles' in settings) parts.push(`stations up to ${format('miles_short', settings.corridor_miles)} from the road`);
+  if (settings.price_policy === 'max') parts.push('the highest price of each station');
+  else if (settings.price_policy === 'min') parts.push('the lowest price of each station');
+  else if ('price_policy' in settings) parts.push(`price_policy ${settings.price_policy}`);
+  if (settings.consolidate === false) parts.push('tiny stops kept');
+  else if ('consolidate' in settings && settings.consolidate !== true) parts.push(`consolidate ${settings.consolidate}`);
+  return parts;
 }
 
-// The detour to the stations, which the plan does not price: each stop's distance from
-// the route there and back (city-level coordinates, so approximate), and that fuel at the
-// average price the plan paid.
-export function detourOf(body) {
-  const offsets = (body?.fuel_stops || []).map((s) => Number(s.distance_from_route_miles) || 0);
-  if (!offsets.length) return { miles: null, gallons: null, cost: null, max: null };
-  const miles = sum(offsets) * 2;
-  const mpg = body.vehicle?.miles_per_gallon;
-  const price = body.summary?.average_price_paid;
-  const gallons = mpg ? miles / mpg : null;
-  return { miles, gallons, cost: present(gallons) && present(price) ? gallons * price : null, max: Math.max(...offsets) };
+// The truck of an answer in words: miles per gallon, miles on a full tank, the safety
+// fuel and a full tank at the start when they apply, and the settings of a link.
+export function yourTruckText(body, settings = {}) {
+  const v = body.vehicle || {};
+  const parts = [`${fmt.num(v.miles_per_gallon)} miles per gallon`, `${fmt.miles_short(v.max_range_miles)} on a full tank`];
+  if (Number(v.safety_reserve_gal) > 0) parts.push(`safety fuel ${fmt.gal(v.safety_reserve_gal)}`);
+  if (v.start_tank === 'full') parts.push('full tank at the start');
+  return [...parts, ...hiddenSettingsText(settings)].join(', ');
 }
 
-export function derive(state, helpers) {
-  const { planTrace, priceBlindTrace, summarize } = helpers;
+// state: {route: the last good answer's result, about, params}
+export function derive(state) {
   const about = state.about || {};
+  const deliverables = about.deliverables || {};
   const result = state.route;
   const body = result && result.ok ? result.body : null;
-  const d = { has_plan: Boolean(body), no_plan: !body };
-
-  // Browser-side numbers of the last /api/route answer (also for errors).
-  const server = result?.headers?.responseTimeMs ?? null;
-  const external = result?.body?.meta?.external_api_ms ?? null;
-  if (present(server)) {
-    d.our_code_ms = present(external) ? Math.max(0, server - external) : server;
-    if (present(external) && server > 0) d.external_share_pct = (Math.min(external, server) / server) * 100;
-  }
-  d.render_ms = serverTimingDur(result?.headers, 'render');
-
-  // Commit, repo, tests. Links go to the newest commit GitHub has (build.linked_commit).
-  const build = about.build || {};
-  if (build.repo_url) {
-    const ref = build.linked_commit || (build.commit ? null : 'main');
-    d.commit_url = build.commit && build.pushed ? `${build.repo_url}/commit/${build.commit}` : build.repo_url;
-    d.postman_url = ref ? `${build.repo_url}/blob/${ref}/${about.deliverables?.postman_collection || 'postman/collection.json'}` : null;
-    d.readme_url = ref ? `${build.repo_url}/blob/${ref}/README.md` : null;
-  }
-  d.not_pushed = build.pushed === false;
-  d.dirty = build.dirty === true;
-  d.commits_not_on_github = build.commits_not_on_github || null;
-  d.links_on_older_commit = Boolean(build.linked_commit && build.linked_commit !== build.commit);
-  d.linked_commit_short = build.linked_commit_short || null;
-  d.loom_url = about.deliverables?.loom_url || null;
-  d.no_loom = !d.loom_url;
-  d.tests_missing = about.tests?.report === 'missing';
-  d.tests_stale = about.tests?.stale === true;
-  if (about.data?.stations) d.data_geocoded_pct = (about.data.geocoded / about.data.stations) * 100;
-  const missingStates = about.data?.states_without_stations;
-  const thinnest = about.data?.thinnest_states;
-  d.states_without_count = Array.isArray(missingStates) ? missingStates.length : null;
-  d.states_without_text = Array.isArray(missingStates) ? missingStates.join(', ') || 'none' : null;
-  d.all_states_have_stations = Array.isArray(missingStates) && missingStates.length === 0;
-  d.some_states_without = Array.isArray(missingStates) && missingStates.length > 0;
-  d.thinnest_text = Array.isArray(thinnest) && thinnest.length
-    ? thinnest.map((t) => `${t.state} (${nf(0, 0).format(t.geocoded)})`).join(', ')
-    : null;
-  const osrmLatency = state.stats?.external_latency_ms?.osrm;
-  d.osrm_p95 = osrmLatency && osrmLatency.count >= MIN_SAMPLES_FOR_P95 ? osrmLatency.p95 : null;
-  d.osrm_max = osrmLatency ? osrmLatency.max : null;
-  d.osrm_samples = osrmLatency ? osrmLatency.count : null;
-  d.osrm_few_samples = Boolean(osrmLatency) && osrmLatency.count < MIN_SAMPLES_FOR_P95;
-
-  // Session (this page's own network log).
-  const routeLog = (state.session || []).filter((r) => r.kind === 'route');
-  d.session_requests = (state.session || []).length;
-  const rejected = state.stats?.route_requests?.errors_without_external_calls;
-  d.rejected_without_calls_text = present(rejected) ? plural(rejected, 'rejected request') : null;
-  d.session_osrm_calls = routeLog.reduce((t, r) => t + (r.osrmCalls || 0), 0);
-  d.session_new_trips = routeLog.filter((r) => r.osrmCalls > 0 || r.routeCache === 'miss').length;
-  d.session_calls_per_trip = d.session_new_trips ? d.session_osrm_calls / d.session_new_trips : null;
-
-  // Checks.
-  if (state.checks && state.checks.length) {
-    const s = summarize(state.checks);
-    d.checks_passed = s.passed;
-    d.checks_total = s.total;
-    d.checks_failed = s.failed;
-    d.checks_all_pass = s.failed === 0;
-  }
+  const d = {
+    has_plan: Boolean(body),
+    repo_url: deliverables.repo_url || null,
+    postman_url: deliverables.postman_url || null,
+    loom_url: deliverables.loom_url || null,
+  };
   if (!body) return d;
 
   const summary = body.summary;
   const vehicle = body.vehicle;
   const meta = body.meta || {};
-  const pipeline = body.pipeline || null;
+  const optimizer = body.pipeline?.optimizer || {};
+  const corridor = body.pipeline?.corridor || {};
   const cmp = summary.comparison || null;
+  const stops = body.fuel_stops || [];
   const distance = body.route.distance_miles;
 
-  d.is_empty = vehicle.start_tank !== 'full';
+  // Tank mode and what was paid for.
   d.is_full = vehicle.start_tank === 'full';
-  d.has_unpriced = d.is_empty && summary.unpriced_fuel_gallons > 0;
-  // "Every mile paid" only when it is true: nothing burned without a station to buy from.
-  d.pays_every_mile = d.is_empty && !d.has_unpriced;
-  // The free tank of start_tank=full is the whole tank (the unpriced fuel is less when the
-  // plan keeps a safety reserve at the end).
-  d.full_tank_gallons = d.is_full ? summary.start_fuel_gallons : null;
-  d.fuel_needed_gal = distance / vehicle.miles_per_gallon;
-  d.cost_per_mile = distance ? summary.total_fuel_cost / distance : null;
-  d.has_stops = summary.number_of_stops > 0;
-  d.no_stops = summary.number_of_stops === 0;
-  d.has_candidates = summary.candidate_stations_on_route > 0;
-  d.no_candidates = summary.candidate_stations_on_route === 0;
-  const services = [...new Set(meta.external_api_services || [])];
-  d.services_text = services.length ? services.join(', ') : 'none';
-  d.calls_text = present(meta.external_api_calls)
-    ? `${plural(meta.external_api_calls, 'external call')}${services.length ? ` (${services.join(', ')})` : ''}`
-    : null;
-  d.start_label_differs = !sameName(body.start.label, body.start.query);
-  d.finish_label_differs = !sameName(body.finish.label, body.finish.query);
-  d.is_plan_hit = meta.plan_cache === 'hit';
-  d.is_plan_miss = meta.plan_cache !== 'hit';
+  d.has_unpriced = summary.unpriced_fuel_gallons > 0;
+  d.pays_every_mile = !d.is_full && !d.has_unpriced
+    && Math.abs(summary.end_fuel_gallons - summary.start_fuel_gallons) < 0.005;
+  d.safety_on = Number(vehicle.safety_reserve_gal) > 0;
+  d.is_your_truck = (meta.settings_changed || []).length > 0 || d.is_full;
+  d.your_truck_text = yourTruckText(body, state.params?.settings);
+
+  // The road.
+  d.needs_stops = distance > vehicle.usable_range_miles;
+  d.fits_one_tank = !d.needs_stops;
+  d.has_candidates = (corridor.candidates ?? summary.candidate_stations_on_route) > 0;
+  d.no_candidates = !d.has_candidates;
+  d.route_price_min = d.has_candidates ? corridor.price_per_gallon?.min ?? null : null;
+  d.route_price_max = d.has_candidates ? corridor.price_per_gallon?.max ?? null : null;
   d.has_warnings = (body.warnings || []).length > 0;
 
-  // Comparison.
-  d.has_comparison = Boolean(cmp);
-  d.no_purchase = !cmp && summary.number_of_stops === 0;
-  // Why nothing was bought: a full tank covers the trip, or there was nothing to buy from.
-  d.no_purchase_full = d.no_purchase && d.is_full && !d.has_unpriced;
-  d.no_purchase_no_station = d.no_purchase && d.no_candidates && !d.no_purchase_full;
+  // External calls of THIS answer.
+  const services = meta.external_api_services || [];
+  const osrm = services.filter((s) => s === 'osrm').length;
+  const other = (meta.external_api_calls ?? 0) - osrm;
+  d.calls_text = present(meta.external_api_calls) ? plural(meta.external_api_calls, 'request') : null;
+  d.calls_plan_hit = meta.plan_cache === 'hit';
+  d.calls_route_hit = !d.calls_plan_hit && meta.route_cache === 'hit';
+  d.calls_new_trip = !d.calls_plan_hit && !d.calls_route_hit;
+  d.calls_osrm_text = plural(osrm, 'request');
+  d.calls_other = other > 0;
+  d.calls_other_text = other > 0 ? plural(other, 'request') : null;
+
+  // Stops.
+  d.has_stops = stops.length > 0;
+  d.no_stops = !d.has_stops;
+  d.stops_text = plural(summary.number_of_stops, 'stop');
+  d.longest_stretch = longestStretch(body);
+  d.stops_arriving_empty = stops.filter((s) => s.fuel_on_arrival_gallons === 0).length;
+  d.some_arrive_empty = d.stops_arriving_empty > 0 && !d.safety_on;
+
+  // The rule for tiny stops, and what it did on this trip.
+  d.min_stop = optimizer.min_stop_gallons ?? about.vehicle?.min_stop_gallons ?? null;
+  d.max_fix = optimizer.max_consolidation_cost ?? about.vehicle?.max_consolidation_cost ?? null;
+  d.merged_before = optimizer.stops_before_consolidation ?? null;
+  d.merged_after = optimizer.stops ?? summary.number_of_stops;
+  d.merged_cost = optimizer.consolidation_extra_cost ?? null;
+  const movedSomething = Math.abs(d.merged_cost ?? 0) >= 0.005;
+  d.merged_changed = present(d.merged_before) && d.merged_before !== d.merged_after;
+  d.merged_moved = !d.merged_changed && movedSomething;
+  d.merged_unchanged = present(d.merged_before) && !d.merged_changed && !movedSomething;
+
+  // The driver who ignores prices.
   const blind = cmp?.price_blind || null;
   const savings = cmp?.savings_vs_price_blind || null;
-  d.has_savings = Boolean(savings);
-  d.savings_negative = Boolean(savings) && savings.amount < 0;
-  d.savings_not_negative = Boolean(savings) && savings.amount >= 0;
-  d.costs_more_amount = d.savings_negative ? -savings.amount : null;
+  d.no_purchase = !cmp && stops.length === 0;
   d.price_blind_infeasible = Boolean(cmp) && !blind;
-  d.savings_amount = savings?.amount ?? null;
-  d.savings_pct = savings?.percent ?? null;
-  d.extra_stops = savings?.extra_stops ?? null;
-  d.extra_stops_positive = (savings?.extra_stops ?? 0) > 0;
-  d.fewer_stops = (savings?.extra_stops ?? 0) < 0 ? -savings.extra_stops : null;
-  // The count and the word in agreement: "1 more stop", "2 more stops".
-  d.extra_stops_text = d.extra_stops_positive ? plural(savings.extra_stops, 'more stop') : null;
-  d.fewer_stops_text = d.fewer_stops ? plural(d.fewer_stops, 'fewer stop') : null;
   d.price_blind_cost = blind?.total_fuel_cost ?? null;
   d.price_blind_stops = blind?.number_of_stops ?? null;
-  d.corridor_avg_price = cmp?.corridor_average?.price_per_gallon ?? null;
-  d.savings_vs_avg = cmp?.savings_vs_corridor_average?.amount ?? null;
-
-  // Prices on the route (pipeline, or computed from the candidates layer).
-  const corridor = pipeline?.corridor || null;
-  let prices = corridor?.price_per_gallon || null;
-  if (!prices && body.candidates?.rows?.length) {
-    const i = body.candidates.fields.indexOf('price_per_gallon');
-    const list = body.candidates.rows.map((r) => r[i]);
-    prices = { min: Math.min(...list), median: median(list), max: Math.max(...list) };
-  }
-  if (!d.has_candidates) prices = null;
-  d.route_price_min = prices?.min ?? null;
-  d.route_price_median = prices?.median ?? null;
-  d.route_price_max = prices?.max ?? null;
-  d.corridor_candidates = corridor?.candidates ?? summary.candidate_stations_on_route;
-  d.corridor_miles = corridor?.corridor_miles ?? about.planner?.corridor_miles ?? null;
-
-  // Tank trace.
-  const trace = planTrace(body);
-  d.tank_min = trace.min;
-  d.tank_max = trace.max;
-  d.longest_stretch = trace.longest;
-  // The API's own levels, so no rounding slack is needed (same test as the contract check).
-  d.tank_ok = Math.round(trace.min * 100) >= 0 && Math.round(trace.max * 100) <= Math.round(vehicle.tank_gallons * 100);
-  d.stretch_ok = trace.longest <= vehicle.max_range_miles + 0.05;
-  const blindTrace = priceBlindTrace(body);
-  d.price_blind_longest = blindTrace ? blindTrace.longest : null;
-
-  const detour = detourOf(body);
-  d.max_offroute = detour.max;
-  d.detour_approx = detour.miles;
-  d.detour_cost = detour.cost;
-  // The range is used literally: how many stops the plan reaches with the tank empty.
-  const arrivals = body.fuel_stops.map((s) => s.fuel_on_arrival_gallons);
-  d.stops_arriving_empty = arrivals.filter((g) => g === 0).length;
-  d.lowest_arrival = arrivals.length ? Math.min(...arrivals) : null;
-  d.some_arrive_empty = d.stops_arriving_empty > 0;
-
-  // Map / geometry.
-  const features = body.map?.geojson?.features || [];
-  d.geojson_features = features.length;
-  const line = features.find((f) => f.geometry?.type === 'LineString');
-  d.route_points = line ? line.geometry.coordinates.length : null;
-  d.stop_markers = features.filter((f) => f.properties?.kind === 'fuel_stop').length;
-  d.markers_match = d.stop_markers === summary.number_of_stops;
-
-  // Pipeline (how the cached plan was computed).
-  if (pipeline) {
-    const timings = pipeline.timings_ms || {};
-    d.pipeline_total_ms = sum(Object.values(timings));
-    d.pipeline_route_prep_ms = present(timings.routing_ms) ? Math.max(0, timings.routing_ms - (pipeline.external_api_ms || 0)) : null;
-    d.pipeline_our_code_ms = Math.max(0, d.pipeline_total_ms - (pipeline.external_api_ms || 0));
-    d.routing_from_cache_text = pipeline.routing
-      ? pipeline.routing.from_route_cache ? 'reused from the route cache (no call)' : 'fetched from OSRM (one call)'
-      : null;
-    d.arrival_capped = pipeline.tank?.arrival_capped === true;
-    const reason = TANK_REASONS[pipeline.tank?.reason] || pipeline.tank?.reason || null;
-    d.tank_reason_text = reason && d.arrival_capped ? `${reason}${CAPPED}` : reason;
-    d.pipeline_calls_text = present(pipeline.external_api_calls) ? plural(pipeline.external_api_calls, 'call') : null;
-    const opt = pipeline.optimizer || {};
-    d.consolidation_fewer_stops = present(opt.stops_before_consolidation) ? opt.stops_before_consolidation - opt.stops : null;
-    d.consolidation_extra_cost = opt.consolidation_extra_cost ?? null;
-    if (d.is_plan_hit && present(server) && server > 0) d.cached_speedup = d.pipeline_total_ms / server;
-    if (corridor && corridor.stations_searched) d.corridor_kept_pct = (corridor.candidates / corridor.stations_searched) * 100;
-  }
+  d.savings_amount = savings?.amount ?? null;
+  d.savings_pct = savings?.percent ?? null;
+  d.savings_not_negative = Boolean(savings) && savings.amount >= 0;
+  d.savings_negative = Boolean(savings) && savings.amount < 0;
+  d.costs_more = d.savings_negative ? -savings.amount : null;
+  const extra = savings?.extra_stops ?? 0;
+  d.extra_stops_positive = extra > 0;
+  d.extra_stops_text = extra > 0 ? plural(extra, 'more stop') : null;
+  d.fewer_stops = extra < 0;
+  d.fewer_stops_text = extra < 0 ? plural(-extra, 'fewer stop') : null;
   return d;
 }

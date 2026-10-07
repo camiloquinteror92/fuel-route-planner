@@ -1,22 +1,24 @@
-// "Play trip": the plan replayed on the map, with the API's own numbers.
+// "Play the trip": the plan replayed on the map, with the API's own numbers.
 //
-// A truck drives the route line (the answer's GeoJSON) at a constant speed, so each
-// leg takes a time proportional to its miles. The tank gauge drains at the plan's
-// mpg; at every stop the truck waits about a second, the stop lights up on the map,
-// in the stops table and on the fuel profile, the tank rises by the gallons bought
-// and "+gal · +$" appears. Arrival fuel is the API's fuel_on_arrival_gallons and the
-// cost counter adds each stop's cost in integer cents, so it ends EXACTLY on the
-// API's total_fuel_cost (and says so). Pause, resume, 1×/2×/4×, restart. With
+// A truck drives the road (the answer's map line) at a constant speed. The tank
+// gauge drains at the plan's miles per gallon; at every stop the truck waits a
+// moment, the stop lights up (on the map, in the list and the rule it follows), the
+// tank rises by the gallons bought and "Fuel bought" adds the stop's cost. Arrival
+// fuel is the API's fuel_on_arrival_gallons, and the cost counter adds each stop's
+// cost in integer cents, so it ends EXACTLY on the API's total_fuel_cost (and says
+// so). The whole replay takes about ten to fifteen seconds, whatever the trip. With
 // prefers-reduced-motion the final state is shown at once, without animation.
 
 import { el, fmt, mark, plural, replace, present } from './format.js';
+import { RULES, ruleOf } from './plan.js';
 
-const MILES_PER_SECOND = 110; // at 1×, clamped below so short and long trips both read well
-const MIN_SECONDS = 8;
-const MAX_SECONDS = 28;
-const STOP_PAUSE_SECONDS = 1;
-const GAIN_VISIBLE_SECONDS = 1.8;
-const SPEEDS = [1, 2, 4];
+const MIN_SECONDS = 10;
+const MAX_SECONDS = 15;
+const LONG_TRIP_MILES = 1200; // beyond it, a trip plays a little longer, up to MAX_SECONDS
+const MILES_PER_EXTRA_SECOND = 600;
+const STOP_SECONDS = 0.7; // the most a stop waits; with many stops they share a third of the time
+const STOP_SHARE = 0.35;
+const GAIN_VISIBLE_SECONDS = 1.6;
 const EARTH_MILES = 3958.7613;
 
 const cents = (value) => Math.round(Number(value) * 100);
@@ -66,6 +68,13 @@ export function pointAt(line, mile) {
   return { at: [points[lo][0] + (points[hi][0] - points[lo][0]) * t, points[lo][1] + (points[hi][1] - points[lo][1]) * t], index: lo };
 }
 
+// How long the replay lasts: {seconds driving, seconds waiting at each stop}.
+export function timing(distance, stopCount) {
+  const total = Math.min(MAX_SECONDS, MIN_SECONDS + Math.max(0, distance - LONG_TRIP_MILES) / MILES_PER_EXTRA_SECOND);
+  const perStop = stopCount ? Math.min(STOP_SECONDS, (total * STOP_SHARE) / stopCount) : 0;
+  return { driving: total - perStop * stopCount, perStop };
+}
+
 const TRUCK_SVG = 'M2 5h13v9H2zM15 8h4.5l3.5 3.5V14h-8zM5 17.2a2 2 0 1 0 0-.1zM18 17.2a2 2 0 1 0 0-.1z';
 
 function truckIcon() {
@@ -78,10 +87,9 @@ function truckIcon() {
   return el('span', { class: 'truck-body' }, svg);
 }
 
-export function createPlayer(container, { getMap, markStop, clearMarks, stopLatLng, onStop, onMile, announce, reframe }) {
+export function createPlayer(container, { getMap, markStop, clearMarks, stopLatLng, onStop, announce, reframe }) {
   let trip = null; // everything derived from the answer
   let s = null; // the playback state
-  let speed = 1;
   let frame = null;
   let lastTime = null;
   let layers = [];
@@ -90,43 +98,37 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
   // --- DOM ----------------------------------------------------------------------------
   function build() {
     nodes.play = el('button', { type: 'button', class: 'btn btn-play', onclick: toggle });
-    nodes.restart = el('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: restart, title: 'Restart the trip from the start' }, 'Restart');
-    nodes.speeds = SPEEDS.map((n) => el('button', {
-      type: 'button', class: 'btn btn-small btn-ghost speed-btn', 'aria-pressed': String(n === speed),
-      onclick: () => setSpeed(n), title: `Play at ${n}× speed`,
-    }, `${n}×`));
+    nodes.restart = el('button', { type: 'button', class: 'btn btn-small btn-ghost', onclick: restart }, 'Restart');
     nodes.fill = el('span', { class: 'progress-fill' });
     nodes.head = el('span', { class: 'progress-head' });
     nodes.ticks = el('span', { class: 'progress-ticks' });
-    nodes.track = el('div', { class: 'progress-track', role: 'progressbar', 'aria-label': 'Trip progress', 'aria-valuemin': '0' }, nodes.fill, nodes.ticks, nodes.head);
+    nodes.track = el('div', { class: 'progress-track', role: 'progressbar', 'aria-label': 'Miles driven', 'aria-valuemin': '0' }, nodes.fill, nodes.ticks, nodes.head);
     nodes.mile = el('strong', {});
     nodes.of = el('span', {});
-    nodes.stopText = el('span', { class: 'muted' });
     nodes.gaugeFill = el('span', { class: 'gauge-fill' });
-    nodes.reserve = el('span', { class: 'gauge-reserve', title: 'Safety reserve' });
+    nodes.reserve = el('span', { class: 'gauge-reserve', title: 'Safety fuel' });
     nodes.gaugeTrack = el('div', { class: 'gauge-track', role: 'meter', 'aria-label': 'Fuel in the tank', 'aria-valuemin': '0' },
       el('span', { class: 'gauge-e', 'aria-hidden': 'true' }, 'E'), nodes.gaugeFill, nodes.reserve, el('span', { class: 'gauge-f', 'aria-hidden': 'true' }, 'F'));
     nodes.gaugeValue = el('span', { class: 'gauge-value' });
     nodes.cost = el('strong', { class: 'cost-value' });
-    nodes.costOf = el('small', { class: 'muted' });
+    nodes.costOf = el('span', { class: 'muted' });
     nodes.event = el('p', { class: 'player-event' });
     replace(container,
       el('div', { class: 'player-row' },
-        el('div', { class: 'player-controls' }, nodes.play,
-          el('div', { class: 'speed', role: 'group', 'aria-label': 'Playback speed' }, nodes.speeds), nodes.restart),
+        el('div', { class: 'player-controls' }, nodes.play, nodes.restart),
         el('div', { class: 'player-progress' }, nodes.track,
-          el('p', { class: 'progress-label' }, 'Mile ', nodes.mile, ' ', nodes.of, ' ', nodes.stopText))),
+          el('p', { class: 'progress-label' }, 'Mile ', nodes.mile, ' ', nodes.of))),
       el('div', { class: 'player-row player-readouts' },
         el('div', { class: 'gauge' }, el('span', { class: 'gauge-title' }, 'Tank'), nodes.gaugeTrack, nodes.gaugeValue),
-        el('div', { class: 'cost' }, el('span', { class: 'gauge-title' }, 'Fuel bought'), nodes.cost, ' ', nodes.costOf),
-        nodes.event));
+        el('div', { class: 'cost' }, el('span', { class: 'gauge-title' }, 'Fuel bought'), nodes.cost, nodes.costOf)),
+      nodes.event);
   }
 
   function playLabel() {
     const phase = s?.phase;
-    const label = phase === 'playing' ? 'Pause' : phase === 'paused' ? 'Resume' : phase === 'done' ? 'Play again' : 'Play trip';
+    const label = phase === 'playing' ? 'Pause' : phase === 'paused' ? 'Resume' : phase === 'done' ? 'Play again' : 'Play the trip';
     replace(nodes.play, el('span', { class: `play-icon ${phase === 'playing' ? 'is-pause' : 'is-play'}`, 'aria-hidden': 'true' }), label);
-    nodes.play.setAttribute('aria-label', `${label} (animation of the plan on the map)`);
+    nodes.restart.hidden = phase === 'idle';
   }
 
   // --- layers -------------------------------------------------------------------------
@@ -153,64 +155,64 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
   function initialState() {
     const start = trip.startFuel;
     return {
-      phase: 'idle', mile: 0, fuel: start, departFuel: start, departMile: 0, costCents: 0,
+      phase: 'idle', mile: 0, fuel: start, departFuel: start, departMile: 0, costCents: 0, shownCents: null,
       next: 0, atStop: null, vertex: 0, timers: [], trail: null, truck: null,
     };
   }
 
+  function idleText() {
+    return trip.stops.length ? `Press Play: ${plural(trip.stops.length, 'stop')} on the way.` : 'Press Play: no stop needed on this trip.';
+  }
+
+  // A new answer: ready to play, nothing on the map yet.
   function load(body) {
-    stop();
-    removeLayers();
-    clearMarks?.();
+    reset();
     const line = (body?.map?.geojson?.features || []).find((f) => f.geometry?.type === 'LineString');
     if (!line || !body.route?.distance_miles) {
       trip = null;
-      s = null;
-      container.hidden = true;
       return;
     }
     const distance = body.route.distance_miles;
     const v = body.vehicle || {};
-    const mpg = v.miles_per_gallon ?? v.mpg;
-    const capacity = v.tank_gallons ?? (v.max_range_miles && mpg ? v.max_range_miles / mpg : null);
-    const seconds = Math.min(MAX_SECONDS, Math.max(MIN_SECONDS, distance / MILES_PER_SECOND));
+    const stops = body.fuel_stops || [];
+    const { driving, perStop } = timing(distance, stops.length);
     trip = {
-      body, distance, mpg, capacity,
+      body, distance, stops, perStop,
+      mpg: v.miles_per_gallon,
+      capacity: v.tank_gallons ?? (v.max_range_miles && v.miles_per_gallon ? v.max_range_miles / v.miles_per_gallon : null),
       reserve: Number(v.safety_reserve_gal) || 0,
       startFuel: Number(body.summary?.start_fuel_gallons) || 0,
       endFuel: body.summary?.end_fuel_gallons,
       totalCents: cents(body.summary?.total_fuel_cost ?? 0),
-      stops: body.fuel_stops || [],
       line: measureLine(line.geometry.coordinates, distance),
-      milesPerSecond: distance / seconds,
+      milesPerSecond: distance / driving,
     };
     if (!nodes.play) build();
-    container.hidden = false;
-    replace(nodes.ticks, trip.stops.map((stop) => el('span', {
-      class: 'progress-tick', title: `Stop ${stop.stop} at mile ${fmt.dec1(stop.mile_marker)}`,
-      css: { left: `${(stop.mile_marker / distance) * 100}%` },
+    replace(nodes.ticks, stops.map((stop) => el('span', {
+      class: 'progress-tick', title: `Stop ${stop.stop}`, css: { left: `${(stop.mile_marker / distance) * 100}%` },
     })));
     nodes.track.setAttribute('aria-valuemax', String(distance));
-    nodes.gaugeTrack.setAttribute('aria-valuemax', String(capacity ?? 0));
-    nodes.reserve.hidden = !(trip.reserve > 0 && capacity);
-    if (trip.reserve > 0 && capacity) nodes.reserve.style.setProperty('left', `${(trip.reserve / capacity) * 100}%`);
+    nodes.gaugeTrack.setAttribute('aria-valuemax', String(trip.capacity ?? 0));
+    nodes.reserve.hidden = !(trip.reserve > 0 && trip.capacity);
+    if (trip.reserve > 0 && trip.capacity) nodes.reserve.style.setProperty('left', `${(trip.reserve / trip.capacity) * 100}%`);
     nodes.of.textContent = `of ${fmt.miles(distance)}`;
-    nodes.costOf.textContent = `of ${fmt.money(trip.totalCents / 100)}`;
+    nodes.costOf.textContent = ` of ${fmt.money(trip.totalCents / 100)}`;
     s = initialState();
-    nodes.event.textContent = trip.stops.length
-      ? `Press Play: ${plural(trip.stops.length, 'stop')} on the way.`
-      : 'Press Play: no stop needed on this trip.';
+    nodes.event.textContent = idleText();
     draw();
     playLabel();
   }
 
-  function unload() {
+  // Back to the start, with nothing on the map (leaving the step, or a new answer).
+  function reset() {
     stop();
     removeLayers();
     clearMarks?.();
-    trip = null;
-    s = null;
-    container.hidden = true;
+    if (!trip) return;
+    s = initialState();
+    nodes.event.textContent = idleText();
+    draw();
+    playLabel();
   }
 
   // --- the clock ------------------------------------------------------------------------
@@ -218,7 +220,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     if (!s || s.phase !== 'playing') return;
     const dt = lastTime === null ? 0 : Math.min(0.1, (now - lastTime) / 1000); // a hidden tab does not jump
     lastTime = now;
-    advance(dt * speed);
+    advance(dt);
     draw();
     if (s.phase === 'playing') frame = requestAnimationFrame(loop);
   }
@@ -240,7 +242,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
         const used = Math.min(left, s.atStop.remaining);
         s.atStop.remaining -= used;
         left -= used;
-        const t = 1 - s.atStop.remaining / STOP_PAUSE_SECONDS;
+        const t = trip.perStop ? 1 - s.atStop.remaining / trip.perStop : 1;
         const ease = 1 - (1 - t) ** 3;
         s.fuel = s.atStop.fuelFrom + (s.atStop.fuelTo - s.atStop.fuelFrom) * ease;
         s.shownCents = Math.round(s.atStop.costFrom + (s.atStop.costTo - s.atStop.costFrom) * ease);
@@ -263,19 +265,24 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     }
   }
 
+  function eventText(stop) {
+    return [el('strong', {}, `Stop ${stop.stop} · ${stop.city}: ${RULES[ruleOf(stop)] || ruleOf(stop)}`),
+      ` · buys ${fmt.gal(stop.gallons)} at ${fmt.price(stop.price_per_gallon)} = ${fmt.money(stop.cost)}`];
+  }
+
   function arrive(stop) {
     const arrival = present(stop.fuel_on_arrival_gallons) ? stop.fuel_on_arrival_gallons : fuelOnTheRoad(stop.mile_marker);
     s.fuel = arrival;
     s.atStop = {
-      stop, remaining: STOP_PAUSE_SECONDS,
+      stop, remaining: trip.perStop,
       fuelFrom: arrival, fuelTo: arrival + stop.gallons,
       costFrom: s.costCents, costTo: s.costCents + cents(stop.cost),
     };
     markStop?.(stop.stop, 'current');
     onStop?.(stop.stop);
     gain(stop);
-    nodes.event.replaceChildren(el('strong', {}, `Stop ${stop.stop}`), ` · ${stop.name}: +${fmt.gal(stop.gallons)} · +${fmt.money(stop.cost)} at ${fmt.price(stop.price_per_gallon)}/gal`);
-    announce?.(`Stop ${stop.stop}, mile ${fmt.dec1(stop.mile_marker)}: arrives with ${fmt.gal(arrival)}, buys ${fmt.gal(stop.gallons)} for ${fmt.money(stop.cost)}.`);
+    nodes.event.replaceChildren(...eventText(stop));
+    announce?.(`Stop ${stop.stop}, ${stop.city}: arrives with ${fmt.gal(arrival)}, buys ${fmt.gal(stop.gallons)} for ${fmt.money(stop.cost)}.`);
   }
 
   function depart() {
@@ -299,8 +306,8 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     onStop?.(null);
     nodes.event.replaceChildren(
       el('strong', {}, 'Arrived. '),
-      `${plural(trip.stops.length, 'stop')}, ${fmt.gal(trip.body.summary?.total_gallons_purchased ?? 0)} bought for ${fmt.money(trip.totalCents / 100)} `,
-      mark(s.exact, s.exact ? 'the sum of the stops = the API total, to the cent' : 'the sum of the stops differs from the API total'));
+      `${plural(trip.stops.length, 'stop')}, ${fmt.gal(trip.body.summary?.total_gallons_purchased ?? 0)} bought for ${fmt.money(trip.totalCents / 100)}. `,
+      mark(s.exact, s.exact ? 'The stops add up to the total, to the cent.' : 'The stops do not add up to the total.'));
     announce?.(`Arrived after ${fmt.miles(trip.distance)}: ${plural(trip.stops.length, 'stop')}, ${fmt.money(trip.totalCents / 100)} in total.`);
     playLabel();
   }
@@ -317,7 +324,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     s.timers.push(setTimeout(() => {
       map.removeLayer(tip);
       layers = layers.filter((layer) => layer !== tip);
-    }, (GAIN_VISIBLE_SECONDS * 1000) / speed));
+    }, GAIN_VISIBLE_SECONDS * 1000));
   }
 
   // --- drawing --------------------------------------------------------------------------
@@ -337,17 +344,13 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     if (s.truck) {
       s.truck.setLatLng(at);
       const ahead = pointAt(trip.line, Math.min(trip.distance, s.mile + 5)).at;
-      const node = s.truck.getElement();
-      if (node) node.classList.toggle('is-west', ahead[1] < at[1] - 1e-6);
+      s.truck.getElement()?.classList.toggle('is-west', ahead[1] < at[1] - 1e-6);
     }
-    onMile?.(s.phase === 'idle' ? null : s.mile);
     const share = trip.distance ? s.mile / trip.distance : 0;
     nodes.fill.style.setProperty('width', `${share * 100}%`);
     nodes.head.style.setProperty('left', `${share * 100}%`);
     nodes.track.setAttribute('aria-valuenow', s.mile.toFixed(1));
     nodes.mile.textContent = fmt.dec1(s.mile);
-    const passed = s.next + (s.atStop ? 1 : 0);
-    nodes.stopText.textContent = trip.stops.length ? `· stop ${fmt.int(Math.min(passed, trip.stops.length))} of ${fmt.int(trip.stops.length)}` : '· no stop needed';
     const capacity = trip.capacity || 1;
     const level = Math.max(0, Math.min(1, s.fuel / capacity));
     nodes.gaugeFill.style.setProperty('width', `${level * 100}%`);
@@ -357,7 +360,6 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     nodes.gaugeValue.textContent = `${fmt.dec1(Math.max(0, s.fuel))} / ${fmt.dec1(trip.capacity ?? 0)} gal`;
     nodes.cost.textContent = fmt.money((s.shownCents ?? s.costCents) / 100);
     container.classList.toggle('is-playing', s.phase === 'playing');
-    container.classList.toggle('is-done', s.phase === 'done');
   }
 
   // --- controls -------------------------------------------------------------------------
@@ -368,6 +370,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
       return;
     }
     if (s.phase === 'idle') {
+      clearMarks?.();
       reframe?.();
       if (!s.trail) addLayers();
     }
@@ -397,13 +400,7 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
 
   function restart() {
     if (!trip) return;
-    stop();
-    removeLayers();
-    clearMarks?.();
-    s = initialState();
-    addLayers();
-    nodes.event.textContent = '';
-    draw();
+    reset();
     play();
   }
 
@@ -420,10 +417,5 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
     draw();
   }
 
-  function setSpeed(n) {
-    speed = n;
-    nodes.speeds.forEach((button, i) => button.setAttribute('aria-pressed', String(SPEEDS[i] === n)));
-  }
-
-  return { load, unload, play, pause, restart, isPlaying: () => s?.phase === 'playing' };
+  return { load, reset, play, pause, restart, isPlaying: () => s?.phase === 'playing' };
 }

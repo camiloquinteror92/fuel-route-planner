@@ -1,0 +1,76 @@
+{% comment %}Step "Assignment": what was asked, how it is done, and the proof on this trip (live values).{% endcomment %}
+<section id="panel-assignment" class="step-card" aria-labelledby="assignment-title" tabindex="-1" hidden>
+  <h2 id="assignment-title" tabindex="-1">How this meets the assignment</h2>
+  <p class="lead">What was asked, how it is done, and the proof on this trip.</p>
+
+  <table class="assignment-table">
+    <caption class="sr-only">The assignment, row by row</caption>
+    <thead>
+      <tr><th scope="col">Asked</th><th scope="col">How</th><th scope="col">On this trip</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row" data-label="Asked">Start and finish in the USA</th>
+        <td data-label="How">Places are found in a built-in list of US places. A place outside the USA, like Toronto, ON, is turned down before any request.</td>
+        <td data-label="On this trip"><span data-live="route.start.label">—</span> → <span data-live="route.finish.label">—</span></td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">A map of the route</th>
+        <td data-label="How">The map on this page. The API answer also has the road as map data and a link to this page.</td>
+        <td data-label="On this trip"><span data-live="route.route.distance_miles" data-format="miles">—</span> on the map</td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">The cheapest places to fuel up</th>
+        <td data-label="How">The three rules of the Fuel stops step. A test checks them against a slower, exact method on many random roads.</td>
+        <td data-label="On this trip"><span data-live="derived.stops_text">—</span><span data-live-if="derived.savings_not_negative">,
+          <span data-live="derived.savings_amount" data-format="money">—</span> less than a driver who ignores prices</span><span data-live-if="derived.savings_negative">,
+          <span data-live="derived.costs_more" data-format="money">—</span> more than a driver who ignores prices</span><span data-live-if="derived.price_blind_infeasible">;
+          a driver who ignores prices could not finish</span></td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">A <span data-live="about.vehicle.max_range_miles" data-format="miles_short">—</span> range, so several stops</th>
+        <td data-label="How">The tank never runs dry and never goes over full.</td>
+        <td data-label="On this trip">Longest drive between stops: <span data-live="derived.longest_stretch" data-format="miles">—</span>
+          (limit <span data-live="route.vehicle.usable_range_miles" data-format="miles_short">—</span>)</td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">Total money spent on fuel, at <span data-live="about.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon</th>
+        <td data-label="How">Each stop costs gallons × price, rounded to the cent. The total is their sum.</td>
+        <td data-label="On this trip"><span data-live="route.summary.total_fuel_cost" data-format="money">—</span> for
+          <span data-live="route.summary.total_gallons_purchased" data-format="gal">—</span></td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">Use the given fuel prices file</th>
+        <td data-label="How">The file has no map positions, so each station takes its city's position from public US place lists. A station listed more than once uses its middle price.</td>
+        <td data-label="On this trip"><span data-live="about.data.geocoded" data-format="int">—</span> of
+          <span data-live="about.data.stations" data-format="int">—</span> stations placed on the map</td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">A free routing API, called as little as possible</th>
+        <td data-label="How">OSRM, free and with no key: one request for a new trip, none for a trip asked before or for a changed truck.</td>
+        <td data-label="On this trip">This answer: <span data-live="derived.calls_text">—</span></td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">Quick answers</th>
+        <td data-label="How">Stations and places are loaded in memory once, when the server starts. A trip asked again is answered from memory.</td>
+        <td data-label="On this trip">This answer: <span data-live="client.server_ms" data-format="ms">—</span> on the server</td>
+      </tr>
+      <tr>
+        <th scope="row" data-label="Asked">Latest stable Django</th>
+        <td data-label="How">Built with Django.</td>
+        <td data-label="On this trip">Django <span data-live="about.versions.django">—</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="deliverables">
+    <a data-href="derived.repo_url" data-live-if="derived.repo_url" target="_blank" rel="noopener">Code on GitHub</a>
+    <a data-href="derived.postman_url" data-live-if="derived.postman_url" target="_blank" rel="noopener">Postman collection</a>
+    <a data-href="derived.loom_url" data-live-if="derived.loom_url" target="_blank" rel="noopener">Loom video</a>
+  </p>
+
+  <div class="step-nav">
+    <button type="button" class="btn btn-ghost" data-go="truck">Back</button>
+    <button type="button" class="btn btn-primary" data-action="plan-another">Plan another trip</button>
+  </div>
+</section>

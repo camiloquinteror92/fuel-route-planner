@@ -1,0 +1,93 @@
+{% comment %}
+  Step "Truck": the four settings a newcomer needs, three one-click tries, and what
+  changed against the standard truck. The inputs are named like the parameters of
+  /api/route; their defaults ("Assignment: ...") and limits come from /api/about at
+  run time, so the visible text has no digits, and the server validates every value
+  again. The other settings of the API (corridor_miles, price_policy, consolidate)
+  have no control: a link that brings them keeps them, and the page names them.
+  The start-tank radios belong to the trip form (form="trip-form"); their label and
+  help are the API's own (/api/about api.start_tank_modes).
+{% endcomment %}
+<section id="panel-truck" class="step-card" aria-labelledby="truck-title" tabindex="-1" hidden>
+  <h2 id="truck-title" tabindex="-1">Try another truck</h2>
+  <p class="lead">Change the truck and plan again. The road is already saved, so the new plan needs no new request to OSRM.</p>
+
+  <div class="setting-card" data-setting="mpg">
+    <div class="setting-head">
+      <label for="set-mpg">Miles per gallon</label>
+      <span class="chip-default">Assignment: <span data-default="mpg">—</span></span>
+    </div>
+    <p class="setting-help" id="mpg-help">How far the truck goes on one gallon of fuel.</p>
+    <div class="setting-input">
+      <label for="set-mpg-range" class="sr-only">Miles per gallon, slider</label>
+      <input type="range" id="set-mpg-range" tabindex="-1">
+      <input type="number" id="set-mpg" inputmode="decimal" aria-describedby="mpg-help mpg-error">
+    </div>
+    <p class="field-error" id="mpg-error" hidden></p>
+  </div>
+
+  <div class="setting-card" data-setting="max_range_miles">
+    <div class="setting-head">
+      <label for="set-max_range_miles">Miles on a full tank</label>
+      <span class="chip-default">Assignment: <span data-default="max_range_miles">—</span></span>
+    </div>
+    <p class="setting-help" id="max_range_miles-help">How far one full tank lasts. Tank size:
+      <output id="set-tank" for="set-mpg set-max_range_miles">—</output> (miles ÷ miles per gallon).</p>
+    <div class="setting-input">
+      <label for="set-max_range_miles-range" class="sr-only">Miles on a full tank, slider</label>
+      <input type="range" id="set-max_range_miles-range" tabindex="-1">
+      <input type="number" id="set-max_range_miles" inputmode="decimal" aria-describedby="max_range_miles-help max_range_miles-error">
+    </div>
+    <p class="field-error" id="max_range_miles-error" hidden></p>
+  </div>
+
+  <div class="setting-card" data-setting="safety_reserve_gal">
+    <div class="setting-head">
+      <label for="set-safety_reserve_gal">Safety fuel (gallons)</label>
+      <span class="chip-default">Assignment: <span data-default="safety_reserve_gal">—</span></span>
+    </div>
+    <p class="setting-help" id="safety_reserve_gal-help">Fuel that must always stay in the tank, at every stop and at the finish.
+      With none, the truck may reach a station on empty.</p>
+    <div class="setting-input">
+      <label for="set-safety_reserve_gal-range" class="sr-only">Safety fuel, slider</label>
+      <input type="range" id="set-safety_reserve_gal-range" tabindex="-1">
+      <input type="number" id="set-safety_reserve_gal" inputmode="decimal" aria-describedby="safety_reserve_gal-help safety_reserve_gal-error">
+    </div>
+    <p class="field-error" id="safety_reserve_gal-error" hidden></p>
+  </div>
+
+  <fieldset class="setting-card setting-tank" data-setting="start_tank">
+    <legend>Tank when leaving</legend>
+    {% for mode in start_tank_modes %}
+    <label class="option">
+      <input type="radio" name="start_tank" value="{{ mode.value }}" form="trip-form"{% if form.start_tank == mode.value %} checked{% endif %}>
+      <span><strong>{{ mode.label }}</strong>
+        <small class="option-help">{{ mode.help }}</small></span>
+    </label>
+    {% endfor %}
+    <p class="field-error" id="start_tank-error" hidden></p>
+  </fieldset>
+
+  <div class="quick-tries">
+    <h3 id="quick-title">Or try one change:</h3>
+    <div id="quick-tries" class="quick-list" role="group" aria-labelledby="quick-title"></div>
+  </div>
+
+  <div class="truck-actions">
+    <button type="button" id="truck-apply" class="btn btn-primary">
+      <span class="btn-label">Plan again</span>
+      <span class="btn-timer" data-timer hidden></span>
+    </button>
+    <button type="button" class="btn btn-ghost" data-action="standard-truck">Back to the standard truck</button>
+    <span id="truck-pending" class="pending" hidden>Not planned yet</span>
+  </div>
+  <p id="hidden-settings" class="hidden-settings" hidden></p>
+
+  <div id="truck-error" class="error-box" hidden></div>
+  <div id="truck-compare" class="compare" hidden></div>
+
+  <div class="step-nav">
+    <button type="button" class="btn btn-ghost" data-go="cost">Back</button>
+    <button type="button" class="btn" data-go="assignment">Next: the assignment</button>
+  </div>
+</section>

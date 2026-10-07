@@ -1,79 +1,54 @@
-// The "what if" settings of a trip: the optional parameters of /api/route that change
-// the truck or the planning rules. Pure functions, no DOM.
+// The truck settings of a trip: the optional parameters of /api/route. Pure
+// functions, no DOM.
 //
 // A trip is {start, finish, start_tank, settings}; `settings` holds ONLY the values
-// that differ from the server's defaults, so a trip with the assignment defaults is
+// that differ from the server's defaults, so a trip with the standard truck is
 // exactly the request Postman sends, and the URL of the page stays short.
+//
+// `control`: the Truck step has a control for it. The others (corridor_miles,
+// price_policy, consolidate) have none, but a link may bring them: they are read
+// from the URL, sent to the API as they are (so the page shows the same plan as the
+// JSON) and named on the page.
 //
 // Defaults come from /api/about (what the server uses when a parameter is left out);
 // `fallback` is the API contract's default, used only when /api/about does not say.
 // The ranges are the API contract's; the server validates them again (400 when out).
 
-export const START_TANK_MODES = [
-  {
-    value: 'empty',
-    label: 'Pay for every mile',
-    help: 'The trip pays for all the fuel it burns: the cost is the whole trip.',
-  },
-  {
-    value: 'full',
-    label: 'Start with a full tank',
-    help: 'The truck leaves full and that fuel is free: only what is bought on the way counts.',
-  },
-];
-
-export const PRICE_POLICIES = [
-  { value: 'median', label: 'Median', help: 'the middle quote, or the average of the two when there are two (default)' },
-  { value: 'min', label: 'Lowest', help: 'the cheapest quote: the best case' },
-  { value: 'max', label: 'Highest', help: 'the most expensive quote: the worst case' },
-];
-
-// What a price_policy value means on THIS server, in a word. "median" plans with the
-// price stored by load_stations: the median of the quotes, unless it ran with
-// PRICE_POLICY=min (then the stored price is the lowest quote and is called so).
-export function policyLabel(value, about) {
-  const loaded = about?.planner?.price_policy;
-  const label = (v) => PRICE_POLICIES.find((p) => p.value === v)?.label || v;
-  if (value === 'median' && loaded && loaded !== 'median') return `Stored (${String(label(loaded)).toLowerCase()})`;
-  return label(value) || '';
-}
-
-// The price policy a plan was computed with (the answer says; else the server's default).
-export function policyOf(body) {
-  return body?.vehicle?.price_policy ?? body?.pipeline?.corridor?.price_policy ?? 'median';
-}
+export const PRICE_POLICIES = ['median', 'min', 'max'];
 
 const pick = (about, ...path) => path.reduce((value, key) => (value === null || value === undefined ? value : value[key]), about);
 
-// Order = order in URLs and in the panel.
+// Order = order in URLs.
 export const SETTINGS = [
   {
-    name: 'mpg', kind: 'number', min: 3, max: 30, step: 0.5, fallback: 10,
+    name: 'mpg', control: true, kind: 'number', min: 3, max: 30, step: 0.5, fallback: 10,
     fromAbout: (about) => pick(about, 'vehicle', 'miles_per_gallon'),
   },
   {
-    name: 'max_range_miles', kind: 'number', min: 100, max: 1500, step: 10, fallback: 500,
+    name: 'max_range_miles', control: true, kind: 'number', min: 100, max: 1500, step: 10, fallback: 500,
     fromAbout: (about) => pick(about, 'vehicle', 'max_range_miles'),
   },
   {
-    name: 'corridor_miles', kind: 'number', min: 1, max: 50, step: 1, fallback: 10,
+    name: 'corridor_miles', control: false, kind: 'number', min: 1, max: 50, step: 1, fallback: 10,
     fromAbout: (about) => pick(about, 'planner', 'corridor_miles'),
   },
   {
-    name: 'safety_reserve_gal', kind: 'number', min: 0, step: 0.5, fallback: 0,
+    name: 'safety_reserve_gal', control: true, kind: 'number', min: 0, step: 0.5, fallback: 0,
     fromAbout: (about) => pick(about, 'vehicle', 'safety_reserve_gal'),
   },
   {
-    name: 'price_policy', kind: 'choice', choices: PRICE_POLICIES.map((p) => p.value), fallback: 'median',
+    name: 'price_policy', control: false, kind: 'choice', choices: PRICE_POLICIES, fallback: 'median',
     fromAbout: (about) => pick(about, 'planner', 'price_policy'),
   },
   {
-    name: 'consolidate', kind: 'bool', fallback: true,
+    name: 'consolidate', control: false, kind: 'bool', fallback: true,
     fromAbout: (about) => pick(about, 'vehicle', 'consolidate') ?? pick(about, 'planner', 'consolidate'),
   },
 ];
 
 export const SETTING_NAMES = SETTINGS.map((s) => s.name);
+export const CONTROLLED = SETTINGS.filter((s) => s.control).map((s) => s.name);
+export const HIDDEN = SETTINGS.filter((s) => !s.control).map((s) => s.name);
 const BY_NAME = Object.fromEntries(SETTINGS.map((s) => [s.name, s]));
 
 // The parameter list /api/about publishes (if it describes a setting, it wins).
@@ -115,28 +90,27 @@ export function defaultsFrom(about) {
     const candidates = [fromList?.default, s.fromAbout(about), s.fallback];
     out[s.name] = candidates.map((v) => parseSetting(s.name, v)).find((v) => v !== null);
   }
-  out.start_tank = 'empty';
   return out;
-}
-
-// {min, max, step} of a numeric setting: the published ones when /api/about has them.
-export function rangeOf(name, about, values = {}) {
-  const s = BY_NAME[name];
-  const p = published(about, name) || {};
-  const min = asNumber(p.min_value ?? p.min) ?? s.min;
-  let max = asNumber(p.max_value ?? p.max) ?? s.max ?? null;
-  if (name === 'safety_reserve_gal') {
-    // Less than the tank: the largest step below range / mpg.
-    const tank = tankGallons(values);
-    if (tank) max = Math.max(min, Math.ceil(tank / s.step) * s.step - s.step);
-  }
-  return { min, max, step: s.step };
 }
 
 export function tankGallons(values) {
   const range = asNumber(values.max_range_miles);
   const mpg = asNumber(values.mpg);
   return range && mpg ? range / mpg : null;
+}
+
+// {min, max, step} of a numeric setting: the published ones when /api/about has them.
+// The safety fuel must stay below the tank: its largest value is the step below it.
+export function rangeOf(name, about, values = {}) {
+  const s = BY_NAME[name];
+  const p = published(about, name) || {};
+  const min = asNumber(p.min_value ?? p.min) ?? s.min;
+  let max = asNumber(p.max_value ?? p.max) ?? s.max ?? null;
+  if (name === 'safety_reserve_gal') {
+    const tank = tankGallons(values);
+    if (tank) max = Math.max(min, Math.ceil(tank / s.step) * s.step - s.step);
+  }
+  return { min, max, step: s.step };
 }
 
 function same(name, a, b) {
@@ -178,34 +152,4 @@ export function sameSettings(a = {}, b = {}) {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const k of keys) if (String(a[k]) !== String(b[k])) return false;
   return true;
-}
-
-// The names of the settings that differ from the defaults, the server's word first.
-export function changedNames(body, params) {
-  const fromServer = body?.meta?.settings_changed;
-  if (Array.isArray(fromServer)) return fromServer;
-  const names = Object.keys(params?.settings || {});
-  if (params?.start_tank === 'full') names.unshift('start_tank');
-  return names;
-}
-
-// The settings a plan was computed with: the answer's vehicle block (it carries every
-// effective value), completed with the defaults where an older server says nothing.
-export function effectiveSettings(body, defaults) {
-  const v = body?.vehicle || {};
-  const out = {
-    mpg: v.miles_per_gallon ?? v.mpg ?? defaults.mpg,
-    max_range_miles: v.max_range_miles ?? defaults.max_range_miles,
-    corridor_miles: v.corridor_miles ?? body?.pipeline?.corridor?.corridor_miles ?? defaults.corridor_miles,
-    safety_reserve_gal: v.safety_reserve_gal ?? defaults.safety_reserve_gal,
-    price_policy: v.price_policy ?? defaults.price_policy,
-    consolidate: v.consolidate ?? defaults.consolidate,
-    start_tank: v.start_tank ?? 'empty',
-  };
-  out.tank_gallons = v.tank_gallons ?? tankGallons(out);
-  return out;
-}
-
-export function tankMode(value) {
-  return START_TANK_MODES.find((m) => m.value === value) || START_TANK_MODES[0];
 }

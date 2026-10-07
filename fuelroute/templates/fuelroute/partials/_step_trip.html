@@ -1,0 +1,62 @@
+{% comment %}
+  Step "Trip": where the truck is going. The form is also a plain GET form (no
+  JavaScript: the page reloads with the trip in its address). The start-tank radios
+  of the Truck step belong to it (form="trip-form").
+{% endcomment %}
+<section id="panel-trip" class="step-card" aria-labelledby="trip-title" tabindex="-1">
+  <h2 id="trip-title" tabindex="-1">Where is the truck going?</h2>
+  <p class="lead">Type a start and a finish in the USA. A city and its state works best.</p>
+
+  <form id="trip-form" class="trip-form" method="get" action="{% url 'route-map' %}" novalidate>
+    <div class="field">
+      <label for="start" id="start-label">From</label>
+      <div class="combo">
+        <input id="start" name="start" value="{{ form.start }}" placeholder="City, ST (like Dallas, TX)"
+               autocomplete="off" spellcheck="false" required aria-describedby="start-error start-hint"
+               role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="start-listbox">
+        <ul id="start-listbox" class="combo-list" role="listbox" aria-labelledby="start-label" hidden></ul>
+      </div>
+      <p class="field-error" id="start-error" hidden></p>
+      <p class="field-hint" id="start-hint" hidden></p>
+    </div>
+    <button type="button" id="swap" class="btn-icon" aria-label="Swap From and To" title="Swap From and To">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div class="field">
+      <label for="finish" id="finish-label">To</label>
+      <div class="combo">
+        <input id="finish" name="finish" value="{{ form.finish }}" placeholder="City, ST (like Dallas, TX)"
+               autocomplete="off" spellcheck="false" required aria-describedby="finish-error finish-hint"
+               role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="finish-listbox">
+        <ul id="finish-listbox" class="combo-list" role="listbox" aria-labelledby="finish-label" hidden></ul>
+      </div>
+      <p class="field-error" id="finish-error" hidden></p>
+      <p class="field-hint" id="finish-hint" hidden></p>
+    </div>
+    <button type="submit" id="plan-btn" class="btn btn-primary btn-big">
+      <span class="btn-label">Find fuel stops</span>
+      <span class="btn-timer" data-timer hidden></span>
+    </button>
+  </form>
+
+  <div id="trip-error" class="error-box" hidden></div>
+
+  <div class="examples" role="group" aria-labelledby="examples-label">
+    <p id="examples-label" class="examples-label">Or try an example:</p>
+    <button type="button" class="chip" data-start="New York, NY" data-finish="Los Angeles, CA">New York → Los Angeles</button>
+    <button type="button" class="chip" data-start="Chicago, IL" data-finish="Houston, TX">Chicago → Houston</button>
+    <button type="button" class="chip" data-start="Dallas, TX" data-finish="Austin, TX">Dallas → Austin</button>
+  </div>
+
+  <ul class="fine-print">
+    <li>Fuel prices: <span data-live="about.data.geocoded" data-format="int">—</span> truck stops in
+      <span data-live="about.data.states" data-format="int">—</span> states, from the price file given with the assignment.</li>
+    <li>Standard truck (from the assignment): <span data-live="about.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon,
+      <span data-live="about.vehicle.max_range_miles" data-format="miles_short">—</span> on a full tank. You can change it in the Truck step.</li>
+  </ul>
+
+  <div class="step-nav">
+    <span></span>
+    <button type="button" class="btn" data-go="route">Next: your route</button>
+  </div>
+</section>

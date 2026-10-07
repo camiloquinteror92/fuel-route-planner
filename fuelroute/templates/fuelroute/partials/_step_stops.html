@@ -1,0 +1,59 @@
+{% comment %}
+  Step "Fuel stops": the algorithm in three rules, the rule for tiny stops with its
+  real effect on this trip, and every stop with the reason it is there ("Why here",
+  built by static/fuelroute/js/plan.js::whyText from the answer's decision block).
+  Choosing a stop (or "Play" passing by it) lights up the stop, its marker and the
+  rule that applied.
+{% endcomment %}
+<section id="panel-stops" class="step-card" aria-labelledby="stops-title" tabindex="-1" hidden>
+  <h2 id="stops-title" tabindex="-1">Where to buy fuel</h2>
+
+  <p class="lead" data-live-if="derived.has_stops"><span data-live="derived.stops_text">—</span>. At every truck stop, the driver looks one
+    full tank ahead (<span data-live="route.vehicle.usable_range_miles" data-format="miles_short">—</span>) and follows three rules:</p>
+  <p class="lead" data-live-if="derived.no_stops">No fuel stop needed: the fuel in the tank covers this trip.</p>
+
+  <div data-live-if="derived.has_stops">
+    <ol class="rules" id="rules">
+      <li class="rule" data-rule="reach_cheaper">
+        <span class="tag tag-cheaper">Cheaper ahead</span>
+        <p>Is fuel cheaper further on, within reach? Buy just enough to get there.</p>
+      </li>
+      <li class="rule" data-rule="finish">
+        <span class="tag tag-finish">Finish</span>
+        <p>If not, can the truck reach the finish? Buy just enough to finish.</p>
+      </li>
+      <li class="rule" data-rule="fill_up">
+        <span class="tag tag-fill">Fill up</span>
+        <p>If neither, fill the tank here. Nothing within reach is cheaper.</p>
+      </li>
+    </ol>
+
+    <p class="why-line"><strong>Why this is the cheapest:</strong> every gallon is bought at the cheapest station that could supply it.
+      A test checks this against a slower, exact method on many random roads.</p>
+
+    <div class="rule rule-tiny" data-rule="merged" data-live-if="route.vehicle.consolidate">
+      <span class="tag tag-merged">Merged</span>
+      <p>One more rule, for the driver: a stop that would buy less than <span data-live="derived.min_stop" data-format="gal">—</span>
+        is merged with a nearby stop, if that costs at most <span data-live="derived.max_fix" data-format="money">—</span> more.</p>
+      <p class="rule-effect" data-live-if="derived.merged_changed">On this trip: <span data-live="derived.merged_before" data-format="int">—</span>
+        stops became <span data-live="derived.merged_after" data-format="int">—</span>, for
+        <span data-live="derived.merged_cost" data-format="money">—</span> more.</p>
+      <p class="rule-effect" data-live-if="derived.merged_moved">On this trip it moved some fuel between stops, for
+        <span data-live="derived.merged_cost" data-format="money">—</span> more.</p>
+      <p class="rule-effect" data-live-if="derived.merged_unchanged">On this trip it changed nothing.</p>
+    </div>
+
+    <p class="play-hint">Press <strong>Play</strong> under the map to watch the tank empty and refill along the road.</p>
+
+    <ol id="stop-cards" class="stop-cards" aria-label="Fuel stops"></ol>
+
+    <p class="muted small" data-live-if="derived.some_arrive_empty"><span data-live="derived.stops_arriving_empty" data-format="int">—</span>
+      of <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank: the truck uses its
+      full range. Want a margin? Add safety fuel in the Truck step.</p>
+  </div>
+
+  <div class="step-nav">
+    <button type="button" class="btn btn-ghost" data-go="route">Back</button>
+    <button type="button" class="btn" data-go="cost">Next: the bill</button>
+  </div>
+</section>

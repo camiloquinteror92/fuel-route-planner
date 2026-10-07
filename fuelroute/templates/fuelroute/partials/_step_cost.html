@@ -1,0 +1,35 @@
+{% comment %}Step "Cost": the total, checked to the cent, and the honest comparison with a driver who ignores prices.{% endcomment %}
+<section id="panel-cost" class="step-card" aria-labelledby="cost-title" tabindex="-1" hidden>
+  <h2 id="cost-title" tabindex="-1">What the trip costs</h2>
+
+  <div class="bill">
+    <p class="bill-label">Total fuel cost</p>
+    <p class="bill-total" data-live="route.summary.total_fuel_cost" data-format="money">—</p>
+    <p class="bill-sub"><span data-live="route.summary.total_gallons_purchased" data-format="gal">—</span> bought at
+      <span data-live="derived.stops_text">—</span><span data-live-if="derived.has_stops"> ·
+      <span data-live="route.summary.average_price_paid" data-format="price">—</span> a gallon on average</span></p>
+  </div>
+
+  <ul id="cost-checks" class="checks" aria-label="Checks of this total"></ul>
+
+  <h3>Is it really cheaper?</h3>
+  <p>Compare with a driver who ignores prices: they stop only when the tank would not reach the next station, and fill up there.</p>
+  <div id="cost-bars" class="bars"></div>
+  <p class="saves" data-live-if="derived.savings_not_negative">You save <strong data-live="derived.savings_amount" data-format="money">—</strong>
+    (<span data-live="derived.savings_pct" data-format="pct">—</span>).</p>
+  <p data-live-if="derived.extra_stops_positive">The trade-off: <span data-live="derived.extra_stops_text">—</span>.
+    Buying just enough to reach cheaper fuel means more, smaller stops.</p>
+  <p data-live-if="derived.fewer_stops">And <span data-live="derived.fewer_stops_text">—</span>.</p>
+  <p data-live-if="derived.savings_negative">On this trip the plan costs <strong data-live="derived.costs_more" data-format="money">—</strong> more:
+    merging tiny stops cost more than the cheaper fuel saved.</p>
+  <p data-live-if="derived.price_blind_infeasible">A driver who ignores prices could not even finish this trip.</p>
+  <p data-live-if="derived.no_purchase">No fuel was bought, so there is nothing to compare.</p>
+
+  <p class="json-link"><a id="json-link" target="_blank" rel="noopener">See the API answer (JSON)</a>
+    <small class="muted">It is the same <code>GET /api/route</code> request that Postman sends.</small></p>
+
+  <div class="step-nav">
+    <button type="button" class="btn btn-ghost" data-go="stops">Back</button>
+    <button type="button" class="btn" data-go="truck">Next: try another truck</button>
+  </div>
+</section>

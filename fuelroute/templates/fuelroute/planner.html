@@ -3,341 +3,87 @@
 {% comment %}
   The planner page (fuelroute/web.py::planner_page), served at /api/route/map.
 
+  A guided tour in six steps, one card at a time: Trip, Route, Fuel stops, Cost,
+  Truck and Assignment (partials/_step_*.html). The map stays on the right from
+  960px (on top on a phone). The step is kept in the address hash (#trip, #route,
+  #stops, #cost, #truck, #assignment) and the trip in the query string.
+
   The server renders only this shell: the form pre-filled from the query string
   (escaped by the template engine), and the page configuration with /api/about
   embedded by json_script. It plans nothing and calls no external service.
   static/fuelroute/js/main.js calls the same GET /api/route that Postman uses and
   fills the page from the answer.
 
-  Rule: the visible text below has no digits. Every value is a
+  Rule: the visible text has no digits. Every value is a
   <span data-live="root.path" data-format="..."> filled by JavaScript from the API
-  (route), /api/stats (stats), /api/about (about), browser timings (client) or
-  pure functions of them (derived), or shows a dash when missing. Fixed technical
-  literals are marked data-literal. fuelroute/tests/test_web.py enforces it.
+  answer (route), /api/about (about), browser timings (client) or pure functions
+  of them (derived), or shows a dash when missing. The step numbers come from a CSS
+  counter. Fixed literals are marked data-literal. fuelroute/tests/test_web.py
+  enforces it.
 {% endcomment %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fuel Route Planner</title>
-  <meta name="description" content="Cheapest fuel stops along a US driving route: a client of the fuel route JSON API, with live evidence for every number.">
+  <meta name="description" content="Where a truck should buy fuel on a US trip, and what the whole trip costs: a client of the fuel route JSON API.">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="{% static 'fuelroute/css/planner.css' %}?v={{ asset_version }}">
 </head>
-<body>
+<body class="step-trip">
   <a class="skip" href="#main">Skip to content</a>
 
   <header class="top">
     <div class="wrap">
-      <div class="brand">
-        <h1>Fuel Route Planner</h1>
-        <p class="sub">
-          Cheapest fuel stops for a <span data-live="about.vehicle.max_range_miles" data-format="int">—</span>-mile-range truck
-          at <span data-live="about.vehicle.miles_per_gallon" data-format="num">—</span> mpg, priced from the provided OPIS file.
-        </p>
-      </div>
-
-      <form id="trip-form" class="trip-form" method="get" action="{% url 'route-map' %}" novalidate>
-        <div class="field field-start">
-          <label for="start" id="start-label">Start</label>
-          <div class="combo">
-            <input id="start" name="start" value="{{ form.start }}" placeholder="City, ST or lat,lon"
-                   autocomplete="off" spellcheck="false" required aria-describedby="start-error start-hint"
-                   role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="start-listbox">
-            <ul id="start-listbox" class="combo-list" role="listbox" aria-labelledby="start-label" hidden></ul>
-          </div>
-          <p class="field-error" id="start-error" hidden></p>
-          <p class="field-hint" id="start-hint" hidden></p>
-        </div>
-        <button type="button" id="swap" class="btn-icon" aria-label="Swap start and finish (does not plan)" title="Swap start and finish (does not plan)">
-          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M7 7h11l-3-3M17 17H6l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-        <div class="field field-finish">
-          <label for="finish" id="finish-label">Finish</label>
-          <div class="combo">
-            <input id="finish" name="finish" value="{{ form.finish }}" placeholder="City, ST or lat,lon"
-                   autocomplete="off" spellcheck="false" required aria-describedby="finish-error finish-hint"
-                   role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="finish-listbox">
-            <ul id="finish-listbox" class="combo-list" role="listbox" aria-labelledby="finish-label" hidden></ul>
-          </div>
-          <p class="field-error" id="finish-error" hidden></p>
-          <p class="field-hint" id="finish-hint" hidden></p>
-        </div>
-        <button type="submit" id="plan-btn" class="btn btn-primary">
-          <span class="btn-label">Plan route</span>
-          <span class="btn-timer" data-timer hidden></span>
-        </button>
-        <a class="form-settings" href="#whatif" id="settings-link"><span class="gear" aria-hidden="true"></span><span id="settings-summary">What if… (assignment defaults)</span></a>
-      </form>
-
-      <div class="chips" role="group" aria-label="Example trips">
-        <span class="chips-label">Examples</span>
-        <div class="chips-row">
-          <button type="button" class="chip" data-start="New York, NY" data-finish="Los Angeles, CA" data-tank="empty">New York → Los Angeles</button>
-          <button type="button" class="chip" data-start="Chicago, IL" data-finish="Houston, TX" data-tank="empty">Chicago → Houston</button>
-          <button type="button" class="chip" data-start="Los Angeles, CA" data-finish="New York, NY" data-tank="empty">Los Angeles → New York (data gap)</button>
-          <button type="button" class="chip" data-start="Dallas, TX" data-finish="Austin, TX" data-tank="full">Dallas → Austin (full tank)</button>
-        </div>
-        <span class="chips-hint">Plan a trip, press <em>Play trip</em> under the map, then try a question in <a href="#whatif">What if…</a></span>
-      </div>
+      <h1>Fuel Route Planner</h1>
+      <p class="tagline">Tell us where the truck is going. We find the cheapest places to buy fuel on the way, and what the whole trip costs.</p>
     </div>
   </header>
 
-  <main id="main" class="wrap">
-    <p id="live" class="sr-only" aria-live="polite"></p>
-    <noscript>
-      <p class="banner banner-warn">This page needs JavaScript to call the API. The plan itself is plain JSON:
-        <a href="{% url 'route-plan' %}?start={{ form.start|urlencode }}&amp;finish={{ form.finish|urlencode }}&amp;start_tank={{ form.start_tank }}">open the JSON answer</a>.</p>
-    </noscript>
+  <nav class="stepper-bar" aria-label="Steps">
+    <ol class="stepper wrap">
+      <li><button type="button" class="step-btn" id="step-btn-trip" data-step="trip" aria-controls="panel-trip" aria-current="step"><span class="step-label">Trip</span></button></li>
+      <li><button type="button" class="step-btn" id="step-btn-route" data-step="route" aria-controls="panel-route" aria-disabled="true" title="Plan a trip first."><span class="step-label">Route</span></button></li>
+      <li><button type="button" class="step-btn" id="step-btn-stops" data-step="stops" aria-controls="panel-stops" aria-disabled="true" title="Plan a trip first."><span class="step-label">Fuel stops</span></button></li>
+      <li><button type="button" class="step-btn" id="step-btn-cost" data-step="cost" aria-controls="panel-cost" aria-disabled="true" title="Plan a trip first."><span class="step-label">Cost</span></button></li>
+      <li><button type="button" class="step-btn" id="step-btn-truck" data-step="truck" aria-controls="panel-truck" aria-disabled="true" title="Plan a trip first."><span class="step-label">Truck</span></button></li>
+      <li><button type="button" class="step-btn" id="step-btn-assignment" data-step="assignment" aria-controls="panel-assignment" aria-disabled="true" title="Plan a trip first."><span class="step-label">Assignment</span></button></li>
+    </ol>
+  </nav>
 
-    <section id="error" class="error-wrap" hidden></section>
+  <div class="strips wrap">
+    <p id="your-truck" class="strip strip-truck" hidden>
+      <span>Showing your truck: <span data-live="derived.your_truck_text">—</span>.</span>
+      <button type="button" class="btn btn-small btn-ghost" data-action="standard-truck">Back to the standard truck</button>
+    </p>
+    <p id="stale" class="strip strip-stale" role="status" hidden>You changed the trip. Press “Find fuel stops” to see the new one.</p>
+  </div>
 
-    <section id="empty" class="hero" aria-labelledby="hero-title">
-      <div class="hero-text">
-        <h2 id="hero-title">Plan the cheapest fuel stops for a truck trip in the USA</h2>
-        <p>Type a start and a finish (suggestions come from the server's offline index of US places), or pick an example. The page
-          calls the same <code>GET /api/route</code> that Postman uses and draws its answer: the route, where to stop, how much to buy,
-          why there, and the total cost. Then replay the trip on the map, or change the truck in <a href="#whatif">What if…</a></p>
-        <p>Opening this page makes no routing or geocoding call: the server calls nothing to render it. Your browser loads the
-          map tiles from OpenStreetMap and the map library from its CDN. <a href="#how">How it works</a></p>
-      </div>
-      <div class="data-box" aria-labelledby="data-title">
-        <h3 id="data-title">Data loaded</h3>
-        <dl>
-          <dt>Stations in the price file</dt><dd data-live="about.data.stations" data-format="int">—</dd>
-          <dt>Usable (geocoded offline)</dt><dd><span data-live="about.data.geocoded" data-format="int">—</span> <small>(<span data-live="derived.data_geocoded_pct" data-format="pct">—</span>)</small></dd>
-          <dt>States with stations</dt><dd data-live="about.data.states" data-format="int">—</dd>
-          <dt>Price per gallon <small>(usable stations)</small></dt>
-          <dd class="price-trio"><span><span data-live="about.data.price_per_gallon.min" data-format="price">—</span> min</span>
-            <span><span data-live="about.data.price_per_gallon.median" data-format="price">—</span> median</span>
-            <span><span data-live="about.data.price_per_gallon.max" data-format="price">—</span> max</span></dd>
-        </dl>
-      </div>
-    </section>
-
-    <section id="results" class="results" hidden aria-labelledby="trip-title">
-      <p id="stale" class="banner banner-info" role="status" hidden><span class="banner-icon" aria-hidden="true"></span>
-        <span>The inputs changed: these results are for the previous trip or settings. Press <strong>Plan route</strong> or
-          <strong>Replan</strong> to update them.</span></p>
-      <h2 id="trip-title" class="trip-title">
-        <span data-live="route.start.label">—</span> → <span data-live="route.finish.label">—</span>
-      </h2>
-      <div id="settings-line" class="settings-line"></div>
-      <div class="kpis">
-        <article class="kpi">
-          <h3>Total fuel cost</h3>
-          <p class="kpi-value" data-live="route.summary.total_fuel_cost" data-format="money">—</p>
-          <p class="kpi-sub" data-live-if="derived.pays_every_mile">Every mile paid for</p>
-          <p class="kpi-sub" data-live-if="derived.is_full">Fuel bought on the way (start tank: full; the <span data-live="derived.full_tank_gallons" data-format="gal">—</span> it starts with are not counted)</p>
-          <p class="kpi-warn" data-live-if="derived.has_unpriced"><span data-live="route.summary.unpriced_fuel_gallons" data-format="gal">—</span> burned where the price file has no station: not priced (see the warnings)</p>
-        </article>
-        <article class="kpi kpi-save" data-kpi-save>
-          <h3 data-live-unless="derived.has_comparison">Savings</h3>
-          <h3 data-live-if="derived.savings_not_negative">You save</h3>
-          <h3 data-live-if="derived.price_blind_infeasible">Savings</h3>
-          <h3 data-live-if="derived.savings_negative">Costs more</h3>
-          <div data-live-if="derived.savings_not_negative">
-            <p class="kpi-value"><span data-live="derived.savings_amount" data-format="money">—</span>
-              <small>(<span data-live="derived.savings_pct" data-format="pct">—</span>)</small></p>
-            <p class="kpi-sub">vs a price-blind driver: <span data-live="derived.price_blind_cost" data-format="money">—</span>,
-              <span data-live="derived.price_blind_stops" data-format="int">—</span> stops</p>
-            <p class="kpi-note" data-live-if="derived.extra_stops_positive">This plan makes <span data-live="derived.extra_stops_text">—</span> than that driver.</p>
-            <p class="kpi-note" data-live-if="derived.fewer_stops">And <span data-live="derived.fewer_stops_text">—</span>.</p>
-          </div>
-          <div data-live-if="derived.savings_negative">
-            <p class="kpi-value"><span data-live="derived.costs_more_amount" data-format="money">—</span></p>
-            <p class="kpi-sub">than a price-blind driver (<span data-live="derived.price_blind_cost" data-format="money">—</span>,
-              <span data-live="derived.price_blind_stops" data-format="int">—</span> stops): the consolidation of tiny stops cost more than the optimum saved here.</p>
-          </div>
-          <p class="kpi-sub" data-live-if="derived.price_blind_infeasible">A price-blind driver cannot finish this route.</p>
-          <p class="kpi-sub" data-live-if="derived.no_purchase_full">No purchase needed: the full tank covers this trip.</p>
-          <p class="kpi-sub" data-live-if="derived.no_purchase_no_station">Nothing could be bought: no station of the price file on this route.</p>
-        </article>
-        <article class="kpi">
-          <h3>Distance</h3>
-          <p class="kpi-value" data-live="route.route.distance_miles" data-format="miles">—</p>
-          <p class="kpi-sub">about <span data-live="route.route.duration_hours" data-format="num">—</span> h driving (OSRM car-profile estimate)</p>
-        </article>
-        <article class="kpi">
-          <h3>Fuel stops</h3>
-          <p class="kpi-value"><span data-live="route.summary.number_of_stops" data-format="int">—</span>
-            <small>· <span data-live="route.summary.total_gallons_purchased" data-format="gal">—</span></small></p>
-          <p class="kpi-sub" data-live-if="derived.has_stops">avg <span data-live="route.summary.average_price_paid" data-format="price">—</span>/gal paid</p>
-          <p class="kpi-sub" data-live-if="derived.pays_every_mile">= <span data-live="route.route.distance_miles" data-format="miles">—</span> ÷ <span data-live="route.vehicle.miles_per_gallon" data-format="num">—</span> mpg
-            <span data-live-if="derived.checks_all_pass" class="mark mark-ok"><span class="mark-icon" aria-hidden="true"></span>checked</span></p>
-        </article>
-        <article class="kpi">
-          <h3>Prices on this route</h3>
-          <div data-live-if="derived.has_candidates">
-            <p class="kpi-value kpi-range"><span data-live="derived.route_price_min" data-format="price">—</span>–<span data-live="derived.route_price_max" data-format="price">—</span></p>
-            <p class="kpi-sub">median <span data-live="derived.route_price_median" data-format="price">—</span> ·
-              <span data-live="derived.corridor_candidates" data-format="int">—</span> stations within <span data-live="derived.corridor_miles" data-format="miles_round">—</span></p>
-          </div>
-          <p class="kpi-sub" data-live-if="derived.no_candidates">No station of the price file within <span data-live="derived.corridor_miles" data-format="miles_round">—</span> of this route.</p>
-        </article>
-      </div>
-
-      <div class="badges">
-        <a class="perf-badge" href="#performance" data-perf-badge>
-          <span class="perf-dot" aria-hidden="true"></span>
-          Server <strong data-live="client.server_ms" data-format="ms">—</strong> ·
-          <strong data-live="derived.calls_text">—</strong> ·
-          plan cache <strong data-live="route.meta.plan_cache">—</strong>
-          <span data-live-if="derived.is_plan_miss">· route cache <strong data-live="route.meta.route_cache">—</strong></span> ·
-          browser round trip <strong data-live="client.round_trip_ms" data-format="ms">—</strong>
-          <span class="link-like">Details</span>
-        </a>
-        <a class="checks-badge" href="#requirements" data-checks-badge>
-          <span class="mark-icon" aria-hidden="true"></span>
-          <span data-live="derived.checks_passed" data-format="int">—</span>/<span data-live="derived.checks_total" data-format="int">—</span> contract checks pass
-        </a>
-      </div>
-      <div id="warnings" class="warnings"></div>
-      <p class="note" data-live="route.summary.note"></p>
-    </section>
-
-    <div class="workspace">
-    <section class="map-card" aria-label="Route map">
-      <div id="map"></div>
-      <div id="player" class="player" role="group" aria-label="Play the trip on the map" hidden></div>
-    </section>
-
-    <aside class="side" aria-label="Plan settings">
-      {% include "fuelroute/partials/_whatif.html" %}
-    </aside>
-
-    <section id="profile-card" class="card profile-card" hidden aria-labelledby="profile-title">
-      <div class="card-head">
-        <h2 id="profile-title">Fuel profile</h2>
-        <ul class="profile-legend">
-          <li><span class="lg lg-cand" aria-hidden="true"></span>stations near the route</li>
-          <li><span class="lg lg-stop" aria-hidden="true"></span>plan stops</li>
-          <li><span class="lg lg-pb" aria-hidden="true"></span>price-blind stops</li>
-          <li data-live-if="derived.corridor_avg_price"><span class="lg lg-avg" aria-hidden="true"></span>corridor average <span data-live="derived.corridor_avg_price" data-format="price">—</span></li>
-          <li><span class="lg lg-plan" aria-hidden="true"></span>plan fuel</li>
-          <li><span class="lg lg-pbline" aria-hidden="true"></span>price-blind fuel</li>
-          <li><span class="lg lg-cap" aria-hidden="true"></span>tank capacity <span data-live="route.vehicle.tank_gallons" data-format="gal">—</span></li>
-        </ul>
-      </div>
-      <div class="profile-wrap">
-        <svg id="profile" role="img"
-             aria-label="Price of the stations along the route and fuel in the tank, mile by mile"></svg>
-        <div id="profile-tip" class="profile-tip" hidden></div>
-      </div>
-      <ul class="audits">
-        <li>Tank stays between <span data-live="derived.tank_min" data-format="gal">—</span> and <span data-live="derived.tank_max" data-format="gal">—</span>
-          (capacity <span data-live="route.vehicle.tank_gallons" data-format="gal">—</span>)
-          <span data-live-if="derived.tank_ok" class="mark mark-ok"><span class="mark-icon" aria-hidden="true"></span>within the tank</span>
-          <span data-live-unless="derived.tank_ok" class="mark mark-bad"><span class="mark-icon" aria-hidden="true"></span>out of range</span></li>
-        <li>Longest stretch between purchases: <span data-live="derived.longest_stretch" data-format="miles">—</span>
-          (range <span data-live="route.vehicle.max_range_miles" data-format="miles_round">—</span>)
-          <span data-live-if="derived.stretch_ok" class="mark mark-ok"><span class="mark-icon" aria-hidden="true"></span>ok</span>
-          <span data-live-unless="derived.stretch_ok" class="mark mark-bad"><span class="mark-icon" aria-hidden="true"></span>longer than the range</span></li>
-        <li data-live-if="derived.some_arrive_empty"><span data-live="derived.stops_arriving_empty" data-format="int">—</span> of
-          <span data-live="route.summary.number_of_stops" data-format="int">—</span> stops are reached with an empty tank: the range is used
-          literally, with no safety margin: set one in <a href="#whatif">What if…</a></li>
-      </ul>
-    </section>
+  <main id="main" class="tour wrap">
+    <div class="step-col">
+      {% include "fuelroute/partials/_step_trip.html" %}
+      {% include "fuelroute/partials/_step_route.html" %}
+      {% include "fuelroute/partials/_step_stops.html" %}
+      {% include "fuelroute/partials/_step_cost.html" %}
+      {% include "fuelroute/partials/_step_truck.html" %}
+      {% include "fuelroute/partials/_step_assignment.html" %}
     </div>
-
-    <div class="tabs-wrap">
-      <nav class="tabs" role="tablist" aria-label="Details of the plan">
-        <button type="button" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="true">Plan</button>
-        <button type="button" role="tab" id="tab-requirements" aria-controls="panel-requirements" aria-selected="false" tabindex="-1">Requirements</button>
-        <button type="button" role="tab" id="tab-tests" aria-controls="panel-tests" aria-selected="false" tabindex="-1">Tests</button>
-        <button type="button" role="tab" id="tab-performance" aria-controls="panel-performance" aria-selected="false" tabindex="-1">Performance</button>
-        <button type="button" role="tab" id="tab-scale" aria-controls="panel-scale" aria-selected="false" tabindex="-1">How it scales</button>
-        <button type="button" role="tab" id="tab-how" aria-controls="panel-how" aria-selected="false" tabindex="-1">How it works</button>
-        <button type="button" role="tab" id="tab-api" aria-controls="panel-api" aria-selected="false" tabindex="-1">API</button>
-      </nav>
+    <div class="map-col">
+      <section class="map-card" aria-label="Map of the trip">
+        <div id="map"></div>
+        <div id="player" class="player" role="group" aria-label="Play the trip on the map" hidden></div>
+      </section>
     </div>
-
-    <section id="panel-plan" class="panel" role="tabpanel" aria-labelledby="tab-plan" tabindex="0">
-      <p class="muted" data-live-unless="derived.has_plan">Plan a trip to see the stops, why each one was chosen, the strategy comparison and the exports.</p>
-      <div data-live-if="derived.has_plan">
-        <div id="plan-actions" class="actions" role="group" aria-label="Export this plan">
-          <button type="button" class="btn btn-small btn-ghost" data-action="copy-link">Copy link</button>
-          <button type="button" class="btn btn-small btn-ghost" data-action="copy-curl">Copy curl</button>
-          <a class="btn btn-small btn-ghost" data-open-json target="_blank" rel="noopener">Open JSON</a>
-          <button type="button" class="btn btn-small btn-ghost" data-action="download-geojson">Download GeoJSON</button>
-          <button type="button" class="btn btn-small btn-ghost" data-action="download-csv">Download stops CSV</button>
-          <button type="button" class="btn btn-small btn-ghost" data-action="copy-instructions">Copy driver instructions</button>
-          <button type="button" class="btn btn-small btn-ghost" data-action="print">Print trip sheet</button>
-        </div>
-        <h3>Fuel stops</h3>
-        <p class="muted small">Each “Why” is the reason of the final plan: the rule of the greedy that created the stop, what the
-          consolidation of tiny stops moved in or out (and what that cost), and where the fuel bought there takes the truck.</p>
-        <div id="stops-table"></div>
-        <h3>Strategy comparison <small class="muted">same route, same stations, same gallons</small></h3>
-        <div id="comparison-table"></div>
-      </div>
-    </section>
-
-    {% include "fuelroute/partials/_requirements.html" %}
-
-    {% include "fuelroute/partials/_tests.html" %}
-
-    <section id="panel-performance" class="panel" role="tabpanel" aria-labelledby="tab-performance" tabindex="0" hidden>
-      <h3>This request</h3>
-      <div id="perf-request"></div>
-
-      <h3>Cache demo</h3>
-      <p class="muted">The same trip again is answered from the plan cache; the other tank mode reuses the cached route and runs only our code.</p>
-      <div class="actions">
-        <button type="button" class="btn" id="send-again" data-live-if="derived.has_plan">Send again (plan cache)</button>
-        <button type="button" class="btn btn-ghost" id="other-tank" data-live-if="derived.has_plan">Other tank mode (route cache)</button>
-        <span class="muted" data-live-unless="derived.has_plan">Plan a trip first.</span>
-      </div>
-      <div id="perf-bench"></div>
-
-      <h3>This session</h3>
-      <div id="perf-session"></div>
-
-      <h3>Since server start <small class="muted">from /api/stats</small></h3>
-      <div id="perf-stats"></div>
-
-      <h3>Why it is fast</h3>
-      <ul class="prose-list">
-        <li><strong>No geocoding call for “City, ST”.</strong> “lat,lon” is parsed and “City, ST” is looked up in an offline index of
-          <span data-live="about.data.places_index_entries" data-format="int">—</span> places (Census and GeoNames); only text the index
-          cannot place goes to Nominatim, and that answer is cached.</li>
-        <li><strong>One routing call, small.</strong> OSRM answers in <code data-literal>polyline6</code>, decoded locally,
-          over an HTTPS connection that stays open between trips.</li>
-        <li><strong>Two caches and single flight.</strong> The prepared route and the finished plan are cached apart (route for
-          <span data-live="about.planner.route_cache_seconds" data-format="duration">—</span>, plan for
-          <span data-live="about.planner.plan_cache_seconds" data-format="duration">—</span>, per server process), so many what-ifs
-          never push the route out; identical requests in flight share one routing call.</li>
-        <li><strong>A what-if costs no call.</strong> The route is cached apart from the plan, so a change of the truck or of the
-          rules in <a href="#whatif">What if…</a> is planned again on the cached route by our code alone.</li>
-        <li><strong>Vectorised corridor search.</strong> numpy finds the stations near the route in three passes:
-          <a href="#how">see the funnel in How it works</a>.</li>
-        <li><strong>Gzip on the wire.</strong> The JSON of a long trip and this page compress to a fraction of their size; the
-          “Transfer” card at the top of this tab compares what travelled with what was decoded.</li>
-      </ul>
-    </section>
-
-    {% include "fuelroute/partials/_scale.html" %}
-
-    {% include "fuelroute/partials/_how.html" %}
-
-    <section id="panel-api" class="panel" role="tabpanel" aria-labelledby="tab-api" tabindex="0" hidden>
-      <h3>Request</h3>
-      <div id="api-request"></div>
-      <h3>Response</h3>
-      <div id="api-response"></div>
-      <h3>Reference <small class="muted">from /api/about</small></h3>
-      <div id="api-reference"></div>
-      <h3>Error catalog</h3>
-      <p class="muted">Every error has the body <code>{"error", "detail", "meta"}</code>, the framework's and the rate limit's too;
-        <code>meta</code> says how many external calls were spent before it. “Try it” sends the real request.</p>
-      <div id="api-errors"></div>
-    </section>
   </main>
 
-  {% include "fuelroute/partials/_footer.html" %}
+  <p id="live" class="sr-only" aria-live="polite"></p>
+  <noscript>
+    <p class="noscript wrap">This page needs JavaScript. The plan itself is plain JSON:
+      <a href="{% url 'route-plan' %}?start={{ form.start|urlencode }}&amp;finish={{ form.finish|urlencode }}&amp;start_tank={{ form.start_tank }}">open the JSON answer</a>.</p>
+  </noscript>
 
-  <div id="toasts" class="toasts" aria-live="polite"></div>
+  {% include "fuelroute/partials/_footer.html" %}
 
   {{ page_config|json_script:"page-config" }}
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"

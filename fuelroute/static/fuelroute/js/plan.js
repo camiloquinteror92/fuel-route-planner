@@ -1,329 +1,167 @@
-// Plan tab and the business result: warnings, the stops table (with "Why" for
-// each purchase and totals checked to the cent), the strategy comparison and the
-// export actions (link, curl, JSON, GeoJSON, CSV, driver instructions, print).
+// The plan, in plain words: the reason of every stop ("Why here"), the list of
+// stops, the bill with its checks, and the comparison with a driver who ignores
+// prices. Every number is read from the API answer.
 
-import { el, fmt, mark, plural, replace, slug } from './format.js';
-import { absolute, routeUrl } from './api.js';
-import { policyLabel, policyOf } from './settings.js';
+import { el, fmt, joinAnd, mark, plural, replace } from './format.js';
+import { cents, sumCents } from './checks.js';
 
-const MIN_STOP_DEFAULT_KEY = 'min_stop_gallons';
+// The three rules of the algorithm, by the name the API gives them (decision.rule).
+export const RULES = { reach_cheaper: 'Cheaper ahead', finish: 'Finish', fill_up: 'Fill up' };
+const TAGS = { reach_cheaper: 'tag-cheaper', finish: 'tag-finish', fill_up: 'tag-fill' };
+const HALF_CENT = 0.005;
+const SAME_MILE = 0.05; // mile markers have one decimal
 
-function consolidationLimits(body, about) {
-  const opt = body.pipeline?.optimizer || {};
-  return {
-    minStop: opt[MIN_STOP_DEFAULT_KEY] ?? about?.vehicle?.min_stop_gallons ?? null,
-    maxCost: opt.max_consolidation_cost ?? about?.vehicle?.max_consolidation_cost ?? null,
-  };
+export function ruleOf(stop) {
+  return stop?.decision?.rule ?? null;
 }
 
-// "and": "a", "a and b", "a, b and c".
-function joinAnd(items) {
-  if (items.length < 2) return items.join('');
-  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+function usableRange(body) {
+  return fmt.miles_short(body.vehicle?.usable_range_miles ?? body.vehicle?.max_range_miles);
 }
 
-function reachText(reaches) {
-  if (!reaches) return null;
-  if (reaches.stop === null || reaches.stop === undefined) return 'enough to finish';
-  return `enough to reach stop ${reaches.stop} (mile ${fmt.dec1(reaches.mile)})`;
+function minStopOf(body, about) {
+  return body.pipeline?.optimizer?.min_stop_gallons ?? about?.vehicle?.min_stop_gallons ?? null;
 }
 
-// What the greedy did at this station, before consolidation.
-function greedyText(decision, body) {
-  const amount = fmt.gal(decision.greedy_gallons);
-  if (decision.rule === 'reach_cheaper') {
-    return `The greedy bought ${amount} here, just enough to reach a cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)}.`;
-  }
-  if (decision.rule === 'fill_up') {
-    return `The greedy filled the tank here (${amount}): no cheaper station within ${fmt.miles_round(body.vehicle.max_range_miles)}.`;
-  }
-  if (decision.rule === 'finish') return `The greedy bought ${amount} here to finish: the cheapest price left.`;
-  return `The greedy bought ${amount} here (${decision.rule}).`;
-}
-
-// The reason of a stop of the FINAL plan, from the API's decision block: the greedy
-// rule that created the stop, what consolidation moved in or out (and what that
-// cost), and where the fuel bought here takes the truck in this plan.
+// Why the truck stops here, from the answer's decision block (pure: tested in Node).
+// A stop the tiny-stop rule left alone gets the rule in one sentence. A merged stop
+// gets what the rule alone would buy, one sentence per fuel moved, and the cost.
 export function whyText(stop, body, about) {
-  const decision = stop.decision;
-  if (!decision) return null;
-  if (!decision.reaches) return legacyWhy(decision, body, about);
-  const reach = reachText(decision.reaches);
-  if (!decision.consolidated) {
-    if (decision.rule === 'reach_cheaper') {
-      const next = decision.reaches.stop !== null && Math.abs(decision.reaches.mile - decision.cheaper_station_mile) < 0.05;
-      return next
-        ? `Cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)} (stop ${decision.reaches.stop}): bought just enough to reach it.`
-        : `Cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)}: bought just enough to reach it; in this plan that is ${reach}.`;
+  const d = stop.decision;
+  if (!d) return null;
+  const stops = body.fuel_stops || [];
+  const range = usableRange(body);
+  if (!d.consolidated) {
+    if (d.rule === 'reach_cheaper') {
+      const r = d.reaches;
+      const next = r && r.stop !== null && r.stop !== undefined && Math.abs(r.mile - d.cheaper_station_mile) <= SAME_MILE
+        ? stops[r.stop - 1] : null;
+      if (next) {
+        return `Fuel is cheaper at stop ${next.stop} (${fmt.price(next.price_per_gallon)} vs ${fmt.price(stop.price_per_gallon)} here). Buy just enough to get there.`;
+      }
+      return `Fuel is cheaper at mile ${fmt.dec1(d.cheaper_station_mile)}. Buy just enough to get there.`;
     }
-    if (decision.rule === 'fill_up') {
-      return `No cheaper station within ${fmt.miles_round(body.vehicle.max_range_miles)}: filled the tank, ${reach}.`;
-    }
-    if (decision.rule === 'finish') return 'Cheapest price left before the destination: bought just enough to finish.';
-    return decision.rule;
+    if (d.rule === 'fill_up') return `Nothing cheaper within ${range}. Fill the tank.`;
+    if (d.rule === 'finish') return 'No cheaper fuel before the finish. Buy just enough to finish.';
+    return null;
   }
-  const { minStop } = consolidationLimits(body, about);
-  const minimum = minStop !== null ? fmt.gal(minStop) : 'the minimum';
-  const moves = [];
-  const gone = (decision.moved_in || []).filter((m) => m.from_stop === null || m.from_stop === undefined);
-  const kept = (decision.moved_in || []).filter((m) => m.from_stop !== null && m.from_stop !== undefined);
-  if (gone.length) {
-    moves.push(`moved ${joinAnd(gone.map((m) => `the ${fmt.gal(m.gallons)} planned at mile ${fmt.dec1(m.mile)}`))} here (${gone.length > 1 ? 'those stops are' : 'that stop is'} gone)`);
-  }
-  for (const m of kept) moves.push(`moved ${fmt.gal(m.gallons)} planned at stop ${m.from_stop} (mile ${fmt.dec1(m.mile)}) here`);
-  for (const m of decision.moved_out || []) moves.push(`moved ${fmt.gal(m.gallons)} of it to stop ${m.to_stop} (mile ${fmt.dec1(m.mile)})`);
-  const extra = decision.consolidation_extra_cost;
-  const cost = extra && Math.abs(extra) >= 0.005 ? `, for ${fmt.money_signed(extra)}` : '';
-  const why = moves.length
-    ? `To avoid a stop under ${minimum}, consolidation ${joinAnd(moves)}${cost}.`
-    : `Consolidation adjusted it to avoid a stop under ${minimum}${cost}.`;
-  return `${greedyText(decision, body)} ${why} It buys ${fmt.gal(stop.gallons)}: ${decision.fills_tank ? 'a full tank, ' : ''}${reach}.`;
-}
 
-// Answers of a server older than the decision's "reaches" block.
-function legacyWhy(decision, body, about) {
-  let text;
-  if (decision.rule === 'reach_cheaper') {
-    text = `Cheaper station at mile ${fmt.dec1(decision.cheaper_station_mile)}: bought just enough to reach it`;
-  } else if (decision.rule === 'fill_up') {
-    text = `No cheaper station within ${fmt.miles_round(body.vehicle.max_range_miles)}: filled the tank`;
-  } else if (decision.rule === 'finish') {
-    text = 'Cheapest price left before the destination: bought just enough to finish';
-  } else {
-    text = decision.rule;
+  const parts = [];
+  if (d.rule === 'reach_cheaper') {
+    parts.push(`Fuel is cheaper at mile ${fmt.dec1(d.cheaper_station_mile)}, so the rule alone buys only ${fmt.gal(d.greedy_gallons)} here.`);
+  } else if (d.rule === 'fill_up') {
+    parts.push(`Nothing cheaper within ${range}, so the rule fills the tank.`);
+  } else if (d.rule === 'finish') {
+    parts.push('No cheaper fuel before the finish, so the rule buys just enough to finish.');
   }
-  if (decision.consolidated) {
-    const { minStop } = consolidationLimits(body, about);
-    text += `. Adjusted to avoid a stop under ${minStop !== null ? fmt.gal(minStop) : 'the minimum'}`;
+  const movedIn = d.moved_in || [];
+  const gone = movedIn.filter((m) => m.from_stop === null || m.from_stop === undefined);
+  const kept = movedIn.filter((m) => m.from_stop !== null && m.from_stop !== undefined);
+  if (gone.length === 1) {
+    parts.push(`To avoid a tiny stop, it also buys here the ${fmt.gal(gone[0].gallons)} planned at mile ${fmt.dec1(gone[0].mile)}, and skips that stop.`);
+  } else if (gone.length > 1) {
+    const total = sumCents(gone.map((m) => m.gallons)) / 100;
+    parts.push(`To avoid tiny stops, it also buys here the fuel planned at miles ${joinAnd(gone.map((m) => fmt.dec1(m.mile)))} (${fmt.gal(total)}), and skips those stops.`);
   }
-  return text;
+  for (const m of kept) parts.push(`To avoid a tiny stop, it also buys here ${fmt.gal(m.gallons)} that stop ${m.from_stop} would have bought.`);
+  for (const m of d.moved_out || []) {
+    const where = m.to_stop !== null && m.to_stop !== undefined ? `stop ${m.to_stop}` : `mile ${fmt.dec1(m.mile)}`;
+    parts.push(`To avoid a tiny stop, ${fmt.gal(m.gallons)} of it is bought at ${where} instead.`);
+  }
+  if (!movedIn.length && !(d.moved_out || []).length) {
+    const minStop = minStopOf(body, about);
+    parts.push(`Adjusted so no stop buys less than ${minStop !== null ? fmt.gal(minStop) : 'the minimum'}.`);
+  }
+  const extra = d.consolidation_extra_cost;
+  if (extra !== null && extra !== undefined && Math.abs(extra) >= HALF_CENT) parts.push(`Cost of this change: ${fmt.money_signed(extra)}.`);
+  return parts.join(' ');
 }
 
 export function renderWarnings(container, body) {
-  replace(container, (body.warnings || []).map((w) =>
-    el('div', { class: 'banner banner-warn', role: 'note' }, el('span', { class: 'banner-icon', 'aria-hidden': 'true' }), el('p', {}, w))));
+  replace(container, (body.warnings || []).map((w) => el('li', {}, w)));
 }
 
-const cents = (v) => Math.round(Number(v) * 100);
+function tag(rule) {
+  return el('span', { class: `tag ${TAGS[rule] || ''}` }, RULES[rule] || rule);
+}
 
-export function renderStops(container, body, about, { onStop } = {}) {
-  const stops = body.fuel_stops || [];
-  if (!stops.length) {
-    replace(container, el('div', { class: 'empty-note' },
-      el('p', {}, el('strong', {}, 'No fuel stop needed for this trip.')),
-      body.summary.note ? el('p', { class: 'muted' }, body.summary.note) : null));
-    return;
-  }
-  // The quote THIS plan used (median, lowest or highest: a what-if setting).
-  const policy = policyLabel(policyOf(body), about).toLowerCase();
-  let prev = 0;
-  const rows = stops.map((s) => {
-    const leg = s.mile_marker - prev;
-    prev = s.mile_marker;
-    const quotes = s.price_quotes;
-    const priceTitle = quotes
-      ? quotes.count > 1
-        ? `${quotes.count} quotes in the file: ${fmt.price_exact(quotes.min)}–${fmt.price_exact(quotes.max)}${policy ? `; this plan uses the ${policy} (${fmt.price_exact(s.price_per_gallon)})` : ''}`
-        : `One quote in the file: ${fmt.price_exact(s.price_per_gallon)}`
-      : null;
+// The stops as cards: where, the price, what the truck arrives with and buys, the
+// rule (and "Merged") and why. onSelect(n) when a card is chosen.
+export function renderStopCards(container, body, about, { onSelect } = {}) {
+  replace(container, (body.fuel_stops || []).map((s) => {
     const why = whyText(s, body, about);
-    const tr = el('tr', { tabindex: 0, dataset: { stop: s.stop }, title: `Stop ${s.stop}: show it on the map and the profile` },
-      el('td', { 'data-label': '#', class: 'num' }, el('span', { class: 'stop-dot' }, String(s.stop))),
-      el('td', { 'data-label': 'Station', class: 'station' },
-        el('strong', {}, s.name),
-        el('small', {}, [s.address, `${s.city}, ${s.state}`].filter(Boolean).join(' · '))),
-      el('td', { 'data-label': 'Mile', class: 'num' }, fmt.dec1(s.mile_marker)),
-      el('td', { 'data-label': 'Leg', class: 'num' }, fmt.miles(leg)),
-      el('td', { 'data-label': 'Off route', class: 'num' }, fmt.miles(s.distance_from_route_miles)),
-      el('td', { 'data-label': '$/gal', class: 'num' },
-        el('span', { title: priceTitle, class: 'has-tip' }, fmt.price(s.price_per_gallon)),
-        quotes && quotes.count > 1 ? el('small', { class: 'quotes' }, `${quotes.count} quotes`) : null),
-      el('td', { 'data-label': 'Arrive with', class: `num${s.fuel_on_arrival_gallons === 0 ? ' arrive-empty' : ''}`, title: s.fuel_on_arrival_gallons === 0 ? 'Arrives with an empty tank: the range is used literally, with no safety margin' : null }, fmt.gal(s.fuel_on_arrival_gallons)),
-      el('td', { 'data-label': 'Buy', class: 'num' }, fmt.gal(s.gallons)),
-      el('td', { 'data-label': 'Cost', class: 'num strong' }, fmt.money(s.cost)),
-      el('td', { 'data-label': 'Why', class: 'why' }, why || '—'),
-    );
-    const activate = () => onStop?.(s.stop, 'table');
-    tr.addEventListener('click', activate);
-    tr.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        activate();
-      }
-    });
-    return tr;
-  });
-
-  // Totals, in integer cents / hundredths of a gallon.
-  const costSum = stops.reduce((t, s) => t + cents(s.cost), 0);
-  const galSum = stops.reduce((t, s) => t + cents(s.gallons), 0);
-  const costOk = costSum === cents(body.summary.total_fuel_cost);
-  const galOk = galSum === cents(body.summary.total_gallons_purchased);
-  const totals = el('tr', { class: 'totals' },
-    el('td', { colspan: 7, 'data-label': 'Totals' },
-      el('div', { class: costOk ? '' : 'is-bad' }, mark(costOk, costOk ? 'Σ stop costs = total, to the cent' : `Σ stop costs ${fmt.money(costSum / 100)} ≠ total ${fmt.money(body.summary.total_fuel_cost)}`)),
-      el('div', { class: galOk ? '' : 'is-bad' }, mark(galOk, galOk ? 'Σ gallons = total gallons' : `Σ gallons ${fmt.gal(galSum / 100)} ≠ total ${fmt.gal(body.summary.total_gallons_purchased)}`))),
-    el('td', { 'data-label': 'Buy', class: 'num strong' }, fmt.gal(body.summary.total_gallons_purchased)),
-    el('td', { 'data-label': 'Cost', class: 'num strong' }, fmt.money(body.summary.total_fuel_cost)),
-    el('td', {}, ''),
-  );
-
-  replace(container, el('div', { class: 'table-wrap' },
-    el('table', { class: 'data cards stops-table' },
-      el('caption', { class: 'sr-only' }, 'Fuel stops of this plan'),
-      el('thead', {}, el('tr', {},
-        ['#', 'Station', 'Mile', 'Leg', 'Off route', '$/gal', 'Arrive with', 'Buy', 'Cost', 'Why'].map((h, i) =>
-          el('th', { scope: 'col', class: i === 1 || i === 9 ? null : 'num' }, h)))),
-      el('tbody', {}, rows),
-      el('tfoot', {}, totals))));
+    const button = el('button', { type: 'button', class: 'stop-btn', 'aria-describedby': `why-${s.stop}` },
+      el('span', { class: 'stop-num', 'aria-hidden': 'true' }, String(s.stop)),
+      el('span', { class: 'stop-main' },
+        el('span', { class: 'stop-place' }, el('span', { class: 'sr-only' }, `Stop ${s.stop}: `),
+          el('strong', {}, `${s.city}, ${s.state}`), ` · mile ${fmt.dec1(s.mile_marker)}`),
+        el('span', { class: 'stop-tags' }, tag(ruleOf(s)), s.decision?.consolidated ? el('span', { class: 'tag tag-merged' }, 'Merged') : null),
+        el('span', { class: 'stop-line' },
+          `${fmt.price(s.price_per_gallon)}/gal · arrives with ${fmt.gal(s.fuel_on_arrival_gallons)} · buys ${fmt.gal(s.gallons)} · `,
+          el('strong', {}, fmt.money(s.cost)))));
+    button.addEventListener('click', () => onSelect?.(s.stop));
+    return el('li', { class: 'stop-card', dataset: { stop: s.stop } },
+      button,
+      why ? el('p', { class: 'stop-why', id: `why-${s.stop}` }, el('strong', {}, 'Why here: '), why) : null);
+  }));
 }
 
-export function highlightRow(container, n) {
-  for (const tr of container.querySelectorAll('tr[data-stop]')) tr.classList.toggle('is-active', tr.dataset.stop === String(n));
-}
-
-function strategyRow(label, rule, strategy, base, extra) {
-  if (!strategy) {
-    return el('tr', { class: 'muted' },
-      el('th', { scope: 'row', 'data-label': 'Strategy' }, label),
-      el('td', { 'data-label': 'Rule' }, rule || ''),
-      el('td', { colspan: 4, 'data-label': 'Result' }, extra || 'not feasible on this route'));
+// Light up a stop's card and the rule it follows (and the tiny-stop rule if it was
+// merged); n = null clears. scroll: bring the card into view (desktop only).
+export function highlightStop({ cards, rules, body }, n, { scroll = false } = {}) {
+  const stop = (body?.fuel_stops || []).find((s) => s.stop === n) || null;
+  for (const card of cards.querySelectorAll('.stop-card')) {
+    const on = stop !== null && card.dataset.stop === String(n);
+    card.classList.toggle('is-current', on);
+    card.querySelector('.stop-btn')?.setAttribute('aria-pressed', String(on));
+    if (on && scroll) card.scrollIntoView({ block: 'nearest', behavior: 'auto' });
   }
-  const diff = base !== null ? strategy.total_fuel_cost - base : null;
-  let vs = '—';
-  if (diff !== null && Math.abs(diff) >= 0.005) {
-    vs = diff > 0 ? `this plan saves ${fmt.money(diff)}${strategy.total_fuel_cost ? ` (${fmt.pct((diff / strategy.total_fuel_cost) * 100)})` : ''}` : `this plan costs ${fmt.money(-diff)} more`;
-  } else if (diff !== null) vs = 'same cost';
-  return el('tr', {},
-    el('th', { scope: 'row', 'data-label': 'Strategy' }, label),
-    el('td', { 'data-label': 'Rule', class: 'rule' }, rule || '', extra ? el('small', { class: 'extra' }, extra) : null),
-    el('td', { 'data-label': 'Stops', class: 'num' }, strategy.number_of_stops ?? '—'),
-    el('td', { 'data-label': 'Gallons', class: 'num' }, fmt.gal(strategy.total_gallons_purchased)),
-    el('td', { 'data-label': 'Cost', class: 'num strong' }, fmt.money(strategy.total_fuel_cost)),
-    el('td', { 'data-label': 'vs this plan', class: diff > 0 ? 'good' : diff < 0 ? 'bad' : null }, vs));
+  for (const rule of rules.querySelectorAll('[data-rule]')) {
+    const name = rule.dataset.rule;
+    rule.classList.toggle('is-active', Boolean(stop) && (name === ruleOf(stop) || (name === 'merged' && stop.decision?.consolidated === true)));
+  }
 }
 
-export function renderComparison(container, body) {
-  const cmp = body.summary.comparison;
-  if (!cmp) {
-    replace(container, el('p', { class: 'muted' },
-      body.summary.number_of_stops === 0 ? 'No purchase on this trip, so there is nothing to compare.' : 'This server does not send a strategy comparison.'));
+// The bill's checks (in integer cents, never hidden when they fail) and the bars
+// against a driver who ignores prices.
+export function renderCost({ checks, bars }, body) {
+  const s = body.summary;
+  const stops = body.fuel_stops || [];
+  const items = [];
+  if (stops.length) {
+    const sum = sumCents(stops.map((x) => x.cost));
+    const total = cents(s.total_fuel_cost);
+    if (sum === total) {
+      items.push(mark(true, stops.length === 1
+        ? 'The cost of the stop is this total, to the cent.'
+        : `The ${fmt.int(stops.length)} stop costs add up to this total, to the cent.`));
+    } else {
+      items.push(mark(false, `The stop costs add up to ${fmt.money(sum / 100)}, not ${fmt.money(s.total_fuel_cost)}.`));
+    }
+  }
+  const empty = body.vehicle?.start_tank !== 'full';
+  const unpriced = Number(s.unpriced_fuel_gallons) > 0;
+  if (empty && !unpriced && Math.abs(s.end_fuel_gallons - s.start_fuel_gallons) < HALF_CENT) {
+    items.push(mark(true, `Every mile is paid for: the truck ends the trip with the same ${fmt.gal(s.start_fuel_gallons)} it started with.`));
+  }
+  if (!empty) {
+    items.push(mark(null, `The truck left with a full tank. Those ${fmt.gal(s.start_fuel_gallons)} were free and are not in the total.`));
+  }
+  if (unpriced) {
+    items.push(mark(null, `${fmt.gal(s.unpriced_fuel_gallons)} were burned where the price file has no station, so they have no price. See “Good to know” in the Route step.`));
+  }
+  replace(checks, items.map((item) => el('li', {}, item)));
+
+  const blind = s.comparison?.price_blind;
+  if (!blind || !stops.length) {
+    replace(bars);
     return;
   }
-  const base = cmp.optimized?.total_fuel_cost ?? body.summary.total_fuel_cost;
-  const before = cmp.optimum_before_consolidation;
-  const opt = body.pipeline?.optimizer;
-  let consolidationNote = null;
-  if (before && cmp.optimized) {
-    const extra = opt?.consolidation_extra_cost ?? cmp.optimized.total_fuel_cost - before.total_fuel_cost;
-    const fewer = before.number_of_stops - cmp.optimized.number_of_stops;
-    consolidationNote = fewer > 0 ? `Consolidation: ${fmt.money_signed(extra)} for ${plural(fewer, 'fewer stop', 'fewer stops')}` : 'Consolidation changed nothing on this trip';
-  }
-  const avg = cmp.corridor_average;
-  const rows = [
-    strategyRow(cmp.optimized?.label || 'This plan (optimized, consolidated)', cmp.optimized?.rule, cmp.optimized || {
-      number_of_stops: body.summary.number_of_stops, total_gallons_purchased: body.summary.total_gallons_purchased, total_fuel_cost: body.summary.total_fuel_cost,
-    }, base),
-    strategyRow(before?.label || 'Pure optimum before consolidation', before?.rule, before, base, consolidationNote),
-    strategyRow(cmp.price_blind?.label || 'Price-blind driver', cmp.price_blind?.rule, cmp.price_blind, base),
-  ];
-  if ('quarter_tank' in cmp) {
-    rows.push(strategyRow(cmp.quarter_tank?.label || 'Quarter-tank driver', cmp.quarter_tank?.rule, cmp.quarter_tank, base,
-      cmp.quarter_tank ? null : 'not available for this route'));
-  }
-  if (avg) {
-    rows.push(strategyRow(avg.label || 'Corridor average price', avg.rule, { ...avg, number_of_stops: null }, base));
-  }
-  replace(container,
-    el('div', { class: 'table-wrap' }, el('table', { class: 'data cards compare-table' },
-      el('caption', { class: 'sr-only' }, 'Strategy comparison'),
-      el('thead', {}, el('tr', {}, ['Strategy', 'Rule', 'Stops', 'Gallons', 'Cost', 'vs this plan'].map((h, i) =>
-        el('th', { scope: 'col', class: i >= 2 && i <= 4 ? 'num' : null }, h)))),
-      el('tbody', {}, rows))),
-    el('p', { class: 'muted small' }, 'Every strategy uses the same route, the same stations and the same start and end fuel, so they buy the same gallons; only where and how much changes. Negative differences are shown as they are.'));
-}
-
-// --- exports -------------------------------------------------------------------------
-
-function download(filename, type, text) {
-  const blob = new Blob([text], { type });
-  const url = URL.createObjectURL(blob);
-  const a = el('a', { href: url, download: filename });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function csvCell(value) {
-  const text = value === null || value === undefined ? '' : String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-export function stopsCsv(body) {
-  const header = ['stop', 'opis_id', 'name', 'address', 'city', 'state', 'mile_marker', 'distance_from_route_miles',
-    'price_per_gallon', 'fuel_on_arrival_gallons', 'gallons', 'cost', 'decision'];
-  const lines = [header.join(',')];
-  for (const s of body.fuel_stops) {
-    lines.push([s.stop, s.opis_id, s.name, s.address, s.city, s.state, s.mile_marker, s.distance_from_route_miles,
-      s.price_per_gallon, s.fuel_on_arrival_gallons, s.gallons, s.cost, s.decision?.rule ?? ''].map(csvCell).join(','));
-  }
-  lines.push(['total', '', '', '', '', '', body.route.distance_miles, '', body.summary.average_price_paid ?? '', '',
-    body.summary.total_gallons_purchased, body.summary.total_fuel_cost, ''].map(csvCell).join(','));
-  return `${lines.join('\n')}\n`;
-}
-
-export function driverInstructions(body) {
-  const lines = [`${body.start.label} → ${body.finish.label}: ${fmt.miles(body.route.distance_miles)}, ${body.vehicle.start_tank_label || `start tank ${body.vehicle.start_tank}`}`];
-  for (const s of body.fuel_stops) {
-    lines.push(`Stop ${s.stop} · mile ${fmt.dec1(s.mile_marker)} · ${s.name}, ${[s.address, `${s.city}, ${s.state}`].filter(Boolean).join(', ')} · buy ${fmt.gal(s.gallons)} @ ${fmt.price(s.price_per_gallon)} = ${fmt.money(s.cost)}`);
-  }
-  if (!body.fuel_stops.length) lines.push('No fuel stop needed.');
-  lines.push(`Total: ${fmt.gal(body.summary.total_gallons_purchased)}, ${fmt.money(body.summary.total_fuel_cost)}`);
-  for (const w of body.warnings || []) lines.push(`Note: ${w}`);
-  return lines.join('\n');
-}
-
-export function setupActions(root, { getState, routeBase, toast }) {
-  const current = () => {
-    const state = getState();
-    return state.route?.ok ? { body: state.route.body, params: state.params } : null;
-  };
-  const copy = async (text, message) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast(message);
-    } catch {
-      toast('Copy failed: the browser blocked the clipboard.', 'bad');
-    }
-  };
-  const handlers = {
-    'copy-link': () => copy(window.location.href, 'Link copied'),
-    'copy-curl': () => {
-      const c = current();
-      if (c) copy(`curl "${absolute(routeUrl(routeBase, c.params))}"`, 'curl command copied');
-    },
-    'download-geojson': () => {
-      const c = current();
-      if (c) download(`fuel-route-${slug(c.params.start)}-${slug(c.params.finish)}.geojson`, 'application/geo+json', JSON.stringify(c.body.map.geojson, null, 2));
-    },
-    'download-csv': () => {
-      const c = current();
-      if (c) download(`fuel-stops-${slug(c.params.start)}-${slug(c.params.finish)}.csv`, 'text/csv', stopsCsv(c.body));
-    },
-    'copy-instructions': () => {
-      const c = current();
-      if (c) copy(driverInstructions(c.body), 'Driver instructions copied');
-    },
-    print: () => window.print(),
-  };
-  root.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-action]');
-    if (button && handlers[button.dataset.action]) handlers[button.dataset.action]();
-  });
-}
-
-export function updateActionLinks(root, params, routeBase) {
-  const json = root.querySelector('[data-open-json]');
-  if (json) json.setAttribute('href', routeUrl(routeBase, params));
+  const most = Math.max(s.total_fuel_cost, blind.total_fuel_cost) || 1;
+  const bar = (kind, label, cost, count) => el('div', { class: `bar bar-${kind}` },
+    el('p', { class: 'bar-label' }, el('span', {}, label), el('span', { class: 'bar-value' }, `${fmt.money(cost)} · ${plural(count, 'stop')}`)),
+    el('div', { class: 'bar-track' }, el('span', { class: 'bar-fill', css: { width: `${(cost / most) * 100}%` } })));
+  replace(bars,
+    bar('plan', 'This plan', s.total_fuel_cost, s.number_of_stops),
+    bar('blind', 'Driver who ignores prices', blind.total_fuel_cost, blind.number_of_stops));
 }

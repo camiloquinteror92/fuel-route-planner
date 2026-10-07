@@ -1,0 +1,50 @@
+{% comment %}Step "Route": the road (the map draws only the line), and why the stops matter.{% endcomment %}
+<section id="panel-route" class="step-card" aria-labelledby="route-title" tabindex="-1" hidden>
+  <h2 id="route-title" tabindex="-1"><span data-live="route.start.label">—</span> → <span data-live="route.finish.label">—</span></h2>
+
+  <dl class="facts">
+    <div class="fact">
+      <dt>Distance</dt>
+      <dd><strong data-live="route.route.distance_miles" data-format="miles">—</strong></dd>
+    </div>
+    <div class="fact">
+      <dt>Fuel the trip burns</dt>
+      <dd><strong data-live="route.summary.fuel_used_gallons" data-format="gal">—</strong>
+        <small><span data-live="route.route.distance_miles" data-format="miles">—</span> ÷
+          <span data-live="route.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon</small></dd>
+    </div>
+    <div class="fact">
+      <dt>Truck stops near the road</dt>
+      <dd><strong data-live="route.pipeline.corridor.candidates" data-format="int">—</strong>
+        <small>within <span data-live="route.vehicle.corridor_miles" data-format="miles_short">—</span> of the road</small></dd>
+    </div>
+  </dl>
+
+  <p data-live-if="derived.needs_stops">A full tank lasts <strong data-live="route.vehicle.usable_range_miles" data-format="miles_short">—</strong>,
+    so the truck must stop for fuel on the way.</p>
+  <p data-live-if="derived.fits_one_tank">A full tank lasts <strong data-live="route.vehicle.usable_range_miles" data-format="miles_short">—</strong>.
+    This whole trip fits in one tank.</p>
+  <p data-live-if="derived.has_candidates">Their prices go from <strong data-live="derived.route_price_min" data-format="price">—</strong>
+    to <strong data-live="derived.route_price_max" data-format="price">—</strong> a gallon. That gap is why it pays to choose where to stop.</p>
+  <p data-live-if="derived.no_candidates">No truck stop from the price file is within
+    <span data-live="route.vehicle.corridor_miles" data-format="miles_short">—</span> of this road.</p>
+
+  <p class="calls-line" data-live-if="derived.calls_new_trip">The road comes from OSRM, a free routing service:
+    <span data-live="derived.calls_osrm_text">—</span> for this trip, answered in <span data-live="client.server_ms" data-format="ms">—</span>.</p>
+  <p class="calls-line" data-live-if="derived.calls_plan_hit">This exact trip was asked before, so the answer came from memory:
+    no request to OSRM, answered in <span data-live="client.server_ms" data-format="ms">—</span>.</p>
+  <p class="calls-line" data-live-if="derived.calls_route_hit">The road was already saved, so only the fuel plan was redone:
+    no request to OSRM, answered in <span data-live="client.server_ms" data-format="ms">—</span>.</p>
+  <p class="calls-line" data-live-if="derived.calls_other">Finding the places also took
+    <span data-live="derived.calls_other_text">—</span> to a free place search (Nominatim).</p>
+
+  <div class="good-to-know" data-live-if="derived.has_warnings">
+    <h3>Good to know</h3>
+    <ul id="route-warnings"></ul>
+  </div>
+
+  <div class="step-nav">
+    <button type="button" class="btn btn-ghost" data-go="trip">Back</button>
+    <button type="button" class="btn" data-go="stops">Next: where to buy fuel</button>
+  </div>
+</section>

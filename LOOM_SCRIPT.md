@@ -1,42 +1,45 @@
-# Loom script (under 5 minutes)
+# Loom script (4:30)
 
-About 525 spoken words: at a calm 140 words per minute that is under 4 minutes, which leaves
-time for clicks and Play trip. Rehearse once with a stopwatch.
+Three parts, timed: **Postman 1:05, the page 1:50, the code 1:10**, plus a short intro and close. About 470 spoken
+words: at a calm 140 words per minute that is 3:20, which leaves about a minute for clicks, sends and Play. Rehearse
+with a stopwatch until it ends before 4:30.
 
-Numbers change a little between takes: read them from the screen and say "about".
+Numbers change a little between days: read them from the screen and say "about".
 
 ## Before recording
 
-1. Start the server without the auto-reloader: `python manage.py runserver --noreload`
-   (port 8000 busy? `python manage.py runserver 8001 --noreload` and change `baseUrl` in
-   Postman). Do not edit code while it runs.
-2. Warm up: on the page, plan **New York → Los Angeles** and **Chicago → Houston** once, to be
-   sure the free routing server answers today. Then restart the server (Ctrl+C and the same
-   command), so the first send in the video shows its one request.
+1. Start the server without the auto-reloader: `python manage.py runserver --noreload` (port 8000 busy?
+   `python manage.py runserver 8001 --noreload` and change `baseUrl` in Postman). Do not edit code while it runs.
+2. Warm up: on the page, plan **New York → Los Angeles** once, to be sure the free routing server answers today. Then
+   restart the server (Ctrl+C and the same command), so the first send in the video shows its one request.
 3. Postman with `postman/collection.json` imported, request 1 open.
-4. Browser window at least 1280 px wide, empty tab. VS Code with
-   `fuelroute/services/optimizer.py` open at `_greedy`.
+4. Browser window at least 1280 px wide, empty tab.
+5. VS Code with five tabs, in this order: `fuelroute/views.py` (`RoutePlanView`), `fuelroute/services/planner.py`
+   (`plan_trip`), `fuelroute/services/osrm.py` (`get_route`), `fuelroute/services/stations.py`
+   (`stations_along_route`), `fuelroute/services/optimizer.py` (`_greedy`).
 
 ---
 
-## 0:00 Intro
+## 0:00 Intro (10 s)
 
-> Hi, I'm Camilo. This is my solution to the fuel route assignment: a Django 6.1 API. You give
-> it a start and a finish in the USA, and it returns the route, the cheapest places to buy fuel
-> and the total cost. First the API in Postman, then a page that walks through one trip, then
-> the code.
+> Hi, I'm Camilo. This Django API takes a start and a finish in the USA and returns the route, the cheapest places
+> to buy fuel and the total cost.
 
-## 0:15 Postman
+## 0:10 Postman (1:05)
 
 **Request 1, New York → Los Angeles.** Send. Show `fuel_stops` (one `decision`), `summary`, `meta`.
 
-> About twelve stops, each with its price, gallons and cost, and a decision that says which
-> rule chose it. The total is about 855 dollars. And meta says one external call: the road,
-> from OSRM, a free routing service.
+> About eighteen stops, each with its price, gallons and cost, and a decision that says which rule chose it. The
+> total is about 854 dollars. Meta says one external call: the road, from OSRM, a free routing service.
 
 **Send again.**
 
 > Zero calls, a few milliseconds: the same trip is answered from memory.
+
+**Request 3, a thirstier truck.** Send.
+
+> Another truck on the same trip: eight miles per gallon, same tank. The plan changes, but the road was saved, so
+> again zero calls.
 
 **Request 7, Toronto.** Send.
 
@@ -44,86 +47,76 @@ Numbers change a little between takes: read them from the screen and say "about"
 
 Copy `map.map_url` from request 1.
 
-## 0:55 The page: Route
+## 1:15 The page (1:50)
 
 Paste `map_url` in the browser. It opens at the **Route** step.
 
-> The page is a client of the same API. About 2,800 miles, about 281 gallons burned, and about
-> 458 truck stops near the road. Their prices go from about 2.80 to 4.30 a gallon: that gap is
-> why it pays to choose where to stop. This trip was asked before, so no request to OSRM.
+> The page uses the same API. About 2,800 miles, about 281 gallons burned. The truck leaves with five gallons, just
+> enough to reach a truck stop, and must arrive with five too, so the bill is exactly the fuel the trip burns. Prices
+> near the road go from about 2.80 to 4.30 a gallon: that is why it pays to choose where to stop.
 
 Click **Next: where to buy fuel**.
 
-## 1:25 Fuel stops
+> At every truck stop the driver looks one full tank ahead and follows three rules. One: if fuel is cheaper within
+> reach, buy just enough to get there. Two: if not, and the finish is within reach, buy just enough to finish. Three:
+> otherwise, fill the tank. So each gallon comes from the cheapest stop that can reach it; a test compares this with
+> an exact method.
 
-> At every truck stop the driver looks one full tank ahead and follows three rules. One: if
-> fuel is cheaper further on, within reach, buy just enough to get there. Two: if not, and the
-> finish is within reach, buy just enough to finish. Three: otherwise, fill the tank. So every
-> gallon is bought at the cheapest station that could supply it, and a test checks that
-> against an exact method on random roads.
+Click stop 3 (**Youngstown**, Cheaper ahead), then stop 10 (**Waco**, Fill up).
 
-Click a **Cheaper ahead** stop (Youngstown), then a **Fill up** stop (Waco).
+> Youngstown: fuel is cheaper in Toledo, so it buys just enough to get there. Waco, Nebraska: the cheapest price on
+> the road, so it fills the tank.
 
-> Youngstown: fuel is cheaper in Toledo, so it buys just enough to get there. Waco, Nebraska:
-> the cheapest price on the road, so it fills the tank.
-
-Click stop 1 (**Merged**) and point at the "On this trip" line.
-
-> One more rule: a tiny stop is merged with a nearby one, if that costs at most a dollar. On
-> this trip, eighteen stops became twelve, for about a dollar fifty.
-
-Press **Play the trip** under the map.
+Press **Play the trip** under the map (about 12 seconds; talk over it).
 
 > Play shows the tank emptying and refilling, and the money adding up to the exact total.
 
-## 2:30 Cost
-
 Click **Next: the bill**.
 
-> About 855 dollars, and the check: the stop costs add up to this total, to the cent. A driver
-> who ignores prices pays about 941. We save about 85 dollars, nine percent. The honest
-> trade-off: six more stops, because buying just enough to reach cheaper fuel means more,
-> smaller stops.
+> About 854 dollars, and the stops add up to it to the cent. A driver who ignores prices buys the same gallons and
+> pays about 87 dollars more. The trade-off is more, smaller stops; the Truck step can merge them for about a dollar
+> and a half.
 
-## 3:05 Truck
+## 3:05 The code (1:10)
 
-Click **Next: try another truck**, then the quick try **A thirstier truck**.
+VS Code, one tab after the other, following one request.
 
-> Eight miles per gallon, same tank. What changed: about 220 dollars more, and no new request
-> to OSRM. The road was already saved; only the plan changed.
+`views.py`, `RoutePlanView`:
 
-Click **Keep 5 gallons of safety fuel**.
+> The view validates the input with a serializer and calls one function, plan_trip.
 
-> With five gallons of safety fuel, the truck never reaches a station on empty, for a couple of
-> dollars more.
+`planner.py`, `plan_trip`:
 
-## 3:40 Assignment
+> Places are found in an offline index, and cheap checks run before any network call. A finished plan is cached by
+> its coordinates and truck settings.
 
-Click **Next: the assignment**. Scroll the table.
+`osrm.py`, `get_route`:
 
-> Each point of the assignment, how it is met, and the proof on this trip: one request to the
-> routing API, the total for about 281 gallons, and the latest Django.
+> The only external call. The road is cached by coordinates alone, with a lock per key, so a repeat or another truck
+> never calls OSRM again.
 
-## 4:05 Code
+`stations.py`, `stations_along_route`:
 
-VS Code, `optimizer.py`, `_greedy`.
+> The stations within ten miles of the road, with numpy: a bounding box, a coarse pass, then an exact one. About
+> thirty milliseconds coast to coast.
 
-> The algorithm is these three branches: cheaper ahead, finish, fill up. The same three rules as
-> the page. Then `_consolidate` merges the tiny stops, never more than a dollar each.
+`optimizer.py`, `_greedy`:
 
-## 4:40 Close
+> And the algorithm: these three branches are the three rules of the page. Money is added in Decimal, so the stops
+> always add up to the total.
 
-> One routing call per new trip, none for a repeat or another truck, and every number on the
-> page comes from the API answer. The README has the assumptions, the data gaps and how it
-> would scale. Thanks for watching.
+## 4:15 Close (10 s)
+
+> One routing call per new trip, none for a repeat or another truck. The README has the assumptions, the data gaps
+> and how it would scale. Thanks for watching.
 
 ---
 
 ## If something goes wrong
 
-- **OSRM is slow or answers 502/503:** it is a free demo server. The API already retried
-  once; wait a few seconds and send again (the page has a Retry button).
-- **The first send shows 0 calls:** the server already planned that trip (no restart after
-  the warm-up). Say "zero, because this server planned it already; a new trip makes one".
+- **OSRM is slow or answers 502/503:** it is a free demo server. The API already retried once; wait a few seconds and
+  send again (the page has a Retry button).
+- **The first send shows 0 calls:** the server already planned that trip (no restart after the warm-up). Say "zero,
+  because this server planned it already; a new trip makes one".
 - **Play does not move:** keep the tab in front. With "reduce motion" on, it jumps to the end.
 - **Port already in use:** `python manage.py runserver 8001 --noreload` and change `baseUrl`.

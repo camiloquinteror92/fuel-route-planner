@@ -8,13 +8,15 @@ Numbers change a little between days: read them from the screen and say "about".
 
 ## Before recording
 
-1. Start the server without the auto-reloader: `python manage.py runserver --noreload` (port 8000 busy?
+1. Load the stations once on this machine: `python manage.py load_stations`. It reads `data/station_coords.csv`
+   and must print `exact position:     3,602`; `GET /api/about` then shows `"exact_positions": 3602`.
+2. Start the server without the auto-reloader: `python manage.py runserver --noreload` (port 8000 busy?
    `python manage.py runserver 8001 --noreload` and change `baseUrl` in Postman). Do not edit code while it runs.
-2. Warm up: on the page, plan **New York → Los Angeles** once, to be sure the free routing server answers today. Then
+3. Warm up: on the page, plan **New York → Los Angeles** once, to be sure the free routing server answers today. Then
    restart the server (Ctrl+C and the same command), so the first send in the video shows its one request.
-3. Postman with `postman/collection.json` imported, request 1 open.
-4. Browser window at least 1280 px wide, empty tab.
-5. VS Code with five tabs, in this order: `fuelroute/views.py` (`RoutePlanView`), `fuelroute/services/planner.py`
+4. Postman with `postman/collection.json` imported, request 1 open.
+5. Browser window at least 1280 px wide, empty tab.
+6. VS Code with five tabs, in this order: `fuelroute/views.py` (`RoutePlanView`), `fuelroute/services/planner.py`
    (`plan_trip`), `fuelroute/services/osrm.py` (`get_route`), `fuelroute/services/stations.py`
    (`stations_along_route`), `fuelroute/services/optimizer.py` (`_greedy`).
 
@@ -29,7 +31,7 @@ Numbers change a little between days: read them from the screen and say "about".
 
 **Request 1, New York → Los Angeles.** Send. Show `fuel_stops` (one `decision`), `summary`, `meta`.
 
-> About eighteen stops, each with its price, gallons and cost, and a decision that says which rule chose it. The
+> About nineteen stops, each with its price, gallons and cost, and a decision that says which rule chose it. The
 > total is about 854 dollars. Meta says one external call: the road, from OSRM, a free routing service.
 
 **Send again.**
@@ -53,7 +55,7 @@ Paste `map_url` in the browser. It opens at the **Route** step.
 
 > The page uses the same API. About 2,800 miles, about 281 gallons burned. The truck leaves with five gallons, just
 > enough to reach a truck stop, and must arrive with five too, so the bill is exactly the fuel the trip burns. Prices
-> near the road go from about 2.80 to 4.30 a gallon: that is why it pays to choose where to stop.
+> near the road go from about 2.80 to 4.50 a gallon: that is why it pays to choose where to stop.
 
 Click **Next: where to buy fuel**.
 
@@ -62,7 +64,7 @@ Click **Next: where to buy fuel**.
 > otherwise, fill the tank. So each gallon comes from the cheapest stop that can reach it; a test compares this with
 > an exact method.
 
-Click stop 3 (**Youngstown**, Cheaper ahead), then stop 10 (**Waco**, Fill up).
+Click stop 3 (**Youngstown**, Cheaper ahead), then stop 9 (**Waco**, Fill up).
 
 > Youngstown: fuel is cheaper in Toledo, so it buys just enough to get there. Waco, Nebraska: the cheapest price on
 > the road, so it fills the tank.
@@ -74,7 +76,7 @@ Press **Play the trip** under the map (about 12 seconds; talk over it).
 Click **Next: the bill**.
 
 > About 854 dollars, and the stops add up to it to the cent. A driver who ignores prices buys the same gallons and
-> pays about 87 dollars more. The trade-off is more, smaller stops; the Truck step can merge them for about a dollar
+> pays about 104 dollars more. The trade-off is more, smaller stops; the Truck step can merge them for about a dollar
 > and a half.
 
 ## 3:05 The code (1:10)
@@ -119,4 +121,6 @@ VS Code, one tab after the other, following one request.
 - **The first send shows 0 calls:** the server already planned that trip (no restart after the warm-up). Say "zero,
   because this server planned it already; a new trip makes one".
 - **Play does not move:** keep the tab in front. With "reduce motion" on, it jumps to the end.
+- **Someone asks about stop 16 (Aurora, CO), 8.5 miles off the road for 2.7 gallons:** its position is right; the
+  plan does not charge the detour to a station (README, limits), and "Skip tiny stops" merges that stop away.
 - **Port already in use:** `python manage.py runserver 8001 --noreload` and change `baseUrl`.

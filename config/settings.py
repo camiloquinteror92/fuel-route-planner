@@ -122,8 +122,8 @@ FUEL_PLANNER = {
     "MAX_CONSOLIDATION_COST": float(_env("MAX_CONSOLIDATION_COST", "1.0")),
     # details.comparison (include=details): the "quarter-tank driver" refuels at or below this fraction.
     "BASELINE_REFUEL_FRACTION": float(_env("BASELINE_REFUEL_FRACTION", "0.25")),
-    # A station is a candidate if it is at most this far from the route line.
-    # Station coordinates are city-level, so this also absorbs that error.
+    # A station is a candidate if it is at most this far from the route line. A station
+    # without an exact position sits at its city center, so this also absorbs that error.
     "CORRIDOR_MILES": float(_env("CORRIDOR_MILES", "10")),
     # Spacing used to resample the route geometry.
     "RESAMPLE_MILES": float(_env("RESAMPLE_MILES", "1")),
@@ -153,6 +153,9 @@ FUEL_PLANNER = {
     "PLACES_FILE": BASE_DIR / "data" / "us_places.csv.gz",
     "US_MASK_FILE": BASE_DIR / "data" / "us_mask.npz",
     "FUEL_PRICES_FILE": BASE_DIR / "data" / "fuel-prices-for-be-assessment.csv",
+    # Exact truck stop positions, matched once against OpenStreetMap
+    # (scripts/build_station_coords.py). Read by load_stations; without it, city centers.
+    "STATION_COORDS_FILE": BASE_DIR / "data" / "station_coords.csv",
 }
 
 LOGGING = {

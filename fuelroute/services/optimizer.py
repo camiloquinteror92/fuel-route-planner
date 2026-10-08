@@ -72,7 +72,7 @@ same gallons and only WHERE they buy differs:
   first station reached with the tank at or below ``refuel_below_fraction``.
 
 Neither looks at prices, not even to break ties: stations at the same mile (the
-coordinates are city-level, so a town's stations share one) are visited in the
+stations kept at their city center share one) are visited in the
 caller's order and the driver buys at the first one, so a baseline is not biased
 towards the dearest (or the cheapest) station of a town. The greedy is optimal,
 so neither baseline can cost less (asserted in the tests).

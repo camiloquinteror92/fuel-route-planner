@@ -37,6 +37,24 @@ https://www.census.gov/geographies/mapping-files/time-series/geo/cartographic-bo
 Public domain. Changed: rasterised to 0.01-0.02 degree cells for the contiguous
 states, Alaska and Hawaii, and grown by 1.5 miles.
 
+## `station_coords.csv` (built by `scripts/build_station_coords.py`)
+
+Truck stop coordinates matched, once and offline, against **OpenStreetMap** fuel
+stations and motorway exits downloaded from the Overpass API (OSM data of
+2026-10-08; see `station_coords_report.md` for the matching rules). Read by
+`manage.py load_stations`, which uses a row instead of the station's city center;
+the app downloads nothing at run time for it.
+Derived from OpenStreetMap data, © OpenStreetMap contributors
+(https://www.openstreetmap.org/copyright), available under the **Open Database
+License (ODbL 1.0)** (https://opendatacommons.org/licenses/odbl/). This derived
+database is made available under the same licence. **Changes made:** for each matched
+OPIS station ID, only the position of the matched feature (a fuel station's center, a
+motorway exit node, or the midpoint of the nodes of one exit), its OSM id(s) and OSM
+label are kept, with what the matching computed: a confidence (`high` / `medium`), the
+miles from the station's city center and the rule that placed it. The columns are
+`opis_id, lat, lon, source, confidence, osm_type_id, matched_label,
+miles_from_city_center, reason`; the reasons name rules and exits, not station names.
+
 ## At run time
 
 - Routing: OSRM (http://project-osrm.org) public demo server, on OpenStreetMap

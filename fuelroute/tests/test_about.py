@@ -67,9 +67,11 @@ def test_about_reports_running_versions_and_data_counts(stations):
         {"state": "TX", "stations": 1, "geocoded": 0},
     ]
     assert data["price_per_gallon"] == {"min": 2.4, "median": 3.1, "max": 3.6}  # geocoded stations only
+    assert data["geocoded_by_source"] == {"census": 6, "geonames": 1}  # placed stations only
+    assert data["exact_positions"] == 0
     assert set(data) == {
         "price_file", "stations", "price_quotes", "stations_with_several_quotes", "geocoded", "not_geocoded",
-        "states", "stations_by_state", "price_per_gallon",
+        "exact_positions", "geocoded_by_source", "states", "stations_by_state", "price_per_gallon",
     }
 
     vehicle = body["vehicle"]
@@ -102,6 +104,26 @@ def test_about_reports_running_versions_and_data_counts(stations):
     assert [m["label"] for m in api["start_tank_modes"]] == [
         "Almost empty: pay for every mile", "Full: the first tank is free",
     ]
+
+
+@pytest.mark.django_db
+def test_about_counts_exact_positions_and_city_centers():
+    _station(1, "AZ", "3.90", lat=32.93, lon=-112.67, source="osm_fuel")
+    _station(2, "OK", "3.00", lat=36.56, lon=-95.22, source="osm_exit")
+    _station(3, "OK", "3.10", lat=36.57, lon=-95.21, source="osm_exit")
+    _station(4, "TX", "3.20", lat=31.0, lon=-97.0, source="census")
+    _station(5, "TX", "3.30")  # no coordinates: not counted by source
+    data = about.build_about()["data"]
+    assert data["geocoded_by_source"] == {"osm_exit": 2, "census": 1, "osm_fuel": 1}
+    assert list(data["geocoded_by_source"]) == ["osm_exit", "census", "osm_fuel"]  # most first
+    assert data["exact_positions"] == 3
+    assert (data["geocoded"], data["not_geocoded"]) == (4, 1)
+
+
+@pytest.mark.django_db
+def test_about_data_is_empty_before_load_stations():
+    data = about.build_about()["data"]
+    assert (data["stations"], data["exact_positions"], data["geocoded_by_source"]) == (0, 0, {})
 
 
 @pytest.mark.django_db

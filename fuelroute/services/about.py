@@ -9,7 +9,8 @@
   range, and the two ``start_tank`` modes with their labels;
 * ``deliverables``: links to the repository, the Postman collection and the Loom
   video (null until ``LOOM_URL`` is set);
-* ``data``: counts of the loaded station data;
+* ``data``: counts of the loaded station data, including how many stations are at
+  their exact position and how many at their city center (``geocoded_by_source``);
 * ``errors``: every error code the API can answer, built from the ``PlannerError``
   classes plus the framework's and the rate limit's.
 
@@ -36,6 +37,7 @@ from ..models import FuelStation
 from ..serializers import RouteRequestSerializer
 from .errors import PlannerError
 from .planner import START_TANK_HELP, START_TANK_LABELS, PlanSettings
+from .station_loader import EXACT_SOURCES
 from .stations import data_version, get_station_arrays
 
 SERVICE = "Spotter fuel route API"
@@ -93,6 +95,8 @@ def _data_summary() -> dict:
         "stations_with_several_quotes": 0,
         "geocoded": 0,
         "not_geocoded": 0,
+        "exact_positions": 0,
+        "geocoded_by_source": {},
         "states": 0,
         "stations_by_state": [],
         "price_per_gallon": None,
@@ -111,14 +115,26 @@ def _data_summary() -> dict:
         .annotate(stations=Count("id"), geocoded=Count("id", filter=located))
         .order_by("-stations", "state")
     )
+    # "osm_fuel" / "osm_exit": exact position (data/station_coords.csv); "census" /
+    # "geonames": city center. Most stations first.
+    by_source = {
+        row["geocode_source"]: row["stations"]
+        for row in FuelStation.objects.filter(located)
+        .values("geocode_source")
+        .annotate(stations=Count("id"))
+        .order_by("-stations", "geocode_source")
+    }
     prices = arrays.price
     summary.update(
         stations=totals["stations"],
         price_quotes=totals["quotes"] or 0,
         stations_with_several_quotes=totals["several"],
         geocoded=totals["geocoded"],
-        # In the file, but their city is in neither US place list: left out of the plans.
+        # In the file, but with no exact position and a city that could not be placed
+        # (in neither US place list, or ambiguous): left out of the plans.
         not_geocoded=totals["stations"] - totals["geocoded"],
+        exact_positions=sum(n for source, n in by_source.items() if source in EXACT_SOURCES),
+        geocoded_by_source=by_source,
         states=len(by_state),
         stations_by_state=[
             {"state": row["state"], "stations": row["stations"], "geocoded": row["geocoded"]} for row in by_state

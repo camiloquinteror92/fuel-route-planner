@@ -26,6 +26,8 @@ const GAIN_VISIBLE_SECONDS = 1.6;
 const EARTH_MILES = 3958.7613;
 
 const cents = (value) => Math.round(Number(value) * 100);
+// An "i" placeholder: explain-ui.js puts the button in it (the words are in explain.js).
+const explainer = (key) => el('span', { dataset: { explain: key } });
 
 function reducedMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -122,11 +124,14 @@ export function createPlayer(container, { getMap, markStop, clearMarks, stopLatL
       el('div', { class: 'player-row' },
         el('div', { class: 'player-controls' }, nodes.play, nodes.restart),
         el('div', { class: 'player-progress' }, nodes.track,
-          el('p', { class: 'progress-label' }, 'Mile ', nodes.mile, ' ', nodes.of))),
+          el('p', { class: 'progress-label' }, 'Mile ', nodes.mile, ' ', nodes.of, ' ', explainer('concept:player-mile-counter')))),
       el('div', { class: 'player-row player-readouts' },
-        el('div', { class: 'gauge' }, el('span', { class: 'gauge-title' }, 'Tank'), nodes.gaugeTrack, nodes.gaugeValue, nodes.gaugeNote),
-        el('div', { class: 'cost' }, el('span', { class: 'gauge-title' }, 'Fuel bought'), nodes.cost, nodes.costOf)),
-      nodes.event);
+        el('div', { class: 'gauge' }, el('span', { class: 'gauge-title' }, 'Tank'), nodes.gaugeTrack, nodes.gaugeValue, nodes.gaugeNote,
+          explainer('concept:player-tank-gauge')),
+        el('div', { class: 'cost' }, el('span', { class: 'gauge-title' }, 'Fuel bought'), nodes.cost, nodes.costOf,
+          explainer('concept:player-fuel-bought'))),
+      // The "i" sits next to the line, not in it: setEvent() replaces the line's content.
+      el('div', { class: 'player-event-row' }, nodes.event, explainer('concept:player-event-line')));
   }
 
   function playLabel() {

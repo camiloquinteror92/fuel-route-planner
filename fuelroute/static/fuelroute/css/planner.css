@@ -81,6 +81,9 @@ h2[tabindex="-1"]:focus:not(:focus-visible) { outline: none; }
 .top { background: var(--header-bg); color: var(--header-fg); padding: 14px 0 12px; }
 .top h1 { font-size: 1.3rem; letter-spacing: 0.01em; }
 .tagline { margin: 4px 0 0; color: var(--header-muted); font-size: 0.95rem; max-width: 760px; }
+.top-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 20px; }
+.top-text { min-width: 0; flex: 1 1 420px; }
+.explain-switch { margin: 0; display: inline-flex; align-items: center; gap: 4px; }
 
 /* --- the steps bar (stays on screen) ------------------------------------------------------- */
 
@@ -121,8 +124,13 @@ body.is-loading .stepper-bar::after { opacity: 1; animation: sweep 1.1s linear i
 @keyframes sweep { from { background-position: -40% 0; } to { background-position: 140% 0; } }
 
 /* Where you are ("Step 3 of 6: Fuel stops · Next: Cost"), and why a locked step does not open. */
-.step-status { margin: 0 auto; padding-bottom: 8px; font-size: 0.86rem; color: var(--muted); min-height: 0; }
+.step-status-row { display: flex; align-items: baseline; gap: 2px; }
+.step-status { margin: 0; padding-bottom: 8px; font-size: 0.86rem; color: var(--muted); min-height: 0; }
 .step-status:empty { display: none; }
+/* The "i" of the locked steps shows only next to "Plan a trip first" (outside the status
+   region, so a screen reader does not read the button's label with the message). */
+.step-lock-help { display: none; }
+.step-status[data-kind="locked"] + .step-lock-help { display: inline; }
 .step-status[data-kind="locked"] { color: #5c3d00; font-weight: 650; }
 .step-status[data-kind="locked"]::before {
   content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--mid); vertical-align: 1px;
@@ -404,6 +412,7 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .map-card.has-trip .map-legend { display: flex; }
 .legend-item { display: inline-flex; align-items: center; gap: 6px; }
 .legend-stops { display: none; }
+.legend-help { display: inline-flex; align-items: center; }
 .map-card.has-stops .legend-stops { display: inline-flex; }
 .legend-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #ffffff; box-shadow: 0 0 0 1px #9aa5b1; }
 .legend-start { background: var(--ok); }
@@ -450,7 +459,8 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .progress-tick { position: absolute; top: -3px; width: 4px; height: 16px; margin-left: -2px; border-radius: 2px; background: var(--accent); opacity: 0.85; }
 .progress-label { margin: 6px 0 0; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .player-readouts { font-size: 0.88rem; }
-.gauge, .cost { display: inline-flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+/* Wraps on a narrow phone, so the "i" drops to the next line instead of overflowing. */
+.gauge, .cost { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-variant-numeric: tabular-nums; }
 .gauge-title { font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 650; }
 .gauge-track { position: relative; width: 140px; height: 16px; border-radius: 4px; background: #e6ebf1; border: 1px solid #c9d1db; overflow: hidden; }
 .gauge-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ok); }
@@ -463,7 +473,8 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .gauge-note { font-size: 0.78rem; font-weight: 700; color: var(--trail-line); text-transform: uppercase; letter-spacing: 0.04em; }
 .gauge-note:empty { display: none; }
 .cost-value { font-size: 1.05rem; }
-.player-event { margin: 0; font-size: 0.88rem; color: #33404f; min-height: 1.4em; }
+.player-event-row { display: flex; align-items: flex-start; gap: 4px; }
+.player-event { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 0.88rem; color: #33404f; min-height: 1.4em; }
 .player-event .mark { display: inline-flex; vertical-align: top; }
 .player.is-playing .progress-head { box-shadow: 0 0 0 4px rgb(240 140 0 / 25%); }
 .truck-marker { background: transparent; border: 0; }
@@ -503,6 +514,100 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
   color: var(--warn); background: var(--warn-soft); border: 1px solid currentColor;
 }
 .combo-tag + .combo-meta { margin-left: 0; }
+
+/* --- every number explains itself: the "i" buttons and their card ---------------------------
+   explain-ui.js puts a button after each value; by default it is small and quiet, and the
+   header switch ("Explain every number", body.explain-all) makes every one stand out. The
+   card is a popover next to its button, and a sheet at the bottom of a phone. */
+
+.explain-btn {
+  position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 17px; height: 17px; margin: 0 1px 0 3px; padding: 0; vertical-align: 0.12em;
+  border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--muted);
+  font: italic 700 11px/1 Georgia, "Times New Roman", serif; cursor: pointer; opacity: 0.75;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s, opacity 0.15s;
+}
+.explain-btn::before { content: "i"; }
+/* A bigger target for a finger, without taking more room. */
+.explain-btn::after { content: ""; position: absolute; inset: -7px; }
+.explain-btn:hover, .explain-btn:focus-visible, .explain-btn[aria-expanded="true"] {
+  opacity: 1; color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft);
+}
+body.explain-all .explain-btn {
+  opacity: 1; color: #ffffff; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+body.explain-all .explain-btn:hover, body.explain-all .explain-btn[aria-expanded="true"] { background: var(--accent-strong); }
+h2 .explain-btn { vertical-align: 0.25em; }
+
+/* The header is dark: the button and the switch use its colours. */
+.top .explain-btn { color: var(--header-fg); background: transparent; border-color: rgb(255 255 255 / 45%); }
+.explain-toggle {
+  display: inline-flex; align-items: center; gap: 8px; font: inherit; font-size: 0.9rem; font-weight: 650; cursor: pointer;
+  padding: 6px 12px; border-radius: 999px; border: 1px solid rgb(255 255 255 / 45%); background: transparent; color: var(--header-fg);
+}
+.explain-toggle:hover { background: rgb(255 255 255 / 10%); }
+.explain-toggle-icon {
+  flex: none; width: 28px; height: 16px; border-radius: 8px; background: rgb(255 255 255 / 30%); position: relative; transition: background 0.15s;
+}
+.explain-toggle-icon::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #ffffff; transition: left 0.15s;
+}
+.explain-toggle[aria-pressed="true"] { background: var(--focus); border-color: var(--focus); color: #18202a; }
+.explain-toggle[aria-pressed="true"] .explain-toggle-icon { background: #18202a; }
+.explain-toggle[aria-pressed="true"] .explain-toggle-icon::after { left: 14px; background: var(--focus); }
+
+.explain-card {
+  position: absolute; z-index: 1800; width: min(460px, calc(100vw - 32px)); max-height: min(72vh, 600px); overflow-y: auto;
+  background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 12px 36px rgb(16 24 40 / 24%); padding: 0 16px 14px; font-size: 0.92rem; line-height: 1.45;
+  overscroll-behavior: contain;
+}
+.explain-card:focus { outline: none; }
+.explain-card:focus-visible { outline: 3px solid var(--focus); }
+.explain-card.is-sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 78vh;
+  border-radius: var(--radius) var(--radius) 0 0; border-bottom: 0; padding-bottom: calc(14px + env(safe-area-inset-bottom));
+}
+.explain-head {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: flex-start; gap: 8px; background: var(--surface);
+  padding: 12px 0 8px; border-bottom: 1px solid var(--line);
+}
+.explain-head h2 { flex: 1 1 auto; min-width: 0; margin: 2px 0 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.explain-icon {
+  flex: none; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface);
+  color: var(--fg); font: 600 1.1rem/1 var(--font); cursor: pointer;
+}
+.explain-icon:hover { background: var(--accent-soft); color: var(--accent-strong); }
+.explain-section h3 {
+  margin: 12px 0 4px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 700;
+}
+.explain-section p { margin: 0 0 6px; overflow-wrap: anywhere; }
+/* Folded sections (where it comes from, the code, good to know): the same heading, as a toggle. */
+details.explain-section > summary {
+  margin: 12px 0 4px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 700;
+  cursor: pointer; width: fit-content;
+}
+details.explain-section > summary:hover { color: var(--accent-strong); }
+details.explain-section > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+.explain-live {
+  margin: 0 0 8px; padding: 8px 10px; border-left: 3px solid var(--accent); border-radius: var(--radius-small);
+  background: var(--accent-soft); font-variant-numeric: tabular-nums;
+}
+.explain-live p { margin: 0 0 4px; }
+.explain-live p:last-child { margin-bottom: 0; }
+.explain-tag { display: block; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent-strong); }
+.explain-general .explain-tag { display: inline; color: var(--muted); }
+.explain-refs { margin: 0; padding-left: 18px; }
+.explain-refs li { margin: 2px 0; overflow-wrap: anywhere; }
+.explain-refs code { font-size: 0.82rem; }
+.explain-symbol { font-weight: 700; color: var(--accent-strong); }
+.explain-see { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.explain-see .explain-tag { width: 100%; color: var(--muted); }
+.explain-chip {
+  font: inherit; font-size: 0.84rem; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid #a9c6f2; background: var(--accent-soft); color: var(--accent-strong); text-align: left;
+}
+.explain-chip:hover { background: #d7e5fa; }
 
 /* --- footer, no script ------------------------------------------------------------------------ */
 

@@ -3,8 +3,8 @@
   <h2 id="cost-title" tabindex="-1">What the trip costs</h2>
 
   <div class="bill">
-    <p class="bill-label">Total fuel cost</p>
-    <p class="bill-total" data-live="route.summary.total_fuel_cost" data-format="money">—</p>
+    <p class="bill-label">Total fuel cost <span data-explain="route.summary.total_fuel_cost"></span></p>
+    <p class="bill-total" data-live="route.summary.total_fuel_cost" data-format="money" data-no-explain>—</p>
     <p class="bill-sub"><span data-live="route.summary.total_gallons_purchased" data-format="gal">—</span> bought at
       <span data-live="derived.stops_text">—</span><span data-live-if="derived.has_stops"> ·
       <span data-live="route.summary.average_price_paid" data-format="price">—</span> a gallon on average</span></p>
@@ -13,8 +13,9 @@
   <ul id="cost-checks" class="checks" aria-label="Checks of this total"></ul>
 
   <div data-live-if="derived.has_price_blind">
-    <h3>Is it really cheaper?</h3>
-    <p>Compare with a driver who ignores prices: they stop only when the tank would not reach the next truck stop, and fill up there.</p>
+    <h3>Is it really cheaper? <span data-explain="concept:price-blind-driver"></span></h3>
+    <p>Compare with a driver who ignores prices: they stop only when the tank would not reach the next truck stop, and fill up there.
+      <span data-explain="concept:cost-bars"></span></p>
     <div id="cost-bars" class="bars"></div>
     <p data-live-if="derived.same_gallons">Both drivers buy the same <strong data-live="route.summary.total_gallons_purchased" data-format="gal">—</strong>
       and end the trip with the same fuel. Only where they buy changes.</p>

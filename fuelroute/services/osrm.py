@@ -15,9 +15,9 @@ decodes it and prepares everything the planner needs from the geometry:
 Only that prepared route is cached (~100 KB for coast to coast, instead of the
 ~560 KB raw 35k-vertex geometry), keyed by the rounded coordinates, in its own cache
 (``CACHES["routes"]``): the plans live in the default cache, so a burst of truck changes
-(one plan each) never evicts the route they are planned on. A per-key lock
-makes concurrent identical requests wait for the first one instead of all calling
-OSRM ("single flight").
+(one plan each) never evicts the route they are planned on. A lock (one of 64
+stripes, picked by the key's hash) makes concurrent identical requests wait for the
+first one instead of all calling OSRM ("single flight", per process).
 """
 
 from __future__ import annotations

@@ -3,9 +3,10 @@
   JavaScript: the page reloads with the trip in its address). The start-tank radios
   of the Truck step belong to it (form="trip-form").
 {% endcomment %}
-<section id="panel-trip" class="step-card" aria-labelledby="trip-title" tabindex="-1">
-  <h2 id="trip-title" tabindex="-1">Where is the truck going?</h2>
-  <p class="lead">Type a start and a finish in the USA. A city and its state works best.</p>
+<section id="panel-trip" class="step-card" aria-labelledby="trip-title-text" tabindex="-1">
+  <h2 id="trip-title" tabindex="-1"><span id="trip-title-text">Where is the truck going?</span> <span data-explain="concept:find-fuel-stops-request"></span></h2>
+  <p class="lead">Type a start and a finish in the USA. <span data-explain="concept:start-finish-inputs"></span>
+    A city and its state works best; pick one of the suggestions as you type. <span data-explain="concept:autocomplete-suggestions"></span></p>
 
   <form id="trip-form" class="trip-form" method="get" action="{% url 'route-map' %}" novalidate>
     <div class="field">
@@ -42,7 +43,7 @@
   <div id="trip-error" class="error-box" hidden></div>
 
   <div class="examples" role="group" aria-labelledby="examples-label">
-    <p id="examples-label" class="examples-label">Or try an example:</p>
+    <p class="examples-label"><span id="examples-label">Or try an example:</span> <span data-explain="concept:example-chips"></span></p>
     <button type="button" class="chip" data-start="New York, NY" data-finish="Los Angeles, CA">New York → Los Angeles</button>
     <button type="button" class="chip" data-start="Chicago, IL" data-finish="Houston, TX">Chicago → Houston</button>
     <button type="button" class="chip" data-start="Dallas, TX" data-finish="Austin, TX">Dallas → Austin</button>
@@ -50,12 +51,13 @@
 
   <ul class="fine-print">
     <li>Fuel prices: <span data-live="about.data.geocoded" data-format="int">—</span> truck stops across the
-      <span data-live="about.data.states" data-format="int">—</span> mainland states (none in Alaska or Hawaii), from the price file Spotter gave.</li>
+      <span data-live="about.data.states" data-format="int">—</span> mainland states (none in Alaska or Hawaii), from the price file Spotter gave. <span data-explain="concept:price-file"></span></li>
     <li data-live-if="derived.ca_stations">Some states have very few: California has only
       <span data-live="derived.ca_stations" data-format="int">—</span>, all in its south-east corner, so some trips inside California cannot be priced.</li>
     <li>Standard truck: <span data-live="about.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon and a
       <span data-live="about.vehicle.tank_gallons" data-format="gal">—</span> tank, so
-      <span data-live="about.vehicle.max_range_miles" data-format="miles_short">—</span> on a full tank. You can change it in the Truck step.</li>
+      <span data-live="about.vehicle.max_range_miles" data-format="miles_short">—</span> on a full tank. You can change it in the Truck step.
+      <span data-explain="concept:standard-truck"></span></li>
   </ul>
 
   <div class="step-nav">

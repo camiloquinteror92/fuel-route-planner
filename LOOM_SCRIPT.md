@@ -67,6 +67,9 @@ Click stop 3 (**Youngstown**, Cheaper ahead), then stop 10 (**Waco**, Fill up).
 > Youngstown: fuel is cheaper in Toledo, so it buys just enough to get there. Waco, Nebraska: the cheapest price on
 > the road, so it fills the tank.
 
+Optional (10 s): click the small **i** at the end of stop 3's card. "Every number explains itself: this card redoes
+the stop's arithmetic with the trip's own numbers, and names the function in the code."
+
 Press **Play the trip** under the map (about 12 seconds; talk over it).
 
 > Play shows the tank emptying and refilling, and the money adding up to the exact total.
@@ -92,8 +95,8 @@ VS Code, one tab after the other, following one request.
 
 `osrm.py`, `get_route`:
 
-> The only external call. The road is cached by coordinates alone, with a lock per key, so a repeat or another truck
-> never calls OSRM again.
+> The only external call. The road is cached by coordinates alone, and identical requests wait on one of sixty-four
+> shared locks, so a repeat or another truck never calls OSRM again, in this process.
 
 `stations.py`, `stations_along_route`:
 

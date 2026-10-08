@@ -116,11 +116,16 @@ export function whyChanged(body, base) {
       + (money >= 0.005 ? ', so some fuel must be bought at pricier truck stops.' : '.'));
   }
   if (v.consolidate === true && w.consolidate !== true) {
+    // What merging itself changed: the API's tiny_stops_merged (against the three rules
+    // alone, same truck); without it, the difference with the standard truck when
+    // merging is the only change. Nothing moved: no sentence ("changed nothing" says it).
+    const merged = s.tiny_stops_merged;
     const only = (body.meta?.settings_changed || []).join() === 'consolidate';
-    const cost = only && money >= 0.005 ? `, for ${fmt.money(money)} more` : '';
-    out.push(stops < 0
-      ? `Skipping tiny stops: ${plural(-stops, 'fewer stop')}${cost}.`
-      : `Skipping tiny stops: some fuel moved from a tiny stop to a nearby one${cost}.`);
+    const removed = merged ? merged.stops_before - s.number_of_stops : -stops;
+    const extra = merged ? merged.extra_cost : only ? money : 0;
+    const cost = extra >= 0.005 ? `, for ${fmt.money(extra)} more` : '';
+    if (removed > 0) out.push(`Skipping tiny stops: ${plural(removed, 'fewer stop')}${cost}.`);
+    else if (Math.abs(extra) >= 0.005) out.push(`Skipping tiny stops: some fuel moved from a tiny stop to a nearby one${cost}.`);
   }
   if (!isFullAgainstEmpty(body, base) && Math.abs(gallons) < 0.005 && Math.abs(money) >= 0.005) {
     out.push('Both trucks buy the same fuel; only where they buy it changes.');
@@ -142,28 +147,43 @@ export function answerText(body, base) {
   return `${head}: ${cost}.`;
 }
 
+// An "i" placeholder: explain-ui.js puts the button in it (the words are in explain.js).
+const explainer = (key) => el('span', { dataset: { explain: key } });
+const ROW_EXPLAINERS = { 'Fuel cost': 'concept:compare-fuel-cost', 'Fuel stops': 'concept:compare-fuel-stops', 'Fuel bought': 'concept:compare-fuel-bought' };
+
 // "What changed": the table, why, the honest note for a free full tank, and the requests to OSRM.
 export function renderCompare(container, body, baseline) {
   const meta = body.meta || {};
   const calls = meta.external_api_calls;
   const osrm = (meta.external_api_services || []).filter((name) => name === 'osrm').length;
-  const callsLine = el('p', { class: 'compare-calls' }, calls === 0
-    ? mark(true, 'No new request to the routing service.')
-    : present(calls) ? mark(null, `${plural(osrm || calls, 'request')} to the routing service.`) : null);
-  const parts = [el('h3', {}, 'What changed, against the standard truck')];
+  // Only OSRM is the routing service: a place search (Nominatim) is not counted here.
+  const callsLine = el('p', { class: 'compare-calls' }, !present(calls) ? null
+    : osrm === 0 ? mark(true, 'No new request to the routing service.')
+      : mark(null, `${plural(osrm, 'request')} to the routing service.`),
+  ' ', explainer('concept:routing-requests-line'));
+  const parts = [el('h3', {}, 'What changed, against the standard truck ', explainer('concept:standard-truck'))];
   if (baseline?.status === 'ok') {
     const { notComparable, rows, perGallon } = compareRows(body, baseline.body);
     parts.push(el('table', { class: 'compare-table' },
       el('thead', {}, el('tr', {}, el('th', { scope: 'col' }, el('span', { class: 'sr-only' }, 'What')),
         el('th', { scope: 'col' }, 'Standard truck'), el('th', { scope: 'col' }, 'Your truck'), el('th', { scope: 'col' }, 'Difference'))),
+      // The "i" sits in the Difference cell, not in the row header: a header names every
+      // cell of its row for a screen reader, and the button's label would join that name.
       el('tbody', {}, rows.map((row) => el('tr', {},
         el('th', { scope: 'row' }, row.label),
         el('td', {}, row.standard),
         el('td', {}, el('strong', {}, row.yours)),
-        el('td', { class: row.diff === 'same' || row.diff === 'not comparable' ? 'diff' : `diff ${row.worse ? 'is-worse' : 'is-better'}` }, row.diff))))));
+        el('td', { class: row.diff === 'same' || row.diff === 'not comparable' ? 'diff' : `diff ${row.worse ? 'is-worse' : 'is-better'}` },
+          row.diff, ' ', explainer(ROW_EXPLAINERS[row.label])))))));
     const why = whyChanged(body, baseline.body);
-    if (why.length) parts.push(el('h4', { class: 'compare-why-title' }, 'Why'), el('ul', { class: 'compare-why' }, why.map((line) => el('li', {}, line))));
-    if (notComparable) parts.push(el('p', { class: 'small' }, 'Not comparable dollar for dollar: with a full tank, the first tank is free. ', perGallon));
+    if (why.length) {
+      parts.push(el('h4', { class: 'compare-why-title' }, 'Why ', explainer('concept:why-changed')),
+        el('ul', { class: 'compare-why' }, why.map((line) => el('li', {}, line))));
+    }
+    if (notComparable) {
+      parts.push(el('p', { class: 'small' }, 'Not comparable dollar for dollar: with a full tank, the first tank is free. ', perGallon, ' ',
+        explainer('concept:not-comparable-full-tank')));
+    }
   } else if (baseline?.status === 'loading') {
     parts.push(el('p', { class: 'muted small' }, 'Getting the standard truck’s plan to compare…'));
   } else if (baseline?.status === 'error') {
@@ -253,7 +273,14 @@ export function createTruck({ root, getAbout, onChange, onApply }) {
     const words = hiddenSettingsText(hidden);
     const line = $('#hidden-settings', root);
     line.hidden = !words.length;
-    line.textContent = words.length ? `This link also changes: ${words.join(', ')}. “Back to the standard truck” clears it.` : '';
+    const text = words.length ? `This link also changes: ${words.join(', ')}. “Back to the standard truck” clears it.` : '';
+    // Drawn again only when the words change, so the "i" buttons of explain-ui.js stay.
+    if (line.dataset.text !== text) {
+      line.dataset.text = text;
+      const keys = [['corridor_miles', 'route.vehicle.corridor_miles'], ['price_policy', 'concept:price-policy']]
+        .filter(([name]) => text && name in hidden).map(([, key]) => key);
+      replace(line, text, keys.map((key) => [' ', explainer(key)]));
+    }
   }
 
   // Put {start_tank, settings} in the controls (missing = the standard truck).

@@ -50,6 +50,23 @@ explains it in plain words:
 |-------|------|-------|
 | ![Route step](docs/page-route.png) | ![Cost step](docs/page-cost.png) | ![Truck step](docs/page-truck.png) |
 
+### Every number explains itself
+
+Every value on the page has a small **i** button next to it, and so do the ideas behind them (the three rules, the
+tank, the driver who ignores prices, the caches, the checks…). Click or tap one to open a card with five parts:
+**What it is · Where it comes from · How it's calculated · Why this way · In the code**. "How it's calculated" redoes
+the formula with this trip's own numbers (for example `2,810.4 mi ÷ 10 mpg = 281.04 gal`, or a stop's arrival,
+purchase and cost line by line), and "In the code" names the file and the function. "See also" opens related cards.
+A card opens on what it is, this trip's numbers and why; where it comes from, the code and "Good to know" are folded.
+Esc, ×, or a click outside closes it; on a phone it opens as a sheet at the bottom. The **Explain every number** switch
+in the header makes every button stand out and opens every section of the cards.
+
+The cards live in one file, `fuelroute/static/fuelroute/js/explain.js` (`EXPLAINERS`, keyed by the value's `data-live`
+path or `concept:<name>`); `explain-ui.js` draws the buttons and the card. `fuelroute/tests/test_explain.py` checks that
+every value has a card, every card has the five parts and stays short (three sentences a section), every code
+reference exists, the live formulas print the right numbers, and no button sits inside a label, a row header or a
+live region.
+
 ## The algorithm in plain words
 
 **Candidates.** A truck stop of the price file is a candidate if it is within **10 miles** of the road. Each candidate
@@ -212,7 +229,7 @@ and is cached.
 
 ## Tests
 
-`pytest` runs **846 tests** in about 6 s, with no network: the only function that does HTTP fails in every test, and the
+`pytest` runs **859 tests** in about 6 s, with no network: the only function that does HTTP fails in every test, and the
 tests that need OSRM get a fake that records each call. A few tests run the page's JavaScript in Node.js when it is
 installed (skipped otherwise).
 
@@ -224,7 +241,8 @@ installed (skipped otherwise).
 - **Truck settings:** each setting changes the plan as it should with 0 calls, out-of-range values are a 400, and the
   plans match a golden file written before the settings existed.
 - **Data:** the price file loader, place names, homonym cities, the corridor search against brute force.
-- **Page:** it never plans by itself, has no hand-written numbers, and asks exactly what Postman asks.
+- **Page:** it never plans by itself, has no hand-written numbers, asks exactly what Postman asks, and every value has an
+  explanation card whose code references exist and whose live formulas print the right numbers.
 
 ---
 

@@ -9,31 +9,32 @@
   <h2 id="stops-title" tabindex="-1">Where to buy fuel</h2>
 
   <p class="lead" data-live-if="derived.has_stops"><span data-live="derived.stops_text">—</span>. At every truck stop, the driver looks one
-    full tank ahead (<span data-live="route.vehicle.usable_range_miles" data-format="miles_short">—</span>) and follows three rules:</p>
+    full tank ahead (<span data-live="route.vehicle.usable_range_miles" data-format="miles_short">—</span>) and follows three rules:
+    <span data-explain="concept:three-rules"></span></p>
   <p class="lead" data-live-if="derived.no_stops">No fuel stop needed: the fuel in the tank covers this trip.</p>
 
   <div data-live-if="derived.has_stops">
     <ol class="rules" id="rules">
       <li class="rule" data-rule="reach_cheaper">
         <span class="tag tag-cheaper">Cheaper ahead</span>
-        <p>Is fuel cheaper further on, within reach? Buy just enough to get there.</p>
+        <p>Is fuel cheaper further on, within reach? Buy just enough to get there. <span data-explain="concept:rule-cheaper-ahead"></span></p>
       </li>
       <li class="rule" data-rule="finish">
         <span class="tag tag-finish">Finish</span>
-        <p>If not, can the truck reach the finish? Buy just enough to finish.</p>
+        <p>If not, can the truck reach the finish? Buy just enough to finish. <span data-explain="concept:rule-finish"></span></p>
       </li>
       <li class="rule" data-rule="fill_up">
         <span class="tag tag-fill">Fill up</span>
-        <p>If neither, fill the tank here. Nothing within reach is cheaper.</p>
+        <p>If neither, fill the tank here. Nothing within reach is cheaper. <span data-explain="concept:rule-fill-up"></span></p>
       </li>
     </ol>
 
     <p class="why-line"><strong>Why the three rules give the cheapest plan:</strong> each gallon is bought at the cheapest truck stop that can still reach the
       mile where it is burned. A test compares the rules with a slow method that tries every possible amount at every truck stop, on many
-      small made-up roads: the cost is always the same.</p>
+      small made-up roads: the cost is always the same. <span data-explain="concept:why-rules-are-optimal"></span></p>
 
     <div class="rule rule-tiny" data-rule="merged" data-live-if="derived.merge_on">
-      <span class="tag tag-merged">Skip tiny stops: on</span>
+      <span class="tag tag-merged">Skip tiny stops: on</span> <span data-explain="concept:skip-tiny-stops"></span>
       <p><strong>The three rules give the cheapest plan; skipping tiny stops adds <span data-live="derived.merged_cost" data-format="money">—</span>
         on this trip.</strong> A stop that would buy less than <span data-live="derived.min_stop" data-format="gal">—</span> is merged into a
         nearby stop, if that costs at most <span data-live="derived.max_fix" data-format="money">—</span> more.</p>
@@ -47,7 +48,7 @@
       Turn on “Skip tiny stops” in the Truck step.</p>
 
     <p class="play-hint">Press <strong>Play the trip</strong> under the map to watch the tank empty and refill along the road. Choose a stop to see
-      it on the map.</p>
+      it on the map. <span data-explain="concept:player"></span></p>
     <p id="play-now" class="play-now" aria-hidden="true" hidden></p>
 
     <ol id="stop-cards" class="stop-cards" aria-label="Fuel stops"></ol>

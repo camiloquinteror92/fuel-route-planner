@@ -99,11 +99,12 @@ function tag(rule) {
 
 // The stops as cards: where (town and truck stop name), the price, what the truck
 // arrives with and buys, the rule (and "Tiny stop skipped") and why. onSelect(n) when
-// a card is chosen.
+// a card is chosen. Each card ends with an "i" (explain.js, concept:stop-card) that
+// redoes its arithmetic with this stop's numbers.
 export function renderStopCards(container, body, about, { onSelect } = {}) {
   replace(container, (body.fuel_stops || []).map((s) => {
     const why = whyText(s, body, about);
-    const button = el('button', { type: 'button', class: 'stop-btn', 'aria-describedby': `why-${s.stop}` },
+    const button = el('button', { type: 'button', class: 'stop-btn', 'aria-describedby': why ? `why-${s.stop}` : null },
       el('span', { class: 'stop-num', 'aria-hidden': 'true' }, String(s.stop)),
       el('span', { class: 'stop-main' },
         el('span', { class: 'stop-place' }, el('span', { class: 'sr-only' }, `Stop ${s.stop}: `),
@@ -114,9 +115,12 @@ export function renderStopCards(container, body, about, { onSelect } = {}) {
           `${fmt.price(s.price_per_gallon)}/gal · arrives with ${fmt.gal(s.fuel_on_arrival_gallons)} · buys ${fmt.gal(s.gallons)} · `,
           el('strong', {}, fmt.money(s.cost)))));
     button.addEventListener('click', () => onSelect?.(s.stop));
+    const explainStop = el('span', { dataset: { explain: 'concept:stop-card', explainArg: s.stop } });
     return el('li', { class: 'stop-card', dataset: { stop: s.stop } },
       button,
-      why ? el('p', { class: 'stop-why', id: `why-${s.stop}` }, el('strong', {}, 'Why here: '), why) : null);
+      // The card's button is described by the reason only, not by the "i".
+      el('p', { class: 'stop-why' },
+        why ? el('span', { id: `why-${s.stop}` }, el('strong', {}, 'Why here: '), why) : null, ' ', explainStop));
   }));
 }
 
@@ -137,33 +141,45 @@ export function highlightStop({ cards, rules, body }, n, { scroll = false } = {}
 }
 
 // The bill's checks (in integer cents, never hidden when they fail) and the bars
-// against a driver who ignores prices.
+// against a driver who ignores prices. Each check has its "i" (explain.js).
 export function renderCost({ checks, bars }, body) {
   const s = body.summary;
   const stops = body.fuel_stops || [];
   const items = [];
+  // The "i" goes at the end of the check's words (a mark is icon + words).
+  const explained = (key, item) => {
+    item.lastChild.append(' ', el('span', { dataset: { explain: key } }));
+    return item;
+  };
   if (stops.length) {
     const sum = sumCents(stops.map((x) => x.cost));
     const total = cents(s.total_fuel_cost);
     if (sum === total) {
-      items.push(mark(true, stops.length === 1
+      items.push(explained('concept:check-costs-add-up-to-the-cent', mark(true, stops.length === 1
         ? 'The cost of the stop is this total, to the cent.'
-        : `The ${fmt.int(stops.length)} stop costs add up to this total, to the cent.`));
+        : `The ${fmt.int(stops.length)} stop costs add up to this total, to the cent.`)));
     } else {
-      items.push(mark(false, `The stop costs add up to ${fmt.money(sum / 100)}, not ${fmt.money(s.total_fuel_cost)}.`));
+      items.push(explained('concept:check-costs-add-up-to-the-cent',
+        mark(false, `The stop costs add up to ${fmt.money(sum / 100)}, not ${fmt.money(s.total_fuel_cost)}.`)));
     }
   }
   const empty = body.vehicle?.start_tank !== 'full';
   const unpriced = Number(s.unpriced_fuel_gallons) > 0;
   if (empty && !unpriced && Math.abs(s.end_fuel_gallons - s.start_fuel_gallons) < HALF_CENT) {
-    items.push(mark(true, `Every mile is paid for: the truck leaves with ${fmt.gal(s.start_fuel_gallons)} and arrives with the same `
-      + `${fmt.gal(s.end_fuel_gallons)}, so the fuel it buys is the fuel the trip burns.`));
+    items.push(explained('concept:check-every-mile-paid', mark(true, `Every mile is paid for: the truck leaves with ${fmt.gal(s.start_fuel_gallons)} and arrives with the same `
+      + `${fmt.gal(s.end_fuel_gallons)}, so the fuel it buys is the fuel the trip burns.`)));
   }
   if (!empty) {
-    items.push(mark(null, `The truck left with a full tank. Those ${fmt.gal(s.start_fuel_gallons)} were free and are not in the total.`));
+    items.push(explained('concept:check-full-tank-free',
+      mark(null, `The truck left with a full tank. Those ${fmt.gal(s.start_fuel_gallons)} were free and are not in the total.`)));
   }
-  if (unpriced) {
-    items.push(mark(null, `${fmt.gal(s.unpriced_fuel_gallons)} were burned where the price file has no truck stop, so they have no price. See “Good to know” in the Route step.`));
+  // With a full tank the free tank is unpriced by design (the note above): only fuel beyond it lacks a price.
+  const gap = empty
+    ? Number(s.unpriced_fuel_gallons)
+    : Number(s.unpriced_fuel_gallons) - Math.max(0, s.start_fuel_gallons - s.end_fuel_gallons);
+  if (gap > HALF_CENT) {
+    items.push(explained('concept:check-unpriced-fuel',
+      mark(null, `${fmt.gal(gap)} were burned where the price file has no truck stop, so they have no price. See “Good to know” in the Route step.`)));
   }
   replace(checks, items.map((item) => el('li', {}, item)));
 

@@ -2,28 +2,29 @@
   Step "Route": the road (the map draws only the line), the fuel the truck leaves and
   arrives with (explained once, here), and why the trip needs stops.
 {% endcomment %}
-<section id="panel-route" class="step-card" aria-labelledby="route-title" tabindex="-1" hidden>
-  <h2 id="route-title" tabindex="-1"><span data-live="route.start.label">—</span> → <span data-live="route.finish.label">—</span></h2>
+<section id="panel-route" class="step-card" aria-labelledby="route-title-start route-title-to route-title-finish" tabindex="-1" hidden>
+  <h2 id="route-title" tabindex="-1"><span id="route-title-start" data-live="route.start.label">—</span>
+    <span id="route-title-to">→</span> <span id="route-title-finish" data-live="route.finish.label">—</span></h2>
 
   <dl class="facts">
     <div class="fact">
-      <dt>Distance</dt>
-      <dd><strong data-live="route.route.distance_miles" data-format="miles">—</strong></dd>
+      <dt>Distance <span data-explain="route.route.distance_miles"></span></dt>
+      <dd><strong data-live="route.route.distance_miles" data-format="miles" data-no-explain>—</strong></dd>
     </div>
     <div class="fact">
-      <dt>Fuel the trip burns</dt>
-      <dd><strong data-live="route.summary.fuel_used_gallons" data-format="gal">—</strong>
-        <small><span data-live="route.route.distance_miles" data-format="miles">—</span> ÷
+      <dt>Fuel the trip burns <span data-explain="route.summary.fuel_used_gallons"></span></dt>
+      <dd><strong data-live="route.summary.fuel_used_gallons" data-format="gal" data-no-explain>—</strong>
+        <small><span data-live="route.route.distance_miles" data-format="miles" data-no-explain>—</span> ÷
           <span data-live="route.vehicle.miles_per_gallon" data-format="num">—</span> miles per gallon</small></dd>
     </div>
     <div class="fact">
-      <dt>Truck stops near the road</dt>
-      <dd><strong data-live="route.summary.candidate_stations_on_route" data-format="int">—</strong>
+      <dt>Truck stops near the road <span data-explain="route.summary.candidate_stations_on_route"></span></dt>
+      <dd><strong data-live="route.summary.candidate_stations_on_route" data-format="int" data-no-explain>—</strong>
         <small>within <span data-live="route.vehicle.corridor_miles" data-format="miles_short">—</span> of the road</small></dd>
     </div>
   </dl>
 
-  <h3>The tank</h3>
+  <h3>The tank <span data-explain="concept:pay-for-every-mile"></span></h3>
   <p data-live-if="derived.tank_same_back">The truck leaves with <strong data-live="route.summary.start_fuel_gallons" data-format="gal">—</strong>
     (enough for <span data-live="derived.start_fuel_miles" data-format="miles_short">—</span>, to reach a truck stop) and must arrive with
     <strong data-live="route.summary.end_fuel_gallons" data-format="gal">—</strong> too. So the bill is exactly the fuel the trip burns.</p>
@@ -50,14 +51,14 @@
   <p class="calls-line" data-live-if="derived.calls_new_trip">The road comes from a free road-routing service (OSRM):
     <span data-live="derived.calls_osrm_text">—</span> for this trip, answered in <span data-live="client.server_ms" data-format="seconds">—</span>.</p>
   <p class="calls-line" data-live-if="derived.calls_plan_hit">This exact trip was asked before, so the answer came from memory:
-    no request to the routing service, answered in <span data-live="client.server_ms" data-format="seconds">—</span>.</p>
+    no request to the routing service, answered in <span data-live="client.server_ms" data-format="seconds">—</span>. <span data-explain="concept:route-cache-vs-plan-cache"></span></p>
   <p class="calls-line" data-live-if="derived.calls_route_hit">The road was already saved, so only the fuel plan was redone:
-    no request to the routing service, answered in <span data-live="client.server_ms" data-format="seconds">—</span>.</p>
+    no request to the routing service, answered in <span data-live="client.server_ms" data-format="seconds">—</span>. <span data-explain="concept:route-cache-vs-plan-cache"></span></p>
   <p class="calls-line" data-live-if="derived.calls_other">Finding the places also took
     <span data-live="derived.calls_other_text">—</span> to a free place search (Nominatim).</p>
 
   <div class="good-to-know" data-live-if="derived.has_warnings">
-    <h3>Good to know</h3>
+    <h3>Good to know <span data-explain="route.warnings"></span></h3>
     <ul id="route-warnings"></ul>
   </div>
 

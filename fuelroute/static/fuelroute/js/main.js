@@ -6,6 +6,7 @@
 // browser's own timing.
 
 import { createClient, routeUrl, tripQuery } from './api.js';
+import { createExplainer } from './explain-ui.js';
 import { bind, derive, el, flattenErrors, fmt, plural, present, replace } from './format.js';
 import { createMap } from './map.js';
 import * as plan from './plan.js';
@@ -250,6 +251,10 @@ function update() {
   updateStrips();
   renderTruck();
   if (state.params) boxes.json.setAttribute('href', routeUrl(config.api.route, { start: state.params.start, finish: state.params.finish, ...STANDARD }));
+  // Every value gets its "i" button (parts drawn again get theirs), and an open card
+  // shows the new numbers.
+  explainer.decorate(document);
+  explainer.refresh();
 }
 
 function renderPlan() {
@@ -323,6 +328,7 @@ function showMapFor(step) {
 }
 
 function onStep(step, previous) {
+  if (step !== previous) explainer.close();
   if (previous === 'stops' && step !== 'stops') player.reset();
   if (step !== previous) mapCtl.map?.closePopup();
   boxes.player.hidden = !(step === 'stops' && state.route && window.L);
@@ -442,11 +448,12 @@ function renderError() {
   else if (!action && (truckFields || result.status === 422) && settingsAsked) action = standardTruckButton();
 
   const box = boxes[card];
-  replace(box, el('div', { class: 'error-card', role: 'alert' },
-    el('h3', {}, title),
-    lines.map((line) => el('p', {}, line)),
+  // Only the words are the alert: the buttons and the "i" are not read out with it.
+  replace(box, el('div', { class: 'error-card' },
+    el('div', { role: 'alert' }, el('h3', {}, title), lines.map((line) => el('p', {}, line))),
     action ? el('p', { class: 'error-action' }, action) : null,
-    el('p', { class: 'error-code' }, `Error code: ${code}${result.status ? ` (HTTP ${result.status})` : ''}`)));
+    el('p', { class: 'error-code' }, `Error code: ${code}${result.status ? ` (HTTP ${result.status})` : ''}`,
+      el('span', { dataset: { explain: 'concept:trip-error-box', explainArg: code } }))));
   box.hidden = false;
   announce(`Could not plan: ${title}`);
   if (card === 'trip' && stepper.current() !== 'trip') stepper.go('trip', { focus: false });
@@ -541,6 +548,7 @@ const player = createPlayer(boxes.player, {
 });
 const truck = createTruck({ root: panels.truck, getAbout: () => state.about, onChange: updateStrips, onApply: applyTruck });
 truck.renderTries($('#quick-tries'), tryQuick);
+const explainer = createExplainer({ getContext: context, toggle: $('#explain-toggle'), announce });
 const stepper = createStepper({ nav: $('.stepper-bar'), panels, top: $('#main'), status: $('#step-status'), onChange: onStep, onLocked, announce });
 for (const name of ['start', 'finish']) {
   createCombobox(inputs[name], $(`#${name}-listbox`), {

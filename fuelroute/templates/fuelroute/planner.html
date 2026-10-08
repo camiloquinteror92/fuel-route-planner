@@ -21,6 +21,14 @@
   (about), browser timings (client) or pure functions of them (derived), or shows a
   dash when missing. The step numbers come from a CSS counter. Fixed literals are
   marked data-literal. fuelroute/tests/test_web.py enforces it.
+
+  Every number explains itself: static/fuelroute/js/explain-ui.js puts a small "i"
+  button after each value (data-no-explain skips one) and inside each
+  span with data-explain="key"; it opens a card with what the value is, where it
+  comes from, how it is calculated (with this trip's numbers), why, and where in the
+  code. The words are in static/fuelroute/js/explain.js (EXPLAINERS);
+  fuelroute/tests/test_explain.py checks every value has one. The header switch
+  "Explain every number" makes the buttons stand out.
 {% endcomment %}
 <html lang="en">
 <head>
@@ -36,9 +44,16 @@
   <a class="skip" href="#main">Skip to content</a>
 
   <header class="top">
-    <div class="wrap">
-      <h1>Fuel Route Planner</h1>
-      <p class="tagline">Tell us where the truck is going. We find the cheapest places to buy fuel on the way, and what the whole trip costs.</p>
+    <div class="wrap top-row">
+      <div class="top-text">
+        <h1>Fuel Route Planner</h1>
+        <p class="tagline">Tell us where the truck is going. We find the cheapest places to buy fuel on the way, and what the whole trip costs.</p>
+      </div>
+      <p class="explain-switch">
+        <button type="button" id="explain-toggle" class="explain-toggle" aria-pressed="false" hidden>
+          <span class="explain-toggle-icon" aria-hidden="true"></span>Explain every number</button>
+        <span data-explain="concept:data-live-rule"></span>
+      </p>
     </div>
   </header>
 
@@ -51,7 +66,10 @@
       <li><button type="button" class="step-btn" id="step-btn-truck" data-step="truck" aria-controls="panel-truck" aria-disabled="true" title="Plan a trip first."><span class="step-label">Truck</span></button></li>
       <li><button type="button" class="step-btn" id="step-btn-assignment" data-step="assignment" aria-controls="panel-assignment" aria-disabled="true" title="Plan a trip first."><span class="step-label">For Spotter</span></button></li>
     </ol>
-    <p id="step-status" class="step-status wrap" role="status"></p>
+    <div class="step-status-row wrap">
+      <p id="step-status" class="step-status" role="status"></p>
+      <span class="step-lock-help" data-explain="concept:next-step-lock"></span>
+    </div>
   </nav>
 
   <div class="strips wrap">
@@ -59,7 +77,7 @@
       <span><span id="your-truck-lead">Showing your truck</span>: <span data-live="derived.your_truck_text">—</span>.</span>
       <button type="button" class="btn btn-small btn-ghost" data-action="standard-truck">Back to the standard truck</button>
     </p>
-    <p id="stale" class="strip strip-stale" role="status" hidden>You changed the trip. Press “Find fuel stops” to see the new one.</p>
+    <p id="stale" class="strip strip-stale" hidden><span role="status">You changed the trip. Press “Find fuel stops” to see the new one.</span> <span data-explain="concept:stale-strip"></span></p>
   </div>
 
   <main id="main" class="tour wrap">
@@ -74,10 +92,11 @@
     <div class="map-col">
       <section class="map-card" aria-label="Map of the trip">
         <div id="map"></div>
-        <p class="map-legend" aria-hidden="true">
-          <span class="legend-item"><span class="legend-dot legend-start"></span>start</span>
-          <span class="legend-item"><span class="legend-dot legend-finish"></span>finish</span>
-          <span class="legend-item legend-stops"><span class="legend-stop"></span>fuel stop, numbered in order</span>
+        <p class="map-legend">
+          <span class="legend-item" aria-hidden="true"><span class="legend-dot legend-start"></span>start</span>
+          <span class="legend-item" aria-hidden="true"><span class="legend-dot legend-finish"></span>finish</span>
+          <span class="legend-item legend-stops" aria-hidden="true"><span class="legend-stop"></span>fuel stop, numbered in order</span>
+          <span class="legend-help" data-explain="concept:route-map-line"></span>
         </p>
         <div id="player" class="player" role="group" aria-label="Play the trip on the map" hidden></div>
       </section>

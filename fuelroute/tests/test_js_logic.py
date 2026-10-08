@@ -191,6 +191,23 @@ def test_compare_is_honest_with_a_full_tank_and_says_why():
     ]
 
 
+def test_skipping_tiny_stops_that_changes_nothing_says_only_that():
+    # Regression: "some fuel moved from a tiny stop to a nearby one" next to "On this trip
+    # it changed nothing", on a trip with no tiny stop. The API's tiny_stops_merged says
+    # what merging itself changed.
+    merging = {"vehicle__consolidate": True, "meta__settings_changed": ["consolidate"]}
+    out = run_js(f"""
+        import {{ whyChanged }} from 'JS/whatif.js';
+        const base = {json.dumps(plan())};
+        const same = {json.dumps(plan(**merging, summary__tiny_stops_merged={"stops_before": 1, "extra_cost": 0.0}))};
+        const moved = {json.dumps(plan(**merging, summary__total_fuel_cost=184.0,
+                                       summary__tiny_stops_merged={"stops_before": 1, "extra_cost": 0.25}))};
+        console.log(JSON.stringify({{ same: whyChanged(same, base), moved: whyChanged(moved, base) }}));
+    """)
+    assert out["same"] == ["On this trip it changed nothing."]
+    assert out["moved"][0] == "Skipping tiny stops: some fuel moved from a tiny stop to a nearby one, for $0.25 more."
+
+
 def test_the_tank_controls_turn_a_tank_and_mileage_into_a_range():
     out = run_js("""
         import { rangeOfTank, tankLimits } from 'JS/settings.js';

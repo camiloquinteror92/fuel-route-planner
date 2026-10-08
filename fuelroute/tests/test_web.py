@@ -232,7 +232,8 @@ def test_every_js_import_points_to_an_existing_file():
 
 @pytest.mark.django_db
 def test_steps_are_a_guided_tour(client):
-    page = Page(client.get(PAGE).content.decode())
+    source = client.get(PAGE).content.decode()
+    page = Page(source)
     by_id = page.by_id()
     assert page.find(**{"aria-label": "Steps"})[0]
     buttons = [a for tag, a in page.elements if tag == "button" and "data-step" in a]
@@ -241,8 +242,12 @@ def test_steps_are_a_guided_tour(client):
         assert button["aria-controls"] == f"panel-{name}"
         tag, panel = by_id[f"panel-{name}"]
         assert tag == "section" and panel["tabindex"] == "-1"
-        heading_tag, heading = by_id[panel["aria-labelledby"]]
-        assert heading_tag == "h2", f"panel-{name} is not named by its h2"
+        # Named by its h2: the h2 itself, or the words inside it when the h2 also holds an
+        # "i" button (whose label must not join the panel's name).
+        assert by_id[f"{name}-title"][0] == "h2"
+        heading = re.search(rf'<h2 id="{name}-title"[^>]*>(.*?)</h2>', source, re.S).group(1)
+        for label in panel["aria-labelledby"].split():
+            assert label == f"{name}-title" or f'id="{label}"' in heading, f"panel-{name} is not named by its h2"
         # Only the first step shows, and the others wait for a plan.
         assert ("hidden" in panel) == (name != "trip")
         assert button.get("aria-current") == ("step" if name == "trip" else None)

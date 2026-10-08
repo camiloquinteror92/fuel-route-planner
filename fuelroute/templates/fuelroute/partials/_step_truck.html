@@ -16,20 +16,20 @@
 <section id="panel-truck" class="step-card" aria-labelledby="truck-title" tabindex="-1" hidden>
   <h2 id="truck-title" tabindex="-1">Try another truck</h2>
   <p class="lead">Try one change, or set the truck yourself. The road is already saved, so a new truck needs no new request to the
-    routing service.</p>
+    routing service. <span data-explain="concept:route-cache-vs-plan-cache"></span></p>
 
   <div class="quick-tries">
-    <h3 id="quick-title">Try one change on the standard truck:</h3>
+    <h3><span id="quick-title">Try one change on the standard truck:</span> <span data-explain="concept:quick-tries"></span></h3>
     <div id="quick-tries" class="quick-list" role="group" aria-labelledby="quick-title"></div>
   </div>
 
   <div id="truck-error" class="error-box" hidden></div>
   <div id="truck-compare" class="compare" hidden></div>
 
-  <h3>Or set the truck yourself</h3>
+  <h3>Or set the truck yourself <span data-explain="concept:defaults-and-limits"></span></h3>
   <div class="setting-card" data-setting="mpg">
     <div class="setting-head">
-      <label for="set-mpg">Miles per gallon</label>
+      <label for="set-mpg">Miles per gallon</label> <span data-explain="concept:miles-per-gallon"></span>
       <span class="chip-default">Default: <span data-default="mpg">—</span></span>
     </div>
     <p class="setting-help" id="mpg-help">How far the truck goes on one gallon of fuel.</p>
@@ -43,11 +43,11 @@
 
   <div class="setting-card" data-setting="tank_gal">
     <div class="setting-head">
-      <label for="set-tank_gal">Tank size (gallons)</label>
+      <label for="set-tank_gal">Tank size (gallons)</label> <span data-explain="concept:tank-size"></span>
       <span class="chip-default">Default: <span data-default="tank_gal">—</span></span>
     </div>
-    <p class="setting-help" id="tank_gal-help">How much fuel the tank holds. Range on a full tank:
-      <output id="set-range" for="set-mpg set-tank_gal">—</output> (tank × miles per gallon).</p>
+    <p class="setting-help"><span id="tank_gal-help">How much fuel the tank holds. Range on a full tank:
+      <output id="set-range" for="set-mpg set-tank_gal">—</output> (tank × miles per gallon).</span> <span data-explain="concept:range-on-full-tank"></span></p>
     <div class="setting-input">
       <label for="set-tank_gal-range" class="sr-only">Tank size, slider</label>
       <input type="range" id="set-tank_gal-range" tabindex="-1">
@@ -58,7 +58,7 @@
 
   <div class="setting-card" data-setting="safety_reserve_gal">
     <div class="setting-head">
-      <label for="set-safety_reserve_gal">Safety fuel (gallons)</label>
+      <label for="set-safety_reserve_gal">Safety fuel (gallons)</label> <span data-explain="concept:safety-fuel"></span>
       <span class="chip-default">Default: <span data-default="safety_reserve_gal">—</span></span>
     </div>
     <p class="setting-help" id="safety_reserve_gal-help">Fuel that must always stay in the tank, at every stop and at the finish.
@@ -71,8 +71,8 @@
     <p class="field-error" id="safety_reserve_gal-error" hidden></p>
   </div>
 
-  <fieldset class="setting-card setting-tank" data-setting="start_tank">
-    <legend>Tank when leaving</legend>
+  <fieldset class="setting-card setting-tank" data-setting="start_tank" aria-labelledby="start_tank-legend">
+    <legend><span id="start_tank-legend">Tank when leaving</span> <span data-explain="concept:tank-when-leaving"></span></legend>
     {% for mode in start_tank_modes %}
     <label class="option">
       <input type="radio" name="start_tank" value="{{ mode.value }}" form="trip-form"{% if form.start_tank == mode.value %} checked{% endif %}>
@@ -86,12 +86,12 @@
   <div class="setting-card setting-switch" data-setting="consolidate">
     <div class="setting-head">
       <label class="switch" for="set-consolidate"><input type="checkbox" id="set-consolidate" aria-describedby="consolidate-help consolidate-error">
-        Skip tiny stops</label>
+        Skip tiny stops</label> <span data-explain="concept:skip-tiny-stops"></span>
       <span class="chip-default">Default: off</span>
     </div>
     <p class="setting-help" id="consolidate-help">A stop that would buy less than
-      <span data-live="about.vehicle.min_stop_gallons" data-format="gal">—</span> is merged into a nearby stop, if that costs at most
-      <span data-live="about.vehicle.max_consolidation_cost" data-format="money">—</span> more. Off, the plan is the three rules alone: the cheapest.</p>
+      <span data-live="about.vehicle.min_stop_gallons" data-format="gal" data-no-explain>—</span> is merged into a nearby stop, if that costs at most
+      <span data-live="about.vehicle.max_consolidation_cost" data-format="money" data-no-explain>—</span> more. Off, the plan is the three rules alone: the cheapest.</p>
     <p class="field-error" id="consolidate-error" hidden></p>
   </div>
 
@@ -101,7 +101,7 @@
       <span class="btn-timer" data-timer hidden></span>
     </button>
     <button type="button" class="btn btn-ghost" data-action="standard-truck">Back to the standard truck</button>
-    <span id="truck-pending" class="pending" hidden>Not planned yet</span>
+    <span id="truck-pending" class="pending" hidden>Not planned yet <span data-explain="concept:not-planned-yet"></span></span>
   </div>
   <p id="hidden-settings" class="hidden-settings" hidden></p>
 

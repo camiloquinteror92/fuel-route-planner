@@ -105,7 +105,7 @@ class CorridorStation:
     mile: float  # mile marker of the closest route sample
     offset_miles: float  # straight-line distance from that sample (the detour, one way)
     price: float
-    lat: float = 0.0  # the station's (city-level) coordinates
+    lat: float = 0.0  # the station's coordinates (exact, or its city center)
     lon: float = 0.0
 
 

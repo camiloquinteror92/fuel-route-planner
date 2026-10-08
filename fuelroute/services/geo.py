@@ -3,7 +3,7 @@
 Used by the routing step (mile markers, resampling, simplification for the map)
 and by the corridor search (nearest route point of each station). Distances are
 great-circle (haversine) miles: at the scale of a US road trip the error against
-an ellipsoid is well below the city-level error of the station coordinates.
+an ellipsoid is well below the error of the station coordinates (city centers).
 """
 
 from __future__ import annotations

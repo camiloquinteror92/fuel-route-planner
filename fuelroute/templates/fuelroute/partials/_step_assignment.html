@@ -49,10 +49,11 @@
       </tr>
       <tr>
         <th scope="row" data-label="Asked">Use the given fuel prices file</th>
-        <td data-label="How">The file has no map positions, so each truck stop takes its city’s position from public US place lists. A truck stop listed more than once uses its middle price. <span data-explain="concept:station-price"></span></td>
+        <td data-label="How">The file has no map positions. A truck stop takes its exact place (its own fuel station, or the highway exit in its address) when OpenStreetMap confirms it by the exit or the store number, matched once ahead of time; otherwise its city’s position from public US place lists. A truck stop listed more than once uses its middle price. <span data-explain="concept:station-price"></span> <span data-explain="concept:exact-positions"></span></td>
         <td data-label="On this trip"><span data-live="about.data.geocoded" data-format="int">—</span> of
-          <span data-live="about.data.stations" data-format="int">—</span> truck stops placed on the map. The other
-          <span data-live="about.data.not_geocoded" data-format="int">—</span> have a city that is not in those lists, so they are left out.</td>
+          <span data-live="about.data.stations" data-format="int">—</span> truck stops placed on the map,
+          <span data-live="about.data.exact_positions" data-format="int">—</span> of them at their exact place. The other
+          <span data-live="about.data.not_geocoded" data-format="int">—</span> have no exact place and a city those lists cannot pin down (not in them, or same-name towns far apart), so they are left out.</td>
       </tr>
       <tr>
         <th scope="row" data-label="Asked">A free routing API, called as little as possible</th>

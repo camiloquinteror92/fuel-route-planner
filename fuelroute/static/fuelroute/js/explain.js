@@ -177,6 +177,43 @@ function costLine(stop) {
     + `rounded to the cent: ${fmt.money(stop.cost)}.`;
 }
 
+// The detour to a stop, ESTIMATED by the page: the plan does not charge it (README,
+// limits). distance_from_route_miles is the straight line from the station to its
+// nearest road point, one way; there and back is twice that, burned at this truck's
+// miles per gallon and priced at the stop. null when the answer lacks a number.
+function detourOf(c, stop) {
+  const mpg = veh(c).miles_per_gallon;
+  const off = stop?.distance_from_route_miles;
+  if (![off, mpg, stop?.price_per_gallon].every(present) || mpg <= 0) return null;
+  const gallons = (2 * off) / mpg;
+  return { off, miles: 2 * off, gallons, dollars: gallons * stop.price_per_gallon, mpg };
+}
+
+function detourLine(c, stop) {
+  const d = detourOf(c, stop);
+  if (!d) return null;
+  if (d.off === 0) return `Detour: ${fmt.miles(d.off)} off the road, so nothing to add.`;
+  return `Detour: ≈ ${fmt.miles(d.off)} off the road → about ${fmt.miles(d.miles)} there and back ≈ ${fmt.gal(d.gallons)} `
+    + `at this truck’s ${fmt.num(d.mpg)} mpg ≈ ${fmt.money(d.dollars)} at this stop’s price, not in the total (straight-line estimate).`;
+}
+
+// Every stop's detour of a plan, added up: Σ 2 × distance ÷ mpg gallons, each priced at
+// its own stop. null without stops or when one stop lacks its distance.
+function detoursOf(c) {
+  const stops = stopsOf(c);
+  const each = stops.map((stop) => detourOf(c, stop));
+  if (!stops.length || each.includes(null)) return null;
+  const add = (field) => each.reduce((total, d) => total + d[field], 0);
+  return { stops, miles: add('miles'), gallons: add('gallons'), dollars: add('dollars'), mpg: each[0].mpg };
+}
+
+function detoursLine(c) {
+  const d = detoursOf(c);
+  if (!d) return null;
+  return `Not in the total, the detours to the stops (straight-line estimate): 2 × (${sumLine(d.stops.map((s) => fmt.dec1(s.distance_from_route_miles)))}) mi`
+    + ` = ${fmt.miles(d.miles)} there and back ÷ ${fmt.num(d.mpg)} mpg ≈ ${fmt.gal(d.gallons)} ≈ ${fmt.money(d.dollars)} at each stop’s price.`;
+}
+
 // Which tank sentence of the Route step shows, and why.
 function tankSentence(c) {
   const d = der(c);
@@ -361,6 +398,7 @@ const TOTAL_COST = {
         ? `The API’s total is ${fmt.money(s.total_fuel_cost)}: the same, to the cent.`
         : `The API’s total is ${fmt.money(s.total_fuel_cost)}: they do NOT match.`,
       `For example stop ${first.stop}: ${fmt.gal(first.gallons)} × ${price4(first.price_per_gallon)} = ${exact(first.gallons * first.price_per_gallon)} → ${fmt.money(first.cost)}.`,
+      detoursLine(c),
     ];
   },
   why: 'Rounding each stop first and adding exactly makes the stops on screen add up to the total, to the cent. The fuel already in the tank is not billed: by default the truck returns the tank as it got it, so the bill is the fuel burned.',
@@ -369,8 +407,8 @@ const TOTAL_COST = {
     'fuelroute/services/planner.py:_build_summary', 'fuelroute/services/optimizer.py:_to_stops',
     'fuelroute/static/fuelroute/js/plan.js:renderCost', 'fuelroute/tests/test_api.py:test_stop_costs_add_up_to_the_total_to_the_cent',
   ],
-  edge: 'With a full tank at the start, the free first tank is not in the total. The cards show prices with three decimals while the cost uses four, so a hand check can be a cent off.',
-  see: ['concept:check-costs-add-up-to-the-cent', 'concept:station-price', 'concept:pay-for-every-mile'],
+  edge: 'Not in the total: the free first tank, with a full tank at the start, and the detours to the stops (“On this trip” estimates them). The cards show prices with three decimals while the cost uses four, so a hand check can be a cent off.',
+  see: ['concept:check-costs-add-up-to-the-cent', 'concept:station-price', 'concept:pay-for-every-mile', 'concept:detour-estimate'],
 };
 
 const GALLONS_BOUGHT = {
@@ -766,23 +804,52 @@ export const EXPLAINERS = {
     title: 'The price file',
     what: 'The price table (a CSV file) given with the assignment: OPIS ID (the station’s ID at OPIS, a fuel-price publisher), name, address, city, state, Rack ID (the wholesale terminal behind the price; not used) and Retail Price (the pump price per gallon, used). No coordinates, no dates.',
     source: '/api/about → data.price_file (the file name). manage.py load_stations loads it into the station table once, never during a request.',
-    how: 'Each station takes its city’s point from the built-in place list. When a state has two far-apart towns with that name, three clues decide: the exit number, the population (one town much bigger), then the highway. If the clues disagree or none applies, the station is left out.',
+    how: 'A station sits at its exact place matched in OpenStreetMap, else at its city center from the built-in place list. Same-name towns far apart in one state: the exit number, the population, then the highway decide. If no clue decides and there is no exact place, it is left out.',
     live: (c) => {
       const d = aboutData(c);
       need(d.stations, d.geocoded);
+      const exactText = present(d.exact_positions) ? ` (${fmt.int(d.exact_positions)} of them at their exact place)` : '';
       return [
         `${d.price_file}: ${fmt.int(d.price_quotes)} price quotes for ${fmt.int(d.stations)} US truck stops; ${fmt.int(d.stations_with_several_quotes)} of them are listed more than once.`,
-        `${fmt.int(d.geocoded)} placed on the map, ${fmt.int(d.not_geocoded)} left out.`,
+        `${fmt.int(d.geocoded)} placed on the map${exactText}, ${fmt.int(d.not_geocoded)} left out.`,
       ];
     },
     why: 'Placing every station once, when the file is loaded, keeps every request at zero place-search calls. A wrong guess would put a phantom stop hundreds of miles away on other people’s routes; leaving it out only removes one option.',
     code: [
       'fuelroute/services/station_loader.py:parse_price_file', 'fuelroute/services/station_loader.py:load_stations',
-      'fuelroute/services/station_loader.py:geocode_rows', 'fuelroute/management/commands/load_stations.py',
-      'fuelroute/services/about.py:_data_summary',
+      'fuelroute/services/station_loader.py:geocode_rows', 'fuelroute/services/station_loader.py:read_station_coords',
+      'fuelroute/management/commands/load_stations.py', 'fuelroute/services/about.py:_data_summary',
     ],
-    edge: 'Repeated rows of one OPIS ID are one station, priced with the median; rows outside the US are skipped. Positions are city-level, so the search around the road is several miles wide. With an empty table /api/route answers station_data_not_loaded.',
-    see: ['concept:station-price', 'concept:offline-places-list', 'about.data.geocoded'],
+    edge: 'Repeated rows of one OPIS ID are one station, priced with the median; rows outside the US are skipped. Stations kept at their city center can be miles off, so the search around the road is several miles wide. With an empty table /api/route answers station_data_not_loaded.',
+    see: ['concept:exact-positions', 'concept:station-price', 'concept:offline-places-list', 'about.data.geocoded'],
+  },
+
+  'concept:exact-positions': {
+    title: 'Exact truck stop positions',
+    what: 'Where each truck stop sits on the map: at its own fuel station in OpenStreetMap (the free, open world map), else at the highway exit its address names, else at its city center.',
+    source: 'data/station_coords.csv, built once, offline, by scripts/build_station_coords.py from OpenStreetMap data (its rules and results: data/station_coords_report.md). manage.py load_stations reads it; a request never does.',
+    how: 'Matched once, ahead of time: the station’s own fuel station (its brand next to the exit in its address, or its store number), else that exit itself. A doubtful match, like a brand alone or an exit over twenty miles from town, is dropped: the station keeps its city center.',
+    live: (c) => {
+      const d = aboutData(c);
+      need(d.exact_positions, d.stations);
+      const stops = stopsOf(c).filter((s) => present(s.distance_from_route_miles));
+      const near = stops.filter((s) => s.distance_from_route_miles < 1).length;
+      return [
+        stops.length ? `Stops less than a mile from the road on this trip (straight line): ${fmt.int(near)} of ${fmt.int(stops.length)}.` : null,
+        `In the whole price file: ${fmt.int(d.exact_positions)} of ${fmt.int(d.stations)} US truck stops at their exact place; the others at their city center, or left out.`,
+      ];
+    },
+    why: 'The price file has no coordinates, only a city and an address, often a highway exit (“I-44, EXIT 283”), so a city center can be miles from the stop. Matching once, offline, means no map call during a request; an evaluator needs nothing: the file is in the repository.',
+    code: [
+      'scripts/build_station_coords.py:main', 'scripts/build_station_coords.py:match_station',
+      'scripts/build_station_coords.py:find_exit', 'scripts/build_station_coords.py:match_state',
+      'fuelroute/services/station_loader.py:read_station_coords', 'fuelroute/services/station_loader.py:_trusted',
+      'fuelroute/services/station_loader.py:load_stations',
+      'fuelroute/tests/test_build_station_coords.py:test_without_exit_a_name_alone_is_not_enough',
+      'fuelroute/tests/test_station_coords.py:test_an_exact_row_beats_the_city_center',
+    ],
+    edge: 'About half the stations are exact; the rest keep their city center, an error the search strip around the road mostly absorbs. data/station_coords_report.md lists the largest moves and why each other station kept its city center. To refresh: python scripts/build_station_coords.py, then python manage.py load_stations.',
+    see: ['about.data.exact_positions', 'concept:detour-estimate', 'concept:price-file', 'route.vehicle.corridor_miles'],
   },
 
   'about.data.geocoded': {
@@ -793,16 +860,50 @@ export const EXPLAINERS = {
     live: (c) => {
       const d = aboutData(c);
       need(d.geocoded, d.stations);
-      return `${fmt.int(d.geocoded)} placed of ${fmt.int(d.stations)} US truck stops: ${fmt.int(d.stations)} − ${fmt.int(d.geocoded)} = ${fmt.int(d.not_geocoded)} left out.`;
+      return [
+        `${fmt.int(d.geocoded)} placed of ${fmt.int(d.stations)} US truck stops: ${fmt.int(d.stations)} − ${fmt.int(d.geocoded)} = ${fmt.int(d.not_geocoded)} left out.`,
+        present(d.exact_positions)
+          ? `Of the placed ones, ${fmt.int(d.exact_positions)} at their exact place and ${fmt.int(d.geocoded - d.exact_positions)} at their city center.`
+          : null,
+      ];
     },
-    why: 'Only stations with a position can be placed near a road, so this is the honest count. Positions are found once, when the file is loaded, never during a request. A city that cannot be resolved stays without a position: better than placing a stop hundreds of miles away.',
+    why: 'Only stations with a position can be placed near a road, so this is the honest count. Positions are found when the file is loaded, never during a request. With no exact place and an unresolved city, a station stays off the map: better than hundreds of miles away.',
     code: [
       'fuelroute/services/about.py:_data_summary', 'fuelroute/services/about.py:build_about',
       'fuelroute/web.py:planner_page', 'fuelroute/services/station_loader.py:geocode_rows',
-      'fuelroute/services/stations.py:get_station_arrays',
+      'fuelroute/services/station_loader.py:read_station_coords', 'fuelroute/services/stations.py:get_station_arrays',
     ],
     edge: 'Counted from the database, never typed: with an empty table it shows zero.',
-    see: ['concept:price-file'],
+    see: ['about.data.exact_positions', 'concept:price-file'],
+  },
+
+  'about.data.exact_positions': {
+    title: 'Truck stops at their exact place',
+    what: 'How many truck stops of the price file sit at their own fuel station or at the highway exit in their address, not at their city center.',
+    source: '/api/about → data.exact_positions, embedded in the page when it loads; data.geocoded_by_source splits it.',
+    how: 'Counted in the station table: stations placed by data/station_coords.csv, at their own fuel station in OpenStreetMap (osm_fuel) or at the exit in their address (osm_exit). The others sit at their city center (census or geonames) or are left out.',
+    live: (c) => {
+      const d = aboutData(c);
+      need(d.exact_positions, d.stations);
+      const by = d.geocoded_by_source || {};
+      return [
+        d.stations > 0
+          ? `${fmt.int(d.exact_positions)} of ${fmt.int(d.stations)} US truck stops: ${fmt.int(d.exact_positions)} ÷ ${fmt.int(d.stations)} × 100 = ${fmt.pct((d.exact_positions / d.stations) * 100)}.`
+          : `${fmt.int(d.exact_positions)} truck stops.`,
+        present(by.osm_fuel) || present(by.osm_exit)
+          ? `${fmt.int(by.osm_fuel || 0)} at their own fuel station, ${fmt.int(by.osm_exit || 0)} at the exit in their address.`
+          : null,
+        present(d.geocoded) ? `${fmt.int(d.geocoded - d.exact_positions)} at their city center, ${fmt.int(d.not_geocoded)} left out.` : null,
+      ];
+    },
+    why: 'A count from the database, never typed, so it shows what the server really loaded. Without the positions file it is zero and every stop sits at its city center, as before.',
+    code: [
+      'fuelroute/services/about.py:_data_summary', 'fuelroute/services/station_loader.py:EXACT_SOURCES',
+      'fuelroute/services/station_loader.py:load_stations', 'fuelroute/management/commands/load_stations.py',
+      'fuelroute/models.py:FuelStation',
+    ],
+    edge: 'It counts the whole file, not this trip. python manage.py load_stations --no-coords places every station by its city alone.',
+    see: ['concept:exact-positions', 'about.data.geocoded'],
   },
 
   'about.data.states': {
@@ -995,12 +1096,13 @@ export const EXPLAINERS = {
       const changed = (metaOf(c).settings_changed || []).includes('corridor_miles');
       return `${fmt.miles_short(veh(c).corridor_miles)}${changed ? ' (from the link)' : ' (the default)'}.`;
     },
-    why: 'Station positions are city-level (the file has no coordinates), so a few miles of margin absorbs that error and is still a short detour.',
+    why: 'Many stations still sit at their city center (the file has no coordinates), often miles from the real stop, so this margin keeps most of them in reach.',
     code: [
       'config/settings.py:FUEL_PLANNER', 'fuelroute/services/planner.py:PlanSettings.defaults',
       'fuelroute/services/stations.py:stations_along_route', 'fuelroute/static/fuelroute/js/settings.js:SETTINGS',
     ],
-    edge: 'The detour to the station is not charged: a station at the edge counts as if it were on the road. A wider strip finds more stations but hides longer detours.',
+    edge: 'The detour to the station is not charged (the stop’s card estimates it): a station at the edge counts as if it were on the road. A wider strip finds more stations but hides longer detours.',
+    see: ['concept:detour-estimate', 'concept:exact-positions'],
   },
 
   'route.summary.start_fuel_gallons': {
@@ -1263,7 +1365,7 @@ export const EXPLAINERS = {
     },
     why: 'The optimizer works in one dimension, miles along the road, so each truck stop needs one position on it.',
     code: ['fuelroute/services/osrm.py:prepare_route', 'fuelroute/services/geo.py:resample', 'fuelroute/services/stations.py:stations_along_route'],
-    edge: 'Precise to about a mile, plus the city-level position of the station. The detour to the station is not added.',
+    edge: 'Precise to about a mile, plus the error of a station kept at its city center. The detour to the station is not added; the stop’s card estimates it.',
   },
 
   'concept:external-calls': {
@@ -1376,7 +1478,7 @@ export const EXPLAINERS = {
       'fuelroute/static/fuelroute/js/map.js:drawRoad', 'fuelroute/static/fuelroute/js/map.js:showRouteOnly',
       'fuelroute/static/fuelroute/js/main.js:showMapFor',
     ],
-    edge: 'A stop marker sits at its station’s city position, a few miles off the road at most. A stretch with no truck stop is drawn in red with its length. If the map library cannot load, every step still works without a map.',
+    edge: 'A stop marker sits at its station’s exact place, or at its city center when none was confirmed. A stretch with no truck stop is drawn in red with its length. If the map library cannot load, every step still works without a map.',
     see: ['concept:map-in-the-api-answer', 'concept:stop-card'],
   },
 
@@ -1494,6 +1596,7 @@ export const EXPLAINERS = {
         purchaseLine(c, stop),
         costLine(stop),
         `Leaves with ${fmt.gal(stop.fuel_on_arrival_gallons)} + ${fmt.gal(stop.gallons)} = ${fmt.gal(stop.fuel_on_arrival_gallons + stop.gallons)}.`,
+        detourLine(c, stop),
       ];
     },
     why: 'Every number on the card can be checked by hand from the previous stop. The rule tag and “Why here” come from the answer’s decision block: the browser never recomputes the plan.',
@@ -1503,7 +1606,27 @@ export const EXPLAINERS = {
       'fuelroute/services/optimizer.py:_to_stops',
     ],
     edge: 'Hand checks can be a hundredth of a gallon or a cent off: arrivals, gallons and mile markers are rounded, and the card shows the price with three decimals while the cost uses four.',
-    see: ['concept:three-rules', 'concept:fuel-on-departure', 'concept:station-price', 'concept:mile-marker'],
+    see: ['concept:three-rules', 'concept:fuel-on-departure', 'concept:station-price', 'concept:mile-marker', 'concept:detour-estimate'],
+  },
+
+  'concept:detour-estimate': {
+    title: 'The detour to a stop (an estimate)',
+    what: 'The miles a truck drives off the road to reach a stop and get back, and what that fuel would cost. The plan does not charge it; the page only estimates it.',
+    source: 'API field fuel_stops[].distance_from_route_miles: the straight line from the station to its nearest road point, one way. The rest is computed in the browser.',
+    how: 'there and back = 2 × distance; gallons = that ÷ miles per gallon; dollars = gallons × the stop’s price. The trip’s estimate adds up every stop.',
+    live: (c) => {
+      const d = detoursOf(c);
+      need(d);
+      const farthest = d.stops.reduce((a, b) => (b.distance_from_route_miles > a.distance_from_route_miles ? b : a));
+      return [detoursLine(c), `Farthest from the road: stop ${farthest.stop}, ${farthest.city}, ${farthest.state}. ${detourLine(c, farthest)}`];
+    },
+    why: 'The optimizer works in miles along the road, so a detour has no place in its model (README, limits); a stop at its exact place is usually under a mile off anyway. The estimate shows what that leaves out instead of hiding it.',
+    code: [
+      'fuelroute/services/stations.py:stations_along_route', 'fuelroute/services/geo.py:nearest_on_line',
+      'fuelroute/services/planner.py:_build_stops', 'fuelroute/static/fuelroute/js/explain.js:detourOf',
+    ],
+    edge: 'A straight line is shorter than the real drive (ramps, side roads). Road points are about a mile apart, so a station by the road can show up to half a mile; one at its city center, or at an exit of another highway nearby, several miles.',
+    see: ['concept:stop-card', 'route.summary.total_fuel_cost', 'concept:price-blind-driver', 'concept:exact-positions', 'route.vehicle.corridor_miles'],
   },
 
   'concept:fuel-on-departure': {
@@ -1793,8 +1916,11 @@ export const EXPLAINERS = {
       const blind = summ(c).comparison?.price_blind;
       need(blind?.total_fuel_cost);
       const s = summ(c);
+      const detours = detoursOf(c);
       return [`Driver who ignores prices: ${fmt.money(blind.total_fuel_cost)}, ${plural(blind.number_of_stops, 'stop')}, ${fmt.gal(blind.total_gallons_purchased)}, ${price4(blind.average_price_paid)} a gallon.`,
-        `This plan: ${fmt.money(s.total_fuel_cost)}, ${plural(s.number_of_stops, 'stop')}, ${fmt.gal(s.total_gallons_purchased)}, ${price4(s.average_price_paid)} a gallon.`];
+        `This plan: ${fmt.money(s.total_fuel_cost)}, ${plural(s.number_of_stops, 'stop')}, ${fmt.gal(s.total_gallons_purchased)}, ${price4(s.average_price_paid)} a gallon.`,
+        detours ? `Not in either total, this plan’s detours to its stops: ≈ ${fmt.miles(detours.miles)} there and back ≈ ${fmt.gal(detours.gallons)} ≈ ${fmt.money(detours.dollars)} (straight-line estimate).` : null,
+        detours ? 'The answer does not say how far the other driver’s stops are from the road, so its detours are not estimated.' : null];
     },
     why: 'To call a plan “cheapest” you need something to compare it with. The same stops and the same fuel at both ends give the same gallons, so the difference is only where they are bought: a fair test. It is what a driver does with no tool.',
     code: [
@@ -1802,8 +1928,8 @@ export const EXPLAINERS = {
       'fuelroute/services/planner.py:_build_comparison', 'fuelroute/services/planner.py:_strategy',
       'fuelroute/tests/test_optimizer.py:test_price_blind_driver_buys_the_same_gallons_and_never_beats_the_optimum',
     ],
-    edge: 'Hidden when the plan has no stop. Other yardsticks (a quarter-tank driver, the average price near the road) are in the JSON with include=details.',
-    see: ['concept:cost-bars', 'derived.savings_amount', 'concept:three-rules'],
+    edge: 'Hidden when the plan has no stop. Other yardsticks (a quarter-tank driver, the average price near the road) are in the JSON with include=details. Neither total charges the detours to the stops.',
+    see: ['concept:cost-bars', 'derived.savings_amount', 'concept:three-rules', 'concept:detour-estimate'],
   },
 
   'concept:cost-bars': {
@@ -2198,7 +2324,7 @@ export const EXPLAINERS = {
     title: 'The built-in list of US places',
     what: 'A file shipped with the code (data/us_places.csv.gz): about one hundred ninety thousand US places with their coordinates, from the US Census Gazetteer and GeoNames.',
     source: 'A data file, built by scripts/build_places_dataset.py and loaded once per server process.',
-    how: 'Loaded into numpy arrays (fast tables of numbers) when the server starts. lookup(city, state) returns the most populated place with that name in that state. The same list places the truck stops and answers /api/places.',
+    how: 'Loaded into numpy arrays (fast tables of numbers) when the server starts. lookup(city, state) returns the most populated place with that name in that state. The same list gives truck stops their city center (when no exact place is known) and answers /api/places.',
     why: 'Finding a typed city costs no network call and under a millisecond, so the only external call of a new trip is the road.',
     code: ['fuelroute/services/places.py:get_place_index', 'fuelroute/services/geocoding.py:_offline', 'fuelroute/warmup.py:warm_up'],
     edge: 'Same-name places in one state: the most populated wins; for an exact point type “lat,lon”.',
@@ -2244,8 +2370,11 @@ export const EXPLAINERS = {
     how: 'stations − placed stations.',
     live: (c) => EXPLAINERS['about.data.geocoded'].live(c),
     why: 'Leaving a station out is safer than placing it hundreds of miles from where it is.',
-    code: ['fuelroute/services/about.py:_data_summary', 'fuelroute/services/station_loader.py:geocode_rows'],
-    edge: 'They are cities found in neither list, and same-name towns in one state (more than twenty-five miles apart) that no clue could resolve.',
+    code: [
+      'fuelroute/services/about.py:_data_summary', 'fuelroute/services/station_loader.py:geocode_rows',
+      'fuelroute/services/station_loader.py:read_station_coords',
+    ],
+    edge: 'They have no exact place, and a city found in neither list or with same-name towns in one state (more than twenty-five miles apart) that no clue could resolve.',
   },
 
   'derived.trip_osrm_text': {
@@ -2311,7 +2440,7 @@ export const EXPLAINERS = {
 
   'concept:how-it-is-tested': {
     title: 'How it is tested',
-    what: 'More than eight hundred pytest tests that run in seconds with no network: the one function that does HTTP fails in every test, and OSRM is replaced by a fake that counts the calls.',
+    what: 'More than nine hundred pytest tests that run in seconds with no network: the one function that does HTTP fails in every test, and OSRM is replaced by a fake that counts the calls.',
     source: 'The fuelroute/tests folder; run it with python -m pytest.',
     how: 'The optimizer is refereed by an exact method on ninety small random roads, the corridor search by brute force, and the API is checked for one call per new trip and cents that add up. The page’s JavaScript runs in Node from pytest, and every card here is checked.',
     why: 'Each test pins a claim the page or the README makes, so a claim cannot drift from the code. Pure functions (no screen, no network) make the logic testable in milliseconds.',
@@ -2339,7 +2468,7 @@ export const EXPLAINERS = {
     what: 'Where each data source comes from, and the required attributions.',
     source: 'Template text; the GitHub link comes from /api/about (deliverables.repo_url).',
     how: 'Fixed text. “CC BY 4.0” is marked as a literal, because the page rule forbids digits in the template text.',
-    why: 'GeoNames (CC BY 4.0) and OpenStreetMap require attribution. The OSRM demo server and Nominatim are free and need no key.',
+    why: 'GeoNames (CC BY 4.0) and OpenStreetMap require attribution; the exact truck stop positions are OpenStreetMap data too (ODbL). The OSRM demo server and Nominatim are free and need no key.',
     code: ['fuelroute/templates/fuelroute/partials/_footer.html', 'fuelroute/services/about.py:_deliverables'],
   },
 };

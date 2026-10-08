@@ -28,11 +28,14 @@ class FuelStation(models.Model):
     price_max = models.DecimalField(max_digits=7, decimal_places=4)
     # How many rows (price quotes) the file had for this station.
     price_rows = models.PositiveSmallIntegerField(default=1)
-    # City-level coordinates. NULL when the city was not found or is ambiguous; such
-    # stations stay in the table but the planner ignores them.
+    # The station's exact position (data/station_coords.csv) or, without one, its city
+    # center. NULL when it has neither (city not found or ambiguous); such stations stay
+    # in the table but the planner ignores them.
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
-    # "census" or "geonames": which offline dataset gave the coordinates.
+    # Where the coordinates come from: "osm_fuel" (its own fuel station in OpenStreetMap)
+    # or "osm_exit" (the highway exit of its address), both exact; "census" or
+    # "geonames" (the offline places dataset that gave its city center).
     geocode_source = models.CharField(max_length=16, blank=True)
 
     class Meta:

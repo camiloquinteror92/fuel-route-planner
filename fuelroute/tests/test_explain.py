@@ -101,19 +101,20 @@ def test_every_explainer_can_be_opened_from_the_page(client):
 
 def sample_answer() -> dict:
     """A 700-mile trip at 10 mpg (50-gal tank): leaves with 5 gal, three stops (one per rule),
-    arrives with 5 gal, so it buys the 70 gal it burns."""
+    arrives with 5 gal, so it buys the 70 gal it burns. The stops are 0.4, 1.2 and 0.0 miles
+    from the road (a straight line, one way)."""
     def decision(rule, **fields):
         return {"rule": rule, "cheaper_station": None, "consolidated": False, "reaches": None, **fields}
 
     stops = [
         {"stop": 1, "name": "STOP 1", "city": "A", "state": "TX", "mile_marker": 40.0, "price_per_gallon": 3.099,
-         "fuel_on_arrival_gallons": 1.0, "gallons": 15.48, "cost": 47.97,
+         "distance_from_route_miles": 0.4, "fuel_on_arrival_gallons": 1.0, "gallons": 15.48, "cost": 47.97,
          "decision": decision("reach_cheaper", reaches={"stop": 2, "mile": 204.8}, cheaper_station={
              "name": "STOP 2", "city": "C", "state": "TX", "mile": 204.8, "price_per_gallon": 2.899})},
         {"stop": 2, "name": "STOP 2", "city": "C", "state": "TX", "mile_marker": 204.8, "price_per_gallon": 2.899,
-         "fuel_on_arrival_gallons": 0.0, "gallons": 50.0, "cost": 144.95, "decision": decision("fill_up")},
+         "distance_from_route_miles": 1.2, "fuel_on_arrival_gallons": 0.0, "gallons": 50.0, "cost": 144.95, "decision": decision("fill_up")},
         {"stop": 3, "name": "STOP 3", "city": "D", "state": "NM", "mile_marker": 650.0, "price_per_gallon": 3.2,
-         "fuel_on_arrival_gallons": 5.48, "gallons": 4.52, "cost": 14.46, "decision": decision("finish")},
+         "distance_from_route_miles": 0.0, "fuel_on_arrival_gallons": 5.48, "gallons": 4.52, "cost": 14.46, "decision": decision("finish")},
     ]
     body = plan(
         route__distance_miles=700.0, fuel_stops=stops,
@@ -142,7 +143,8 @@ ABOUT = {
     "vehicle": {"miles_per_gallon": 10.0, "max_range_miles": 500.0, "tank_gallons": 50.0, "start_reserve_miles": 50.0,
                 "start_reserve_gallons": 5.0, "corridor_miles": 10.0, "min_stop_gallons": 10.0, "max_consolidation_cost": 1.0},
     "data": {"price_file": "prices.csv", "stations": 6626, "price_quotes": 7531, "stations_with_several_quotes": 568,
-             "geocoded": 6544, "not_geocoded": 82, "states": 48,
+             "geocoded": 6557, "not_geocoded": 69, "states": 48, "exact_positions": 3602,
+             "geocoded_by_source": {"census": 2792, "osm_fuel": 1804, "osm_exit": 1798, "geonames": 163},
              # The server's order: by stations in the file, not by stations placed.
              "stations_by_state": [{"state": "TX", "stations": 900, "geocoded": 890}, {"state": "WY", "stations": 12, "geocoded": 2},
                                    {"state": "CA", "stations": 8, "geocoded": 8}],
@@ -200,7 +202,7 @@ def test_every_explainer_has_all_five_sections():
 def test_every_code_reference_points_to_real_code():
     """"In the code" must lead somewhere: the file exists and names the function."""
     source = EXPLAIN_JS.read_text(encoding="utf-8")
-    refs = set(re.findall(r"'((?:fuelroute|config)/[^'\s]+)'", source))
+    refs = set(re.findall(r"'((?:fuelroute|config|scripts)/[^'\s]+)'", source))
     assert len(refs) > 100
     missing = []
     for ref in sorted(refs):
@@ -245,6 +247,8 @@ def test_live_formulas_use_this_trips_numbers():
         "$47.97 + $144.95 + $14.46 = $207.38 (3 stops).",
         "The API’s total is $207.38: the same, to the cent.",
         "For example stop 1: 15.48 gal × $3.099 = $47.9725 → $47.97.",
+        "Not in the total, the detours to the stops (straight-line estimate): 2 × (0.4 + 1.2 + 0.0) mi = 3.2 mi there"
+        " and back ÷ 10 mpg ≈ 0.32 gal ≈ $0.94 at each stop’s price.",
     ]
     assert out["gallons"] == [
         "15.48 + 50 + 4.52 = 70.00 gal.",
@@ -268,6 +272,8 @@ def test_live_formulas_use_this_trips_numbers():
         "Buys (rule “Fill up”): a full tank 50.00 gal − the 0.00 gal it has = 50.00 gal.",
         "Cost: 50.00 gal × $2.899 = $144.95, rounded to the cent: $144.95.",
         "Leaves with 0.00 gal + 50.00 gal = 50.00 gal.",
+        "Detour: ≈ 1.2 mi off the road → about 2.4 mi there and back ≈ 0.24 gal at this truck’s 10 mpg ≈ $0.70"
+        " at this stop’s price, not in the total (straight-line estimate).",
     ]
     assert out["stop3"][2] == ("Buys (rule “Finish”): the rest of the road takes (700.0 − 650.0) ÷ 10 mpg = 5.00 gal,"
                                " plus the 5.00 gal it must arrive with, minus the 5.48 gal it has: 4.52 gal.")
@@ -287,6 +293,69 @@ def test_a_hand_check_that_disagrees_with_the_api_says_so():
         console.log(JSON.stringify(explain('concept:stop-card', ctx, '2').live[1]));
     """)
     assert out.endswith("= 0.00 gal (the API says 0.03 gal: miles and gallons are rounded).")
+
+
+@needs_node
+def test_detour_estimates_print_this_trips_numbers():
+    """The plan does not charge the detour to a stop; the cards estimate it: there and back
+    = 2 × distance_from_route_miles, ÷ the plan's mpg, × the stop's own price."""
+    thirsty = sample_answer()
+    thirsty["vehicle"]["miles_per_gallon"] = 8.0
+    no_distance = sample_answer()
+    del no_distance["fuel_stops"][0]["distance_from_route_miles"]
+    out = run_js(context_js() + f"""
+        import {{ explain }} from 'JS/explain.js';
+        const withBody = (b) => ({{ ...ctx, route: b, derived: derive({{ route: {{ ok: true, body: b }}, about, params: {{ settings: {{}} }}, standard: b }}) }});
+        const live = (key, c = ctx, arg = null) => explain(key, c, arg).live;
+        const last = (lines) => lines[lines.length - 1];
+        console.log(JSON.stringify({{
+            stop1: last(live('concept:stop-card', ctx, '1')),
+            stop3: last(live('concept:stop-card', ctx, '3')),
+            thirsty: last(live('concept:stop-card', withBody({json.dumps(thirsty)}), '2')),
+            total: last(live('route.summary.total_fuel_cost')),
+            blind: live('concept:price-blind-driver').slice(2),
+            estimate: live('concept:detour-estimate'),
+            exact: live('concept:exact-positions'),
+            exactCount: live('about.data.exact_positions'),
+            missingStop: live('concept:stop-card', withBody({json.dumps(no_distance)}), '1'),
+            missingTotal: live('route.summary.total_fuel_cost', withBody({json.dumps(no_distance)})),
+            missingEstimate: live('concept:detour-estimate', withBody({json.dumps(no_distance)})),
+        }}));
+    """)
+    # One stop: 0.4 mi off the road → 0.8 mi there and back ÷ 10 mpg = 0.08 gal × $3.099 = $0.248.
+    assert out["stop1"] == ("Detour: ≈ 0.4 mi off the road → about 0.8 mi there and back ≈ 0.08 gal at this truck’s"
+                            " 10 mpg ≈ $0.25 at this stop’s price, not in the total (straight-line estimate).")
+    assert out["stop3"] == "Detour: 0.0 mi off the road, so nothing to add."
+    # The truck's own mpg: 2.4 mi ÷ 8 mpg = 0.30 gal × $2.899 = $0.87.
+    assert out["thirsty"] == ("Detour: ≈ 1.2 mi off the road → about 2.4 mi there and back ≈ 0.30 gal at this truck’s"
+                              " 8 mpg ≈ $0.87 at this stop’s price, not in the total (straight-line estimate).")
+    # The trip: $0.248 + $0.696 + $0 = $0.94, each stop at its own price.
+    trip = ("Not in the total, the detours to the stops (straight-line estimate): 2 × (0.4 + 1.2 + 0.0) mi = 3.2 mi"
+            " there and back ÷ 10 mpg ≈ 0.32 gal ≈ $0.94 at each stop’s price.")
+    assert out["total"] == trip
+    # The answer has no distances for the other driver's stops: only this plan's figure.
+    assert out["blind"] == [
+        "Not in either total, this plan’s detours to its stops: ≈ 3.2 mi there and back ≈ 0.32 gal ≈ $0.94"
+        " (straight-line estimate).",
+        "The answer does not say how far the other driver’s stops are from the road, so its detours are not estimated.",
+    ]
+    assert out["estimate"] == [trip, "Farthest from the road: stop 2, C, TX. Detour: ≈ 1.2 mi off the road → about"
+                               " 2.4 mi there and back ≈ 0.24 gal at this truck’s 10 mpg ≈ $0.70 at this stop’s price,"
+                               " not in the total (straight-line estimate)."]
+    # Exact positions: this trip's stops under a mile from the road first, then the file's counts.
+    assert out["exact"] == [
+        "Stops less than a mile from the road on this trip (straight line): 2 of 3.",
+        "In the whole price file: 3,602 of 6,626 US truck stops at their exact place; the others at their city center,"
+        " or left out.",
+    ]
+    assert out["exactCount"] == [
+        "3,602 of 6,626 US truck stops: 3,602 ÷ 6,626 × 100 = 54.4%.",
+        "1,804 at their own fuel station, 1,798 at the exit in their address.",
+        "2,955 at their city center, 69 left out.",
+    ]
+    # A stop without its distance: no detour line, and no trip estimate (never a partial sum).
+    assert not any("Detour" in line for line in out["missingStop"])
+    assert len(out["missingTotal"]) == 3 and out["missingEstimate"] == []
 
 
 

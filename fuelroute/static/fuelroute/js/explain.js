@@ -97,6 +97,13 @@ function haversine(a, b) {
 
 const RULE_NAMES = { reach_cheaper: 'Cheaper ahead', finish: 'Finish', fill_up: 'Fill up' };
 
+// fuel_stops[].position in words (format.js POSITIONS has the stop card's line).
+const POSITION_WORDS = {
+  fuel_station: 'its own truck stop, found in OpenStreetMap',
+  highway_exit: 'the highway exit in its address, found in OpenStreetMap',
+  city_center: 'its city center (no exact match in OpenStreetMap)',
+};
+
 function ruleCounts(stops) {
   const counts = {};
   for (const stop of stops) {
@@ -835,6 +842,7 @@ export const EXPLAINERS = {
       const stops = stopsOf(c).filter((s) => present(s.distance_from_route_miles));
       const near = stops.filter((s) => s.distance_from_route_miles < 1).length;
       return [
+        present(der(c).exact_stops_text) ? `On this trip: ${der(c).exact_stops_text} at their exact position.` : null,
         stops.length ? `Stops less than a mile from the road on this trip (straight line): ${fmt.int(near)} of ${fmt.int(stops.length)}.` : null,
         `In the whole price file: ${fmt.int(d.exact_positions)} of ${fmt.int(d.stations)} US truck stops at their exact place; the others at their city center, or left out.`,
       ];
@@ -1478,7 +1486,7 @@ export const EXPLAINERS = {
       'fuelroute/static/fuelroute/js/map.js:drawRoad', 'fuelroute/static/fuelroute/js/map.js:showRouteOnly',
       'fuelroute/static/fuelroute/js/main.js:showMapFor',
     ],
-    edge: 'A stop marker sits at its station’s exact place, or at its city center when none was confirmed. A stretch with no truck stop is drawn in red with its length. If the map library cannot load, every step still works without a map.',
+    edge: 'A solid stop marker sits at its station’s exact place, a dashed one at its city center when none was confirmed. A stretch with no truck stop is drawn in red with its length. If the map library cannot load, every step still works without a map.',
     see: ['concept:map-in-the-api-answer', 'concept:stop-card'],
   },
 
@@ -1606,7 +1614,32 @@ export const EXPLAINERS = {
       'fuelroute/services/optimizer.py:_to_stops',
     ],
     edge: 'Hand checks can be a hundredth of a gallon or a cent off: arrivals, gallons and mile markers are rounded, and the card shows the price with three decimals while the cost uses four.',
-    see: ['concept:three-rules', 'concept:fuel-on-departure', 'concept:station-price', 'concept:mile-marker', 'concept:detour-estimate'],
+    see: ['concept:three-rules', 'concept:fuel-on-departure', 'concept:station-price', 'concept:mile-marker', 'concept:detour-estimate', 'concept:stop-position'],
+  },
+
+  'concept:stop-position': {
+    title: 'Where this stop sits on the map',
+    what: 'Whether the stop’s map position is exact (its own truck stop, or the highway exit in its address, found in OpenStreetMap) or only its city center.',
+    source: 'API field fuel_stops[].position: fuel_station, highway_exit or city_center, from how the station was placed when the price file was loaded.',
+    how: 'Every station was matched once, ahead of time, against OpenStreetMap (data/station_coords.csv). A confirmed match gives its exact place; otherwise it keeps its city’s center from public US place lists.',
+    live: (c, arg) => {
+      const stop = stopOf(c, arg);
+      need(stop, POSITION_WORDS[stop?.position]);
+      return [
+        `Stop ${stop.stop}: ${stop.name}, ${stop.city}, ${stop.state}`
+          + `${present(stop.lat) && present(stop.lon) ? `, at ${COORD.format(stop.lat)}, ${COORD.format(stop.lon)}` : ''}: ${POSITION_WORDS[stop.position]}.`,
+        present(stop.distance_from_route_miles) ? `${fmt.miles(stop.distance_from_route_miles)} from the road in a straight line.` : null,
+        present(der(c).exact_stops_text) ? `On this trip: ${der(c).exact_stops_text} at their exact position.` : null,
+      ];
+    },
+    why: 'The price file has only a city and an address, so a city center can be miles from the pumps. Saying which stops are exact shows how far to trust each marker and each detour estimate.',
+    code: [
+      'fuelroute/services/planner.py:_position', 'fuelroute/services/planner.py:_build_stops',
+      'fuelroute/services/station_loader.py:load_stations', 'fuelroute/static/fuelroute/js/format.js:positionOf',
+      'fuelroute/static/fuelroute/js/plan.js:positionLine', 'fuelroute/static/fuelroute/js/map.js:drawRoad',
+    ],
+    edge: 'A stop at its city center has a dashed marker on the map, and its detour estimate can be several miles.',
+    see: ['concept:exact-positions', 'concept:detour-estimate', 'concept:stop-card'],
   },
 
   'concept:detour-estimate': {
@@ -1745,6 +1778,26 @@ export const EXPLAINERS = {
     code: ['fuelroute/static/fuelroute/js/format.js:derive', 'fuelroute/services/optimizer.py:_greedy'],
     edge: 'An arrival of a few thousandths of a gallon rounds to zero and counts as empty.',
     see: ['concept:safety-fuel'],
+  },
+
+  'derived.exact_stops_text': {
+    title: 'Stops at their exact position',
+    what: 'How many of this trip’s stops sit at their exact place on the map, not at their city center.',
+    source: 'Computed in the browser (format.js derive) from the API field fuel_stops[].position.',
+    how: 'Count the stops whose position is fuel_station (its own truck stop in OpenStreetMap) or highway_exit (the exit in its address); the others are city_center.',
+    live: (c) => {
+      const stops = stopsOf(c);
+      need(answer(c), der(c).exact_stops_text);
+      const count = (position) => fmt.int(stops.filter((s) => s.position === position).length);
+      return [
+        `${count('fuel_station')} at their own truck stop + ${count('highway_exit')} at a highway exit = ${der(c).exact_stops_text}.`,
+        `${count('city_center')} at their city center (dashed on the map).`,
+      ];
+    },
+    why: 'The positions were found once, offline, in OpenStreetMap; this line shows how much of that work this trip uses. An exact stop is usually under a mile from the road.',
+    code: ['fuelroute/static/fuelroute/js/format.js:derive', 'fuelroute/services/planner.py:_position'],
+    edge: 'An answer without the position field (an older server) hides this line.',
+    see: ['concept:stop-position', 'concept:exact-positions'],
   },
 
   'route.summary.number_of_stops': {

@@ -892,3 +892,16 @@ def test_identical_concurrent_requests_make_one_routing_call(upstream):
     for thread in threads:
         thread.join()
     assert len(upstream.calls) == 1
+
+
+@pytest.mark.django_db
+def test_each_stop_says_where_its_position_comes_from(client, upstream, stations):
+    """fuel_stops[].position: its own fuel station or the highway exit of its address in
+    OpenStreetMap (data/station_coords.csv), else its city center."""
+    FuelStation.objects.filter(opis_id=1).update(geocode_source="osm_fuel")
+    FuelStation.objects.filter(opis_id=2).update(geocode_source="osm_exit")
+    upstream.respond(OK_ROUTE)
+    stops = get(client).json()["fuel_stops"]
+    expected = {1: "fuel_station", 2: "highway_exit"}
+    assert stops and [s["position"] for s in stops] == [expected.get(s["opis_id"], "city_center") for s in stops]
+    assert {s["position"] for s in stops} == {"fuel_station", "highway_exit", "city_center"}

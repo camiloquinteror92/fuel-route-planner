@@ -7,7 +7,7 @@
 // rotation, a step that shows the map again) until the user pans or zooms; "Whole
 // trip" (bottom left, away from the popups) frames it again.
 
-import { el, fmt } from './format.js';
+import { el, fmt, positionOf } from './format.js';
 
 const USA_CENTER = [39.5, -98.35];
 const USA_ZOOM = 4;
@@ -28,9 +28,11 @@ function reducedMotion() {
 }
 
 function stopPopup(stop, why) {
+  const pos = positionOf(stop);
   return el('div', { class: 'popup' },
     el('p', { class: 'popup-title' }, `Stop ${stop.stop}: `, el('strong', {}, stop.name)),
     el('p', {}, `${stop.city}, ${stop.state} · mile ${fmt.dec1(stop.mile_marker)}`),
+    pos ? el('p', { class: `popup-pos ${pos.exact ? 'is-exact' : 'is-approx'}` }, pos.text) : null,
     el('p', {}, `${fmt.price(stop.price_per_gallon)}/gal · buys ${fmt.gal(stop.gallons)} · ${fmt.money(stop.cost)}`),
     why ? el('p', { class: 'popup-why' }, why) : null,
   );
@@ -41,6 +43,9 @@ export function createMap(container, { onStop, why } = {}) {
   const map = L.map(container, { preferCanvas: true, scrollWheelZoom: false, zoomSnap: 0.5 }).setView(USA_CENTER, USA_ZOOM);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 18,
+    // OpenStreetMap's tile servers refuse requests with no Referer (their usage policy); the
+    // page itself sends none to other sites (Django's same-origin policy), so the tiles say who asks.
+    referrerPolicy: 'strict-origin-when-cross-origin',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · road by <a href="https://project-osrm.org/">OSRM</a>',
   }).addTo(map);
   // Wheel zoom only after the user clicks the map, so the page scrolls normally.
@@ -135,17 +140,19 @@ export function createMap(container, { onStop, why } = {}) {
       marker.addTo(map);
       roadLayers.push(marker);
     }
-    // The numbered stops, built now and shown by showStops().
+    // The numbered stops, built now and shown by showStops(): solid at their exact
+    // position, dashed at their city center (fuel_stops[].position).
     stopsLayer = L.layerGroup();
     for (const s of body.fuel_stops || []) {
+      const approx = positionOf(s)?.exact === false;
       const icon = L.divIcon({
-        className: 'stop-marker',
+        className: approx ? 'stop-marker is-approx' : 'stop-marker',
         html: el('span', {}, String(s.stop)),
         iconSize: [28, 28],
         iconAnchor: [14, 14],
         popupAnchor: [0, -12],
       });
-      const marker = L.marker([s.lat, s.lon], { icon, zIndexOffset: 1000, title: `Stop ${s.stop}: ${s.city}, ${s.state}`, alt: `Stop ${s.stop}` });
+      const marker = L.marker([s.lat, s.lon], { icon, zIndexOffset: 1000, title: `Stop ${s.stop}: ${s.city}, ${s.state}${approx ? ' (city center)' : ''}`, alt: `Stop ${s.stop}` });
       marker.bindPopup(stopPopup(s, why ? why(s, body) : null), POPUP);
       marker.on('click', () => onStop?.(s.stop, 'map'));
       marker.addTo(stopsLayer);

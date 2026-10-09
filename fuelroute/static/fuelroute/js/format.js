@@ -46,6 +46,19 @@ export function plural(count, word, many = `${word}s`) {
   return `${nf(0, 0).format(count)} ${Number(count) === 1 ? word : many}`;
 }
 
+// Where a stop sits on the map, by the API field fuel_stops[].position (planner.py
+// STOP_POSITIONS): exact (its own truck stop, or the highway exit in its address, both
+// matched in OpenStreetMap) or its city center. null for an answer without the field.
+export const POSITIONS = {
+  fuel_station: { exact: true, text: 'Exact position: its own truck stop on OpenStreetMap' },
+  highway_exit: { exact: true, text: 'Exact position: the highway exit in its address (OpenStreetMap)' },
+  city_center: { exact: false, text: 'Approximate position: its city center (no exact match)' },
+};
+
+export function positionOf(stop) {
+  return POSITIONS[stop?.position] || null;
+}
+
 // "a", "a and b", "a, b and c".
 export function joinAnd(items) {
   if (items.length < 2) return items.join('');
@@ -247,6 +260,11 @@ export function derive(state) {
   d.longest_stretch = longestStretch(body);
   d.stops_arriving_empty = stops.filter((s) => s.fuel_on_arrival_gallons === 0).length;
   d.some_arrive_empty = d.stops_arriving_empty > 0 && !d.safety_on;
+  // Where the stops sit on the map: "12 of 19 stops" at their exact position.
+  const exactStops = stops.filter((s) => positionOf(s)?.exact).length;
+  d.has_positions = d.has_stops && stops.every((s) => positionOf(s) !== null);
+  d.exact_stops_text = d.has_positions ? `${nf(0, 0).format(exactStops)} of ${plural(stops.length, 'stop')}` : null;
+  d.some_approx = d.has_positions && exactStops < stops.length;
 
   // Tiny stops: merged ("Skip tiny stops" on), or named when the rules alone make some.
   const merged = summary.tiny_stops_merged || null;

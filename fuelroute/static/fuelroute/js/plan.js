@@ -2,7 +2,7 @@
 // stops, the bill with its checks, and the comparison with a driver who ignores
 // prices. Every number is read from the API answer.
 
-import { el, fmt, joinAnd, mark, plural, replace } from './format.js';
+import { el, fmt, joinAnd, mark, plural, positionOf, replace } from './format.js';
 import { cents, sumCents } from './checks.js';
 
 // The three rules of the algorithm, by the name the API gives them (decision.rule).
@@ -97,10 +97,21 @@ function tag(rule) {
   return el('span', { class: `tag ${TAGS[rule] || ''}` }, RULES[rule] || rule);
 }
 
+// Where the stop sits on the map (fuel_stops[].position), with its own "i"
+// (concept:stop-position); null for an answer without the field.
+function positionLine(s) {
+  const pos = positionOf(s);
+  if (!pos) return null;
+  return el('p', { class: `stop-pos ${pos.exact ? 'is-exact' : 'is-approx'}` },
+    el('span', { class: 'stop-pos-icon', 'aria-hidden': 'true' }, pos.exact ? '📍' : '≈'), ' ', pos.text, ' ',
+    el('span', { dataset: { explain: 'concept:stop-position', explainArg: s.stop } }));
+}
+
 // The stops as cards: where (town and truck stop name), the price, what the truck
 // arrives with and buys, the rule (and "Tiny stop skipped") and why. onSelect(n) when
 // a card is chosen. Each card ends with an "i" (explain.js, concept:stop-card) that
-// redoes its arithmetic with this stop's numbers.
+// redoes its arithmetic with this stop's numbers. Under the button: where the stop
+// sits on the map (positionLine).
 export function renderStopCards(container, body, about, { onSelect } = {}) {
   replace(container, (body.fuel_stops || []).map((s) => {
     const why = whyText(s, body, about);
@@ -118,6 +129,7 @@ export function renderStopCards(container, body, about, { onSelect } = {}) {
     const explainStop = el('span', { dataset: { explain: 'concept:stop-card', explainArg: s.stop } });
     return el('li', { class: 'stop-card', dataset: { stop: s.stop } },
       button,
+      positionLine(s),
       // The card's button is described by the reason only, not by the "i".
       el('p', { class: 'stop-why' },
         why ? el('span', { id: `why-${s.stop}` }, el('strong', {}, 'Why here: '), why) : null, ' ', explainStop));

@@ -151,7 +151,7 @@ Response for New York, NY → Los Angeles, CA (real, trimmed):
   "fuel_stops": [
     {
       "stop": 3, "name": "SHEETZ #639", "city": "Youngstown", "state": "OH", "lat": 41.126835, "lon": -80.767927,
-      "mile_marker": 401.0, "price_per_gallon": 3.059, "fuel_on_arrival_gallons": 0.0, "gallons": 16.5, "cost": 50.47,
+      "mile_marker": 401.0, "position": "fuel_station", "price_per_gallon": 3.059, "fuel_on_arrival_gallons": 0.0, "gallons": 16.5, "cost": 50.47,
       "decision": {"rule": "reach_cheaper", "reaches": {"stop": 4, "mile": 566.0}, "fills_tank": false,
                    "cheaper_station": {"name": "S&G #88", "city": "Toledo", "state": "OH", "mile": 566.0, "price_per_gallon": 3.009}}
     }
@@ -166,6 +166,9 @@ Response for New York, NY → Los Angeles, CA (real, trimmed):
 
 - Money is exact: each `cost` is `gallons × price_per_gallon` rounded to the cent, and the total is the sum of the stops.
 - `decision`: which rule chose the stop (and, with `consolidate=true`, what a merge moved into it).
+- `position`: where the stop's `lat`/`lon` come from: `fuel_station` (its own fuel station in OpenStreetMap),
+  `highway_exit` (the highway exit named in its address, in OpenStreetMap) or `city_center` (no exact match). The page
+  draws city-center stops with a dashed marker.
 - `summary.comparison`: the same trip for a driver who ignores prices: same stations, same gallons, only where they buy changes.
 
 ### Errors

@@ -250,6 +250,15 @@ CANDIDATE_FIELDS = [
     "opis_id", "name", "city", "state", "lat", "lon",
     "mile_marker", "distance_from_route_miles", "price_per_gallon", "stop",
 ]
+# fuel_stops[].position: where the stop's lat/lon come from (FuelStation.geocode_source).
+# Its own fuel station or the highway exit of its address in OpenStreetMap
+# (data/station_coords.csv); any other source is its city center.
+STOP_POSITIONS = {"osm_fuel": "fuel_station", "osm_exit": "highway_exit"}
+CITY_CENTER = "city_center"
+
+
+def _position(geocode_source: str) -> str:
+    return STOP_POSITIONS.get(geocode_source, CITY_CENTER)
 
 
 def _money(value: Decimal) -> Decimal:
@@ -352,7 +361,7 @@ def _plan_trip(
 
     # The route is cached apart (osrm.get_route), keyed by the coordinates only: a
     # changed truck misses this key but hits the route, so it costs no external call.
-    plan_key = f"plan:v7:{version}:{origin.as_param};{destination.as_param};{plan.cache_key()}"
+    plan_key = f"plan:v8:{version}:{origin.as_param};{destination.as_param};{plan.cache_key()}"
     cached_plan = cache.get(plan_key)  # the cache returns a fresh copy (unpickled)
     timer.lap("plan_cache_ms")
     if cached_plan is not None:
@@ -753,6 +762,7 @@ def _build_stops(
                 "price_per_gallon": float(price),
                 "mile_marker": _round(info.mile, 1),
                 "distance_from_route_miles": _round(info.offset_miles, 1),
+                "position": _position(station.geocode_source),
                 # Rounded so that arrival + purchase never shows a tank above full
                 # (15.375 + 47.125 of a 62.5-gal tank: 15.37 + 47.13, not 15.38 + 47.13).
                 "fuel_on_arrival_gallons": max(

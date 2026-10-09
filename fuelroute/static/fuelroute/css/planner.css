@@ -304,6 +304,12 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .stop-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .stop-line { font-size: 0.9rem; font-variant-numeric: tabular-nums; color: #33404f; }
 .stop-why { margin: 0; padding: 0 12px 10px 50px; font-size: 0.9rem; color: #33404f; }
+/* Where the stop sits on the map (fuel_stops[].position): exact, or its city center. */
+.stop-pos { margin: 0; padding: 0 12px 6px 50px; font-size: 0.85rem; overflow-wrap: anywhere; }
+.stop-pos.is-exact { color: var(--ok); }
+.stop-pos.is-approx { color: var(--muted); }
+.stop-pos-icon { display: inline-block; min-width: 1.1em; text-align: center; }
+.position-summary { margin: 4px 0 0; font-size: 0.92rem; color: #33404f; }
 
 /* --- step: cost -------------------------------------------------------------------------- */
 
@@ -418,6 +424,7 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
 .legend-start { background: var(--ok); }
 .legend-finish { background: var(--danger); }
 .legend-stop { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 2px solid #ffffff; box-shadow: 0 0 0 1px #9aa5b1; }
+.legend-stop-approx { background: #ffffff; border: 2px dashed var(--accent); box-shadow: none; }
 .leaflet-container { font: 13px/1.4 var(--font); }
 .map-missing { margin: 0; padding: 24px 16px; color: var(--muted); text-align: center; }
 .map-reframe {
@@ -431,14 +438,20 @@ body.is-loading .step-card:not(#panel-trip):not(#panel-truck) { opacity: 0.6; tr
   background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; border: 2px solid #fff;
   box-shadow: 0 1px 4px rgb(0 0 0 / 35%);
 }
+/* A stop at its city center (no exact match): light fill, dashed outline. */
+.stop-marker.is-approx { background: #ffffff; color: var(--accent-strong); border: 2px dashed var(--accent); }
 .stop-marker.is-selected { box-shadow: 0 0 0 4px var(--focus), 0 1px 4px rgb(0 0 0 / 35%); }
 .stop-marker.is-current { background: var(--trail); animation: pulse 0.9s ease-out infinite; }
 .stop-marker.is-visited { background: var(--ok); }
+.stop-marker.is-approx.is-current, .stop-marker.is-approx.is-visited { color: #fff; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgb(240 140 0 / 70%); } 100% { box-shadow: 0 0 0 16px rgb(240 140 0 / 0%); } }
 .gap-label { font-weight: 700; color: var(--danger); }
 .popup { max-width: 280px; }
 .popup p { margin: 0 0 4px; }
 .popup-title { font-size: 0.92rem; }
+.popup-pos { font-size: 0.82rem; }
+.popup-pos.is-exact { color: var(--ok); }
+.popup-pos.is-approx { color: var(--muted); }
 .popup-why { background: var(--surface-2); border-left: 3px solid var(--accent); padding: 4px 8px; font-size: 0.82rem; }
 
 .player { background: var(--surface); border-top: 1px solid var(--line); padding: 10px 12px; display: grid; gap: 8px; }

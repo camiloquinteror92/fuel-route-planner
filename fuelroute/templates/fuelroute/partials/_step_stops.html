@@ -3,7 +3,8 @@
   made it and why ("Why here", built by static/fuelroute/js/plan.js::whyText from the
   answer's decision block). Choosing a stop (or "Play" passing by it) lights up the
   stop, its marker and the rule that applied. With "Skip tiny stops" on (a Truck
-  setting, consolidate=true) a box says what merging changed on this trip.
+  setting, consolidate=true) a box says what merging changed on this trip. Over the
+  stops: how many sit at their exact position (fuel_stops[].position).
 {% endcomment %}
 <section id="panel-stops" class="step-card" aria-labelledby="stops-title" tabindex="-1" hidden>
   <h2 id="stops-title" tabindex="-1">Where to buy fuel</h2>
@@ -50,6 +51,10 @@
     <p class="play-hint">Press <strong>Play the trip</strong> under the map to watch the tank empty and refill along the road. Choose a stop to see
       it on the map. <span data-explain="concept:player"></span></p>
     <p id="play-now" class="play-now" aria-hidden="true" hidden></p>
+
+    <p class="position-summary" data-live-if="derived.has_positions"><span aria-hidden="true">📍</span>
+      <span data-live="derived.exact_stops_text">—</span> at their exact position on the map (OpenStreetMap)<span
+      data-live-if="derived.some_approx">; the others at their city center, dashed on the map</span>.</p>
 
     <ol id="stop-cards" class="stop-cards" aria-label="Fuel stops"></ol>
 

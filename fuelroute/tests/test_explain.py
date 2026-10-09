@@ -102,19 +102,20 @@ def test_every_explainer_can_be_opened_from_the_page(client):
 def sample_answer() -> dict:
     """A 700-mile trip at 10 mpg (50-gal tank): leaves with 5 gal, three stops (one per rule),
     arrives with 5 gal, so it buys the 70 gal it burns. The stops are 0.4, 1.2 and 0.0 miles
-    from the road (a straight line, one way)."""
+    from the road (a straight line, one way), at their own fuel station, at a highway exit
+    and at their city center."""
     def decision(rule, **fields):
         return {"rule": rule, "cheaper_station": None, "consolidated": False, "reaches": None, **fields}
 
     stops = [
         {"stop": 1, "name": "STOP 1", "city": "A", "state": "TX", "mile_marker": 40.0, "price_per_gallon": 3.099,
-         "distance_from_route_miles": 0.4, "fuel_on_arrival_gallons": 1.0, "gallons": 15.48, "cost": 47.97,
+         "distance_from_route_miles": 0.4, "position": "fuel_station", "fuel_on_arrival_gallons": 1.0, "gallons": 15.48, "cost": 47.97,
          "decision": decision("reach_cheaper", reaches={"stop": 2, "mile": 204.8}, cheaper_station={
              "name": "STOP 2", "city": "C", "state": "TX", "mile": 204.8, "price_per_gallon": 2.899})},
         {"stop": 2, "name": "STOP 2", "city": "C", "state": "TX", "mile_marker": 204.8, "price_per_gallon": 2.899,
-         "distance_from_route_miles": 1.2, "fuel_on_arrival_gallons": 0.0, "gallons": 50.0, "cost": 144.95, "decision": decision("fill_up")},
+         "distance_from_route_miles": 1.2, "position": "highway_exit", "fuel_on_arrival_gallons": 0.0, "gallons": 50.0, "cost": 144.95, "decision": decision("fill_up")},
         {"stop": 3, "name": "STOP 3", "city": "D", "state": "NM", "mile_marker": 650.0, "price_per_gallon": 3.2,
-         "distance_from_route_miles": 0.0, "fuel_on_arrival_gallons": 5.48, "gallons": 4.52, "cost": 14.46, "decision": decision("finish")},
+         "distance_from_route_miles": 0.0, "position": "city_center", "fuel_on_arrival_gallons": 5.48, "gallons": 4.52, "cost": 14.46, "decision": decision("finish")},
     ]
     body = plan(
         route__distance_miles=700.0, fuel_stops=stops,
@@ -342,8 +343,9 @@ def test_detour_estimates_print_this_trips_numbers():
     assert out["estimate"] == [trip, "Farthest from the road: stop 2, C, TX. Detour: ≈ 1.2 mi off the road → about"
                                " 2.4 mi there and back ≈ 0.24 gal at this truck’s 10 mpg ≈ $0.70 at this stop’s price,"
                                " not in the total (straight-line estimate)."]
-    # Exact positions: this trip's stops under a mile from the road first, then the file's counts.
+    # Exact positions: this trip's exact stops and those under a mile from the road first, then the file's counts.
     assert out["exact"] == [
+        "On this trip: 2 of 3 stops at their exact position.",
         "Stops less than a mile from the road on this trip (straight line): 2 of 3.",
         "In the whole price file: 3,602 of 6,626 US truck stops at their exact place; the others at their city center,"
         " or left out.",
@@ -558,3 +560,31 @@ def test_live_lines_follow_the_code_in_the_cases_a_review_found():
     # Never "1 stops".
     assert out["oneStop"][0].startswith("1 stop in fuel_stops.")
     assert "1 truck stop near the road, 1 stop." in out["pipeline"][0]
+
+
+@needs_node
+def test_stop_positions_are_counted_and_explained():
+    """fuel_stops[].position: the stop card's line, the count over the stops and its card."""
+    no_field = sample_answer()
+    for stop in no_field["fuel_stops"]:
+        del stop["position"]
+    out = run_js(context_js() + f"""
+        import {{ explain }} from 'JS/explain.js';
+        import {{ positionOf }} from 'JS/format.js';
+        const old = derive({{ route: {{ ok: true, body: {json.dumps(no_field)} }}, about, params: {{ settings: {{}} }} }});
+        console.log(JSON.stringify({{
+            text: derived.exact_stops_text, approx: derived.some_approx, shown: derived.has_positions,
+            oldShown: old.has_positions, oldText: old.exact_stops_text,
+            lines: body.fuel_stops.map((s) => positionOf(s)),
+            count: explain('derived.exact_stops_text', ctx).live,
+            card: explain('concept:stop-position', ctx, '3').live,
+        }}));
+    """)
+    assert (out["text"], out["approx"], out["shown"]) == ("2 of 3 stops", True, True)
+    # An answer without the field (an older server) hides the line.
+    assert (out["oldShown"], out["oldText"]) == (False, None)
+    assert [line["exact"] for line in out["lines"]] == [True, True, False]
+    assert out["count"] == ["1 at their own truck stop + 1 at a highway exit = 2 of 3 stops.",
+                            "1 at their city center (dashed on the map)."]
+    assert out["card"][0] == "Stop 3: STOP 3, D, NM: its city center (no exact match in OpenStreetMap)."
+    assert out["card"][-1] == "On this trip: 2 of 3 stops at their exact position."
